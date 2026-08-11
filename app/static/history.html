@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Previous Runs · OCI Benchmark Lab</title>
+    <link rel="stylesheet" href="/static/styles.css?v=8">
+</head>
+
+<body>
+    <header>
+        <div class="mark">OCI</div>
+        <div><strong>Compute Benchmark Lab</strong><small>Traditional and LLM Benchmarks</small></div>
+        <span class="local">Saved reports on this computer</span>
+        <a class="header-link active" href="/history" aria-current="page">Previous runs</a>
+        <a class="header-link" href="/">New run</a>
+    </header>
+    <main class="history-main">
+        <div class="history-toolbar">
+            <div class="intro">
+                <p class="eyebrow">LOCAL REPORT ARCHIVE</p>
+                <h1>Previous benchmark runs.</h1>
+                <p id="historySummary">Loading saved reports…</p>
+            </div>
+            <a class="button" href="/">Create a new benchmark</a>
+        </div>
+        <section id="runList" class="run-list" aria-live="polite"></section>
+    </main>
+    <script src="/static/history.js?v=1"></script>
+</body>
+
+</html>

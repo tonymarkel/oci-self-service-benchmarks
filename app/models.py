@@ -1,6 +1,127 @@
 from pydantic import BaseModel, Field, model_validator
 from typing import Literal
 
+
+LEGACY_SYSBENCH_WORKLOADS = {
+    'sysbench_cpu': 'cpu',
+    'sysbench_memory': 'memory',
+    'sysbench_fileio': 'fileio',
+}
+SYSBENCH_WORKLOAD_ORDER = ('cpu', 'memory', 'fileio')
+LEGACY_IPERF3_PROTOCOLS = {
+    'iperf_tcp': 'tcp',
+    'iperf_udp': 'udp',
+    'iperf_sctp': 'sctp',
+}
+IPERF3_PROTOCOL_ORDER = ('tcp', 'udp', 'sctp')
+LEGACY_BASELINE_COMPONENTS = ('sysbench', 'stream', 'fio')
+
+
+def canonicalize_baseline_plan(values):
+    if not isinstance(values, dict):
+        return values
+    benchmarks = list(values.get('benchmarks') or [])
+    if 'baseline' not in benchmarks:
+        return values
+
+    migrated = dict(values)
+    canonical_benchmarks = []
+    for benchmark in benchmarks:
+        replacements = (
+            LEGACY_BASELINE_COMPONENTS
+            if benchmark == 'baseline'
+            else (benchmark,)
+        )
+        for replacement in replacements:
+            if replacement not in canonical_benchmarks:
+                canonical_benchmarks.append(replacement)
+    migrated['benchmarks'] = canonical_benchmarks
+
+    options = dict(values.get('sysbench') or {})
+    selected = set(options.get('workloads') or [])
+    selected.update(('cpu', 'memory'))
+    options['workloads'] = [
+        workload for workload in SYSBENCH_WORKLOAD_ORDER
+        if workload in selected
+    ]
+    migrated['sysbench'] = options
+    return migrated
+
+
+def canonicalize_sysbench_plan(values):
+    if not isinstance(values, dict):
+        return values
+    benchmarks = list(values.get('benchmarks') or [])
+    legacy = {
+        LEGACY_SYSBENCH_WORKLOADS[item]
+        for item in benchmarks
+        if item in LEGACY_SYSBENCH_WORKLOADS
+    }
+    if not legacy:
+        return values
+
+    migrated = dict(values)
+    canonical_benchmarks = []
+    sysbench_added = False
+    for benchmark in benchmarks:
+        if benchmark in LEGACY_SYSBENCH_WORKLOADS or benchmark == 'sysbench':
+            if not sysbench_added:
+                canonical_benchmarks.append('sysbench')
+                sysbench_added = True
+            continue
+        canonical_benchmarks.append(benchmark)
+    migrated['benchmarks'] = canonical_benchmarks
+
+    options = dict(values.get('sysbench') or {})
+    selected = set(options.get('workloads') or []) | legacy
+    options['workloads'] = [
+        workload for workload in SYSBENCH_WORKLOAD_ORDER
+        if workload in selected
+    ]
+    migrated['sysbench'] = options
+    return migrated
+
+
+def canonicalize_iperf3_plan(values):
+    if not isinstance(values, dict):
+        return values
+    benchmarks = list(values.get('benchmarks') or [])
+    legacy = {
+        LEGACY_IPERF3_PROTOCOLS[item]
+        for item in benchmarks
+        if item in LEGACY_IPERF3_PROTOCOLS
+    }
+    if not legacy:
+        return values
+
+    migrated = dict(values)
+    canonical_benchmarks = []
+    iperf3_added = False
+    for benchmark in benchmarks:
+        if benchmark in LEGACY_IPERF3_PROTOCOLS or benchmark == 'iperf3':
+            if not iperf3_added:
+                canonical_benchmarks.append('iperf3')
+                iperf3_added = True
+            continue
+        canonical_benchmarks.append(benchmark)
+    migrated['benchmarks'] = canonical_benchmarks
+
+    options = dict(values.get('iperf3') or {})
+    selected = set(options.get('protocols') or []) | legacy
+    options['protocols'] = [
+        protocol for protocol in IPERF3_PROTOCOL_ORDER
+        if protocol in selected
+    ]
+    migrated['iperf3'] = options
+    return migrated
+
+
+def canonicalize_benchmark_plan(values):
+    values = canonicalize_baseline_plan(values)
+    values = canonicalize_sysbench_plan(values)
+    return canonicalize_iperf3_plan(values)
+
+
 class SecurityOptions(BaseModel):
     mode: Literal['none', 'shielded', 'confidential'] = 'none'
     secure_boot: bool = False
@@ -29,6 +150,67 @@ class DeathStarBenchOptions(BaseModel):
     request_rate: int = Field(100, ge=1, le=100000)
 
 
+class ApacheBenchOptions(BaseModel):
+    workloads: list[Literal['new_connections', 'keep_alive']] = Field(
+        default_factory=lambda: ['new_connections', 'keep_alive']
+    )
+    request_count: int = Field(500000, ge=1, le=100000000)
+    concurrency: int = Field(100, ge=1, le=10000)
+    response_size_kib: int = Field(64, ge=1, le=1024)
+    warmup_requests: int = Field(10000, ge=0, le=10000000)
+    trials: int = Field(3, ge=1, le=10)
+
+    @model_validator(mode='after')
+    def validate_options(self):
+        if len(self.workloads) != len(set(self.workloads)):
+            raise ValueError('ApacheBench connection modes must be unique.')
+        if self.concurrency > self.request_count:
+            raise ValueError(
+                'ApacheBench concurrency cannot exceed the measured request '
+                'count.'
+            )
+        return self
+
+
+class SysbenchOptions(BaseModel):
+    workloads: list[Literal['cpu', 'memory', 'fileio']] = Field(
+        default_factory=lambda: ['cpu']
+    )
+
+    @model_validator(mode='after')
+    def validate_unique_workloads(self):
+        if len(self.workloads) != len(set(self.workloads)):
+            raise ValueError('Sysbench workloads must be unique.')
+        return self
+
+
+class Iperf3Options(BaseModel):
+    protocols: list[Literal['tcp', 'udp', 'sctp']] = Field(
+        default_factory=lambda: ['tcp']
+    )
+
+    @model_validator(mode='after')
+    def validate_unique_protocols(self):
+        if len(self.protocols) != len(set(self.protocols)):
+            raise ValueError('iperf3 protocols must be unique.')
+        return self
+
+
+class PhoronixOptions(BaseModel):
+    profiles: list[Literal[
+        'compress_7zip',
+        'openssl',
+        'build_linux_kernel',
+        'tinymembench',
+    ]] = Field(default_factory=lambda: ['compress_7zip'])
+
+    @model_validator(mode='after')
+    def validate_unique_profiles(self):
+        if len(self.profiles) != len(set(self.profiles)):
+            raise ValueError('Phoronix profiles must be unique.')
+        return self
+
+
 class BenchmarkPlan(BaseModel):
     region: str
     compartment_id: str | None = None
@@ -46,9 +228,20 @@ class BenchmarkPlan(BaseModel):
     deathstarbench: DeathStarBenchOptions = Field(
         default_factory=DeathStarBenchOptions
     )
+    apachebench: ApacheBenchOptions = Field(
+        default_factory=ApacheBenchOptions
+    )
+    sysbench: SysbenchOptions = Field(default_factory=SysbenchOptions)
+    iperf3: Iperf3Options = Field(default_factory=Iperf3Options)
+    phoronix: PhoronixOptions = Field(default_factory=PhoronixOptions)
     destroy_after_completion: bool = True
     benchmarks: list[str] = Field(default_factory=list)
     llm_benchmarks: list[str] = Field(default_factory=list)
+
+    @model_validator(mode='before')
+    @classmethod
+    def migrate_legacy_benchmark_options(cls, values):
+        return canonicalize_benchmark_plan(values)
 
     @model_validator(mode='after')
     def validate_plan(self):
@@ -58,6 +251,27 @@ class BenchmarkPlan(BaseModel):
             raise ValueError('NVMe data volume attachment is available only for bare metal shapes.')
         if self.security.mode != 'shielded' and any([self.security.secure_boot, self.security.measured_boot, self.security.trusted_platform_module]):
             raise ValueError('Shielded options require Shielded security mode.')
+        if 'sysbench' in self.benchmarks and not self.sysbench.workloads:
+            raise ValueError('Select at least one Sysbench workload.')
+        if 'iperf3' in self.benchmarks and not self.iperf3.protocols:
+            raise ValueError('Select at least one iperf3 protocol.')
+        if 'phoronix' in self.benchmarks and not self.phoronix.profiles:
+            raise ValueError('Select at least one Phoronix profile.')
+        if 'apachebench' in self.benchmarks and not self.apachebench.workloads:
+            raise ValueError(
+                'Select at least one ApacheBench connection mode.'
+            )
+        sysbench_fileio_selected = (
+            'sysbench_fileio' in self.benchmarks
+            or (
+                'sysbench' in self.benchmarks
+                and 'fileio' in self.sysbench.workloads
+            )
+        )
+        if sysbench_fileio_selected and not self.storage.additional_volume:
+            raise ValueError(
+                'Sysbench file I/O requires the additional /data volume.'
+            )
         if 'deathstarbench' in self.benchmarks:
             if self.deathstarbench.connections < self.deathstarbench.threads:
                 raise ValueError(

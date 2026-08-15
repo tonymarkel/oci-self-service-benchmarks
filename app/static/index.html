@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>OCI Benchmark Lab</title>
-    <link rel="stylesheet" href="/static/styles.css?v=9">
+    <link rel="stylesheet" href="/static/styles.css?v=11">
 </head>
 
 <body>
@@ -106,7 +106,30 @@
                     <p class="hint">Network tests use a temporary private peer VM so results measure OCI VCN traffic—not
                         the public Internet.</p>
                 </fieldset>
-                <fieldset id="deathstarSettings" class="deathstar-settings" hidden>
+                <fieldset id="sysbenchSettings" class="benchmark-settings sysbench-settings" hidden>
+                    <legend>Sysbench settings</legend>
+                    <p class="hint">Choose one or more Sysbench workloads. Each selection appears as a separate result
+                        in the final report.</p>
+                    <div id="sysbenchWorkloads" class="checks"></div>
+                    <p class="hint">File I/O runs on /data and requires the additional data volume.</p>
+                </fieldset>
+                <fieldset id="iperf3Settings" class="benchmark-settings iperf3-settings" hidden>
+                    <legend>iperf3 settings</legend>
+                    <p class="hint">Choose one or more network protocols. Each selection appears as a separate result
+                        in the final report.</p>
+                    <div id="iperf3Protocols" class="checks"></div>
+                    <p class="hint">All tests use a private peer VM. iperf3 uses TCP for its control connection and
+                        the selected protocol for benchmark traffic.</p>
+                </fieldset>
+                <fieldset id="phoronixSettings" class="benchmark-settings phoronix-settings" hidden>
+                    <legend>Phoronix settings</legend>
+                    <p class="hint">Choose one or more curated OpenBenchmarking profiles. Each profile runs with a
+                        fixed configuration and appears as a separate result in the final report.</p>
+                    <div id="phoronixProfiles" class="checks"></div>
+                    <p class="hint">Profiles are pinned and limited to tests validated for both x86_64 and AArch64
+                        Oracle Linux instances.</p>
+                </fieldset>
+                <fieldset id="deathstarSettings" class="benchmark-settings deathstar-settings" hidden>
                     <legend>DeathStarBench settings</legend>
                     <p class="hint">The selected microservices workload runs with native Podman and podman-compose.
                         A separate fixed-size OCI VM generates load against the benchmark VM's private address.</p>
@@ -126,6 +149,27 @@
                     </div>
                     <p class="hint">Connections and request rate must each be at least—and evenly divisible by—the
                         number of worker threads. The benchmark shape requires at least 16 GB of memory.</p>
+                </fieldset>
+                <fieldset id="apachebenchSettings" class="benchmark-settings apachebench-settings" hidden>
+                    <legend>ApacheBench settings</legend>
+                    <p class="hint">Choose one or both HTTP connection modes. Each mode is measured independently
+                        and appears as a separate result in the final report.</p>
+                    <div id="apachebenchWorkloads" class="checks"></div>
+                    <div class="grid">
+                        <label>Requests per trial<input id="apachebenchRequestCount" type="number" min="1"
+                                max="100000000" step="1" value="500000" required></label>
+                        <label>Concurrency<input id="apachebenchConcurrency" type="number" min="1" max="10000"
+                                step="1" value="100" required></label>
+                        <label>Response size (KiB)<input id="apachebenchResponseSize" type="number" min="1"
+                                max="1024" step="1" value="64" required></label>
+                        <label>Warm-up requests<input id="apachebenchWarmupRequests" type="number" min="0"
+                                max="10000000" step="1" value="10000" required></label>
+                        <label>Measured trials<input id="apachebenchTrials" type="number" min="1" max="10"
+                                step="1" value="3" required></label>
+                    </div>
+                    <p class="hint">The benchmark VM serves fixed-size responses while a separate VM runs Apache
+                        HTTP Server Benchmarking Tool traffic over the private VCN. Concurrency cannot exceed the
+                        measured request count.</p>
                 </fieldset>
                 <fieldset>
                     <legend>LLM benchmarks — CPU only</legend>
@@ -152,7 +196,7 @@
             <iframe id="reportFrame" class="report-frame" title="Benchmark results"></iframe>
         </section>
     </main>
-    <script src="/static/app.js?v=12"></script>
+    <script src="/static/app.js?v=17"></script>
 </body>
 
 </html>

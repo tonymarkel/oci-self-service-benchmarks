@@ -2,7 +2,11 @@ let jobId;
 let poller;
 let shapes = [];
 let sshDefaults = {configured: false};
+let sysbenchWorkloads = [];
+let iperf3Protocols = [];
+let phoronixProfiles = [];
 let deathstarWorkloads = [];
+let apachebenchWorkloads = [];
 let currentJobPrivateKey = '';
 
 const terminalStatuses = ['complete', 'destroyed', 'failed', 'reported', 'cleanup_failed'];
@@ -13,6 +17,27 @@ const deathstarDefaults = {
     threads: 4,
     connections: 64,
     request_rate: 100,
+};
+const sysbenchDefaults = {workloads: ['cpu']};
+const iperf3Defaults = {protocols: ['tcp']};
+const phoronixDefaults = {profiles: ['compress_7zip']};
+const apachebenchDefaults = {
+    workloads: ['new_connections', 'keep_alive'],
+    request_count: 500000,
+    concurrency: 100,
+    response_size_kib: 64,
+    warmup_requests: 10000,
+    trials: 3,
+};
+const legacySysbenchWorkloads = {
+    sysbench_cpu: 'cpu',
+    sysbench_memory: 'memory',
+    sysbench_fileio: 'fileio',
+};
+const legacyIperf3Protocols = {
+    iperf_tcp: 'tcp',
+    iperf_udp: 'udp',
+    iperf_sctp: 'sctp',
 };
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
@@ -75,6 +100,79 @@ function applySshDefaults() {
     }
 }
 
+function setSysbenchValues(options = sysbenchDefaults) {
+    const workloads = Array.isArray(options?.workloads)
+        ? options.workloads
+        : sysbenchDefaults.workloads;
+    $$('#sysbenchWorkloads input[data-kind="sysbench-workload"]').forEach(input => {
+        input.checked = workloads.includes(input.value);
+    });
+}
+
+function toggleSysbenchSettings() {
+    const checkbox = $('input[data-kind="bench"][value="sysbench"]');
+    const selected = Boolean(checkbox?.checked);
+    $('#sysbenchSettings').hidden = !selected;
+    $$('#sysbenchSettings input').forEach(field => {
+        field.disabled = !selected;
+    });
+}
+
+function setIperf3Values(options = iperf3Defaults) {
+    const protocols = Array.isArray(options?.protocols)
+        ? options.protocols
+        : iperf3Defaults.protocols;
+    $$('#iperf3Protocols input[data-kind="iperf3-protocol"]').forEach(input => {
+        input.checked = protocols.includes(input.value);
+    });
+}
+
+function toggleIperf3Settings() {
+    const checkbox = $('input[data-kind="bench"][value="iperf3"]');
+    const selected = Boolean(checkbox?.checked);
+    $('#iperf3Settings').hidden = !selected;
+    $$('#iperf3Settings input').forEach(field => {
+        field.disabled = !selected;
+    });
+}
+
+function setPhoronixValues(options = phoronixDefaults) {
+    const profiles = Array.isArray(options?.profiles)
+        ? options.profiles
+        : phoronixDefaults.profiles;
+    $$('#phoronixProfiles input[data-kind="phoronix-profile"]').forEach(input => {
+        input.checked = profiles.includes(input.value);
+    });
+}
+
+function togglePhoronixSettings() {
+    const checkbox = $('input[data-kind="bench"][value="phoronix"]');
+    const selected = Boolean(checkbox?.checked);
+    $('#phoronixSettings').hidden = !selected;
+    $$('#phoronixSettings input').forEach(field => {
+        field.disabled = !selected;
+    });
+}
+
+function phoronixProfileMetadata(profile) {
+    const architectures = Array.isArray(profile.architectures)
+        ? profile.architectures.join(' / ')
+        : profile.architectures;
+    const direction = String(profile.direction || '').replaceAll('_', ' ');
+    return [
+        profile.category,
+        architectures,
+        profile.estimated_runtime_minutes
+            ? `~${profile.estimated_runtime_minutes} min`
+            : null,
+        profile.unit,
+        direction
+            ? `${direction.charAt(0).toUpperCase()}${direction.slice(1)}`
+            : null,
+        profile.profile,
+    ].filter(Boolean).map(escape).join(' · ');
+}
+
 function updateDeathstarWorkloadDescription() {
     const workload = deathstarWorkloads.find(item => item.id === $('#deathstarWorkload').value);
     $('#deathstarWorkloadDescription').textContent = workload?.description || '';
@@ -102,6 +200,29 @@ function toggleDeathstarSettings() {
     });
 }
 
+function setApachebenchValues(options = apachebenchDefaults) {
+    const workloads = Array.isArray(options?.workloads)
+        ? options.workloads
+        : apachebenchDefaults.workloads;
+    $$('#apachebenchWorkloads input[data-kind="apachebench-workload"]').forEach(input => {
+        input.checked = workloads.includes(input.value);
+    });
+    $('#apachebenchRequestCount').value = options.request_count ?? apachebenchDefaults.request_count;
+    $('#apachebenchConcurrency').value = options.concurrency ?? apachebenchDefaults.concurrency;
+    $('#apachebenchResponseSize').value = options.response_size_kib ?? apachebenchDefaults.response_size_kib;
+    $('#apachebenchWarmupRequests').value = options.warmup_requests ?? apachebenchDefaults.warmup_requests;
+    $('#apachebenchTrials').value = options.trials ?? apachebenchDefaults.trials;
+}
+
+function toggleApachebenchSettings() {
+    const checkbox = $('input[data-kind="bench"][value="apachebench"]');
+    const selected = Boolean(checkbox?.checked);
+    $('#apachebenchSettings').hidden = !selected;
+    $$('#apachebenchSettings input').forEach(field => {
+        field.disabled = !selected;
+    });
+}
+
 function renderCatalog(catalog) {
     $('#benchmarks').innerHTML = catalog.benchmarks.map(benchmark =>
         `<label><input type="checkbox" value="${benchmark.id}" data-kind="bench"> ` +
@@ -112,15 +233,60 @@ function renderCatalog(catalog) {
         `<span>${benchmark.name}<small>${benchmark.description} · ${benchmark.license}</small></span></label>`,
     ).join('');
 
+    sysbenchWorkloads = catalog.sysbench_workloads || [];
+    $('#sysbenchWorkloads').innerHTML = sysbenchWorkloads.map(workload =>
+        `<label><input type="checkbox" value="${workload.id}" ` +
+        `data-kind="sysbench-workload"> ` +
+        `<span>${workload.name}<small>${workload.description}</small></span></label>`,
+    ).join('');
+    setSysbenchValues();
+
+    iperf3Protocols = catalog.iperf3_protocols || [];
+    $('#iperf3Protocols').innerHTML = iperf3Protocols.map(protocol =>
+        `<label><input type="checkbox" value="${protocol.id}" ` +
+        `data-kind="iperf3-protocol"> ` +
+        `<span>${protocol.name}<small>${protocol.description}</small></span></label>`,
+    ).join('');
+    setIperf3Values();
+
+    phoronixProfiles = catalog.phoronix_profiles || [];
+    $('#phoronixProfiles').innerHTML = phoronixProfiles.map(profile =>
+        `<label><input type="checkbox" value="${escape(profile.id)}" ` +
+        `data-kind="phoronix-profile"> ` +
+        `<span>${escape(profile.name)}<small>${escape(profile.description)}</small>` +
+        `<small>${phoronixProfileMetadata(profile)}</small></span></label>`,
+    ).join('');
+    setPhoronixValues();
+
+    apachebenchWorkloads = catalog.apachebench_workloads || [];
+    $('#apachebenchWorkloads').innerHTML = apachebenchWorkloads.map(workload =>
+        `<label><input type="checkbox" value="${escape(workload.id)}" ` +
+        `data-kind="apachebench-workload"> ` +
+        `<span>${escape(workload.name)}<small>${escape(workload.description)}</small></span></label>`,
+    ).join('');
+    setApachebenchValues();
+
     deathstarWorkloads = catalog.deathstarbench_workloads || [];
     $('#deathstarWorkload').innerHTML = deathstarWorkloads.map(workload =>
         `<option value="${workload.id}">${workload.name}</option>`,
     ).join('');
     setDeathstarValues();
 
+    const sysbenchCheckbox = $('input[data-kind="bench"][value="sysbench"]');
+    if (sysbenchCheckbox) sysbenchCheckbox.addEventListener('change', toggleSysbenchSettings);
+    const iperf3Checkbox = $('input[data-kind="bench"][value="iperf3"]');
+    if (iperf3Checkbox) iperf3Checkbox.addEventListener('change', toggleIperf3Settings);
+    const phoronixCheckbox = $('input[data-kind="bench"][value="phoronix"]');
+    if (phoronixCheckbox) phoronixCheckbox.addEventListener('change', togglePhoronixSettings);
+    const apachebenchCheckbox = $('input[data-kind="bench"][value="apachebench"]');
+    if (apachebenchCheckbox) apachebenchCheckbox.addEventListener('change', toggleApachebenchSettings);
     const deathstarCheckbox = $('input[data-kind="bench"][value="deathstarbench"]');
     if (deathstarCheckbox) deathstarCheckbox.addEventListener('change', toggleDeathstarSettings);
     $('#deathstarWorkload').addEventListener('change', updateDeathstarWorkloadDescription);
+    toggleSysbenchSettings();
+    toggleIperf3Settings();
+    togglePhoronixSettings();
+    toggleApachebenchSettings();
     toggleDeathstarSettings();
 }
 
@@ -199,11 +365,153 @@ function deathstarOptions(selected) {
     };
 }
 
+function sysbenchOptions(selected) {
+    if (!selected) return {...sysbenchDefaults, workloads: [...sysbenchDefaults.workloads]};
+    return {
+        workloads: $$('input[data-kind="sysbench-workload"]:checked')
+            .map(input => input.value),
+    };
+}
+
+function sysbenchOptionsFromPlan(plan) {
+    const benchmarks = plan.benchmarks || [];
+    const legacyWorkloads = benchmarks
+        .map(benchmark => legacySysbenchWorkloads[benchmark])
+        .filter(Boolean);
+    const selected = benchmarks.includes('sysbench') || legacyWorkloads.length;
+    if (!selected) {
+        return {...sysbenchDefaults, workloads: [...sysbenchDefaults.workloads]};
+    }
+    return {
+        workloads: [...new Set([
+            ...(plan.sysbench?.workloads || []),
+            ...legacyWorkloads,
+        ])],
+    };
+}
+
+function iperf3Options(selected) {
+    if (!selected) return {...iperf3Defaults, protocols: [...iperf3Defaults.protocols]};
+    return {
+        protocols: $$('input[data-kind="iperf3-protocol"]:checked')
+            .map(input => input.value),
+    };
+}
+
+function iperf3OptionsFromPlan(plan) {
+    const benchmarks = plan.benchmarks || [];
+    const legacyProtocols = benchmarks
+        .map(benchmark => legacyIperf3Protocols[benchmark])
+        .filter(Boolean);
+    const selected = benchmarks.includes('iperf3') || legacyProtocols.length;
+    if (!selected) {
+        return {...iperf3Defaults, protocols: [...iperf3Defaults.protocols]};
+    }
+    const savedProtocols = Array.isArray(plan.iperf3?.protocols)
+        ? plan.iperf3.protocols
+        : [];
+    const protocols = [...new Set([...savedProtocols, ...legacyProtocols])];
+    return {
+        protocols: protocols.length ? protocols : [...iperf3Defaults.protocols],
+    };
+}
+
+function phoronixOptions(selected) {
+    if (!selected) return {...phoronixDefaults, profiles: [...phoronixDefaults.profiles]};
+    return {
+        profiles: $$('input[data-kind="phoronix-profile"]:checked')
+            .map(input => input.value),
+    };
+}
+
+function phoronixOptionsFromPlan(plan) {
+    if (!(plan.benchmarks || []).includes('phoronix')) {
+        return {...phoronixDefaults, profiles: [...phoronixDefaults.profiles]};
+    }
+    const profiles = Array.isArray(plan.phoronix?.profiles)
+        ? plan.phoronix.profiles
+        : [];
+    return {
+        profiles: profiles.length ? profiles : [...phoronixDefaults.profiles],
+    };
+}
+
+function apachebenchOptions(selected) {
+    if (!selected) {
+        return {
+            ...apachebenchDefaults,
+            workloads: [...apachebenchDefaults.workloads],
+        };
+    }
+    return {
+        workloads: $$('input[data-kind="apachebench-workload"]:checked')
+            .map(input => input.value),
+        request_count: Number($('#apachebenchRequestCount').value),
+        concurrency: Number($('#apachebenchConcurrency').value),
+        response_size_kib: Number($('#apachebenchResponseSize').value),
+        warmup_requests: Number($('#apachebenchWarmupRequests').value),
+        trials: Number($('#apachebenchTrials').value),
+    };
+}
+
+function apachebenchOptionsFromPlan(plan) {
+    if (!(plan.benchmarks || []).includes('apachebench')) {
+        return {
+            ...apachebenchDefaults,
+            workloads: [...apachebenchDefaults.workloads],
+        };
+    }
+    const saved = plan.apachebench || {};
+    const workloads = Array.isArray(saved.workloads) ? saved.workloads : [];
+    return {
+        ...apachebenchDefaults,
+        ...saved,
+        workloads: workloads.length
+            ? workloads
+            : [...apachebenchDefaults.workloads],
+    };
+}
+
 $('#planForm').addEventListener('submit', async event => {
     event.preventDefault();
     const selected = kind => $$(`input[data-kind=${kind}]:checked`).map(input => input.value);
     const selectedBenchmarks = selected('bench');
+    const sysbench = sysbenchOptions(selectedBenchmarks.includes('sysbench'));
+    const iperf3 = iperf3Options(selectedBenchmarks.includes('iperf3'));
+    const phoronix = phoronixOptions(selectedBenchmarks.includes('phoronix'));
+    const apachebench = apachebenchOptions(selectedBenchmarks.includes('apachebench'));
     const deathstarbench = deathstarOptions(selectedBenchmarks.includes('deathstarbench'));
+    if (selectedBenchmarks.includes('sysbench') && !sysbench.workloads.length) {
+        alert('Select at least one Sysbench workload.');
+        return;
+    }
+    if (selectedBenchmarks.includes('iperf3') && !iperf3.protocols.length) {
+        alert('Select at least one iperf3 protocol.');
+        return;
+    }
+    if (selectedBenchmarks.includes('phoronix') && !phoronix.profiles.length) {
+        alert('Select at least one Phoronix test profile.');
+        return;
+    }
+    if (selectedBenchmarks.includes('apachebench') && !apachebench.workloads.length) {
+        alert('Select at least one ApacheBench connection mode.');
+        return;
+    }
+    if (
+        selectedBenchmarks.includes('apachebench')
+        && apachebench.concurrency > apachebench.request_count
+    ) {
+        alert('ApacheBench concurrency cannot exceed the measured request count.');
+        return;
+    }
+    if (
+        selectedBenchmarks.includes('sysbench')
+        && sysbench.workloads.includes('fileio')
+        && !$('#additional').checked
+    ) {
+        alert('Sysbench file I/O requires the additional /data volume.');
+        return;
+    }
     if (selectedBenchmarks.includes('deathstarbench') && deathstarbench.connections < deathstarbench.threads) {
         alert('DeathStarBench connections must be greater than or equal to its worker threads.');
         return;
@@ -250,6 +558,10 @@ $('#planForm').addEventListener('submit', async event => {
             additional_performance: Number($('#dataPerf').value),
             mount_style: $('#mount').value,
         },
+        sysbench,
+        iperf3,
+        phoronix,
+        apachebench,
         deathstarbench,
         destroy_after_completion: $('#destroy').checked,
         benchmarks: selectedBenchmarks,
@@ -446,7 +758,15 @@ async function resetToPlan() {
     $('#keyPassphrase').value = '';
     $('#keyFile').value = '';
     $('#publicKeyFile').value = '';
+    setSysbenchValues();
+    setIperf3Values();
+    setPhoronixValues();
+    setApachebenchValues();
     setDeathstarValues();
+    toggleSysbenchSettings();
+    toggleIperf3Settings();
+    togglePhoronixSettings();
+    toggleApachebenchSettings();
     toggleDeathstarSettings();
     applySshDefaults();
     $('#shapeMeta').textContent = '';
@@ -481,13 +801,30 @@ async function restorePlan(plan) {
     $('#dataPerf').value = plan.storage?.additional_performance ?? 10;
     $('#mount').value = plan.storage?.mount_style || 'paravirtualized';
     $('#destroy').checked = plan.destroy_after_completion ?? true;
+    const planBenchmarks = plan.benchmarks || [];
+    const hasLegacySysbench = planBenchmarks.some(
+        benchmark => Boolean(legacySysbenchWorkloads[benchmark]),
+    );
+    const hasLegacyIperf3 = planBenchmarks.some(
+        benchmark => Boolean(legacyIperf3Protocols[benchmark]),
+    );
     $$('input[data-kind=bench]').forEach(input => {
-        input.checked = (plan.benchmarks || []).includes(input.value);
+        input.checked = planBenchmarks.includes(input.value)
+            || (input.value === 'sysbench' && hasLegacySysbench)
+            || (input.value === 'iperf3' && hasLegacyIperf3);
     });
     $$('input[data-kind=llm]').forEach(input => {
         input.checked = (plan.llm_benchmarks || []).includes(input.value);
     });
+    setSysbenchValues(sysbenchOptionsFromPlan(plan));
+    setIperf3Values(iperf3OptionsFromPlan(plan));
+    setPhoronixValues(phoronixOptionsFromPlan(plan));
+    setApachebenchValues(apachebenchOptionsFromPlan(plan));
     setDeathstarValues(plan.deathstarbench || deathstarDefaults);
+    toggleSysbenchSettings();
+    toggleIperf3Settings();
+    togglePhoronixSettings();
+    toggleApachebenchSettings();
     toggleDeathstarSettings();
     $('#key').value = '';
     $('#publicKey').value = '';

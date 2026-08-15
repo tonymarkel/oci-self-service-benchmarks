@@ -22,7 +22,28 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .catalog import BENCHMARKS, DEATHSTARBENCH_WORKLOADS, LLM_BENCHMARKS
+from .apachebench import (
+    WORKLOADS as APACHEBENCH_WORKLOADS,
+    aggregate_trial_metrics as aggregate_apachebench_trials,
+    benchmark_command as apachebench_command,
+    loadgen_prepare_command as apachebench_loadgen_prepare_command,
+    metadata as apachebench_metadata,
+    parse_output as parse_apachebench_output,
+    readiness_command as apachebench_readiness_command,
+    record_network_capacity as record_apachebench_network_capacity,
+    target_prepare_command as apachebench_target_prepare_command,
+    validate_metrics as validate_apachebench_metrics,
+    warmup_command as apachebench_warmup_command,
+    workload as apachebench_workload,
+)
+from .catalog import (
+    BENCHMARKS,
+    DEATHSTARBENCH_WORKLOADS,
+    IPERF3_PROTOCOLS,
+    LLM_BENCHMARKS,
+    PHORONIX_PROFILES,
+    SYSBENCH_WORKLOADS,
+)
 from .deathstarbench import (
     build_workload_command,
     deploy_workload_command,
@@ -38,7 +59,14 @@ from .deathstarbench import (
     prepare_workload_command,
     workload as deathstarbench_workload,
 )
-from .models import BenchmarkPlan
+from .models import BenchmarkPlan, canonicalize_benchmark_plan
+from .phoronix import (
+    PREPARE_TIMEOUT_SECONDS as PHORONIX_PREPARE_TIMEOUT_SECONDS,
+    parse_result_output as parse_phoronix_result,
+    prepare_command as phoronix_prepare_command,
+    profile_runs as phoronix_profile_runs,
+    required_packages as phoronix_required_packages,
+)
 
 ROOT = Path(__file__).parent
 PROJECT_ROOT = ROOT.parent
@@ -47,11 +75,6 @@ RUNS.mkdir(exist_ok=True)
 app = FastAPI(title='OCI Self-Service Benchmarks')
 app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')
 jobs: dict[str, dict[str, Any]] = {}
-PHORONIX_PROFILE = 'pts/compress-7zip-1.13.1'
-PHORONIX_ASSET = '7z2601-src.tar.xz'
-PHORONIX_ASSET_SHA256 = (
-    'b2389e0e930b2f9a348cf0fe7d9870a46482a8ec044ee0bdf42e2136db31c3d6'
-)
 LLAMA_TOOLSET_PACKAGE = 'gcc-toolset-12'
 LLAMA_TOOLSET_ENABLE = '/opt/rh/gcc-toolset-12/enable'
 LOAD_GENERATOR_SHAPES = (
@@ -60,6 +83,16 @@ LOAD_GENERATOR_SHAPES = (
     'VM.Standard.E3.Flex',
     'VM.Standard3.Flex',
 )
+SYSBENCH_RESULT_IDS = {
+    'cpu': 'sysbench_cpu',
+    'memory': 'sysbench_memory',
+    'fileio': 'sysbench_fileio',
+}
+IPERF3_RESULT_IDS = {
+    'tcp': 'iperf_tcp',
+    'udp': 'iperf_udp',
+    'sctp': 'iperf_sctp',
+}
 
 
 class SSHCommandError(RuntimeError):
@@ -67,6 +100,57 @@ class SSHCommandError(RuntimeError):
         super().__init__(message)
         self.output = output
         self.returncode = returncode
+
+
+def selected_sysbench_workloads(plan):
+    selected = set(plan.benchmarks)
+    workloads = []
+    if 'sysbench' in selected:
+        workloads.extend(plan.sysbench.workloads)
+    for workload_id, result_id in SYSBENCH_RESULT_IDS.items():
+        if result_id in selected:
+            workloads.append(workload_id)
+    return tuple(dict.fromkeys(workloads))
+
+
+def expanded_benchmark_ids(plan):
+    selected = set(plan.benchmarks)
+    selected.update(
+        SYSBENCH_RESULT_IDS[workload]
+        for workload in selected_sysbench_workloads(plan)
+    )
+    selected.update(expanded_iperf3_result_ids(plan))
+    return selected
+
+
+def plan_uses_sysbench(plan):
+    return bool(selected_sysbench_workloads(plan))
+
+
+def selected_iperf3_protocols(plan):
+    selected = set(plan.benchmarks)
+    protocols = []
+    if 'iperf3' in selected:
+        protocols.extend(plan.iperf3.protocols)
+    for protocol, result_id in IPERF3_RESULT_IDS.items():
+        if result_id in selected:
+            protocols.append(protocol)
+    return tuple(dict.fromkeys(protocols))
+
+
+def expanded_iperf3_result_ids(plan):
+    return tuple(
+        IPERF3_RESULT_IDS[protocol]
+        for protocol in selected_iperf3_protocols(plan)
+    )
+
+
+def plan_uses_iperf3(plan):
+    return bool(selected_iperf3_protocols(plan))
+
+
+def plan_uses_load_generator(plan):
+    return bool({'deathstarbench', 'apachebench'} & set(plan.benchmarks))
 
 
 def git_clone_command(repository, destination):
@@ -81,45 +165,6 @@ def git_clone_command(repository, destination):
         'sleep 10; '
         'done; '
         f'test -d {destination}/.git; }}'
-    )
-
-
-def phoronix_command():
-    clone = git_clone_command(
-        'https://github.com/phoronix-test-suite/phoronix-test-suite.git',
-        '/tmp/phoronix-test-suite',
-    )
-    asset_url = (
-        'https://github.com/ip7z/7zip/releases/download/26.01/'
-        f'{PHORONIX_ASSET}'
-    )
-    return (
-        'set -o pipefail && '
-        'rm -f /tmp/phoronix-output.txt && '
-        f'{clone} && '
-        'cd /tmp/phoronix-test-suite && '
-        './phoronix-test-suite user-config-set '
-        'SaveResults=FALSE OpenBrowser=FALSE UploadResults=FALSE '
-        'PromptForTestIdentifier=FALSE PromptForTestDescription=FALSE '
-        'PromptSaveName=FALSE RunAllTestCombinations=TRUE Configured=TRUE && '
-        f'{{ CACHE="$HOME/.phoronix-test-suite/download-cache/{PHORONIX_ASSET}"; '
-        'mkdir -p "$(dirname "$CACHE")"; '
-        'for attempt in $(seq 1 6); do '
-        'rm -f "$CACHE.part"; '
-        f'if curl -L --fail --retry 3 --retry-all-errors '
-        f'--connect-timeout 15 --max-time 180 {asset_url} '
-        f'-o "$CACHE.part" '
-        f'&& echo "{PHORONIX_ASSET_SHA256}  $CACHE.part" '
-        '| sha256sum -c -; then '
-        'mv "$CACHE.part" "$CACHE"; break; fi; '
-        'echo "7-Zip source download failed; retrying in 10 seconds '
-        '($attempt/6)." >&2; '
-        'sleep 10; '
-        'done; test -s "$CACHE"; } && '
-        f'./phoronix-test-suite batch-benchmark {PHORONIX_PROFILE} '
-        '2>&1 | tee /tmp/phoronix-output.txt && '
-        "grep -Eq 'Average:[[:space:]]+[0-9]+([.][0-9]+)?"
-        "[[:space:]]+MIPS' /tmp/phoronix-output.txt"
     )
 
 
@@ -162,7 +207,12 @@ def llama_benchmark_command():
     )
 
 
-def benchmark_security_rules(include_deathstarbench=False):
+def benchmark_security_rules(
+    include_deathstarbench=False,
+    iperf3_protocols=(),
+    include_apachebench=False,
+):
+    iperf3_protocols = set(iperf3_protocols)
     rules = [
         oci.core.models.IngressSecurityRule(
             protocol='6',
@@ -174,27 +224,44 @@ def benchmark_security_rules(include_deathstarbench=False):
                 )
             ),
         ),
-        oci.core.models.IngressSecurityRule(
-            protocol='6',
-            source='10.42.0.0/16',
-            tcp_options=oci.core.models.TcpOptions(
-                destination_port_range=oci.core.models.PortRange(
-                    min=5201,
-                    max=5201,
-                )
-            ),
-        ),
-        oci.core.models.IngressSecurityRule(
-            protocol='17',
-            source='10.42.0.0/16',
-            udp_options=oci.core.models.UdpOptions(
-                destination_port_range=oci.core.models.PortRange(
-                    min=5201,
-                    max=5201,
-                )
-            ),
-        ),
     ]
+    if iperf3_protocols:
+        # iperf3 always negotiates a test through its TCP control connection,
+        # including when UDP or SCTP carries the measured traffic.
+        rules.append(
+            oci.core.models.IngressSecurityRule(
+                protocol='6',
+                source='10.42.1.0/24',
+                tcp_options=oci.core.models.TcpOptions(
+                    destination_port_range=oci.core.models.PortRange(
+                        min=5201,
+                        max=5201,
+                    )
+                ),
+            )
+        )
+    if 'udp' in iperf3_protocols:
+        rules.append(
+            oci.core.models.IngressSecurityRule(
+                protocol='17',
+                source='10.42.1.0/24',
+                udp_options=oci.core.models.UdpOptions(
+                    destination_port_range=oci.core.models.PortRange(
+                        min=5201,
+                        max=5201,
+                    )
+                ),
+            )
+        )
+    if 'sctp' in iperf3_protocols:
+        # OCI models SCTP as IP protocol 132. Non-TCP/UDP security rules do
+        # not support port options, so limit this rule to the runner subnet.
+        rules.append(
+            oci.core.models.IngressSecurityRule(
+                protocol='132',
+                source='10.42.1.0/24',
+            )
+        )
     if include_deathstarbench:
         for port in (5000, 8080):
             rules.append(
@@ -209,24 +276,100 @@ def benchmark_security_rules(include_deathstarbench=False):
                     ),
                 )
             )
+    if include_apachebench:
+        rules.append(
+            oci.core.models.IngressSecurityRule(
+                protocol='6',
+                source='10.42.1.0/24',
+                tcp_options=oci.core.models.TcpOptions(
+                    destination_port_range=oci.core.models.PortRange(
+                        min=80,
+                        max=80,
+                    )
+                ),
+            )
+        )
     return rules
 
 
-def iperf_peer_cloud_init():
-    return '''#!/bin/bash
+def sctp_kernel_support_command(use_sudo=False):
+    elevate = 'sudo ' if use_sudo else ''
+    return (
+        'set -euo pipefail; '
+        'KERNEL_RELEASE="$(uname -r)"; '
+        'case "$KERNEL_RELEASE" in '
+        '*.el9uek.aarch64.64k) '
+        'SCTP_MODULE_PACKAGE="kernel-uek64k-modules-extra-'
+        '${KERNEL_RELEASE%.64k}" ;; '
+        '*.el9uek.*) SCTP_MODULE_PACKAGE="kernel-uek-modules-extra-'
+        '$KERNEL_RELEASE" ;; '
+        '*.el9*) SCTP_MODULE_PACKAGE="kernel-modules-extra-'
+        '$KERNEL_RELEASE" ;; '
+        '*) echo "Unsupported Oracle Linux kernel release: '
+        '$KERNEL_RELEASE" >&2; exit 1 ;; '
+        'esac; '
+        f'if ! {elevate}modprobe sctp >/dev/null 2>&1; then '
+        'SCTP_MODULE_INSTALLED=false; '
+        'for attempt in 1 2 3; do '
+        f'if {elevate}dnf -y --disablerepo=ol9_ksplice '
+        '--setopt=retries=10 --setopt=timeout=30 '
+        'install "$SCTP_MODULE_PACKAGE"; then '
+        'SCTP_MODULE_INSTALLED=true; break; fi; '
+        'echo "Unable to install $SCTP_MODULE_PACKAGE; retrying in 10 '
+        'seconds ($attempt/3)." >&2; sleep 10; done; '
+        'if [ "$SCTP_MODULE_INSTALLED" != true ]; then '
+        'echo "The SCTP module package for the running kernel '
+        '$KERNEL_RELEASE could not be installed." >&2; exit 1; fi; '
+        'fi; '
+        'SCTP_MODULE_PATH="$(modinfo -n sctp)"; '
+        f'if ! {elevate}modprobe sctp; then '
+        'echo "$SCTP_MODULE_PACKAGE is present, but SCTP still cannot be '
+        'loaded for $KERNEL_RELEASE." >&2; exit 1; fi; '
+        'test -d /proc/net/sctp; '
+        'echo "SCTP kernel support is ready for $KERNEL_RELEASE at '
+        '$SCTP_MODULE_PATH."'
+    )
+
+
+def iperf_peer_cloud_init(protocols=('tcp',)):
+    protocols = set(protocols)
+    packages = ['iperf3']
+    if 'sctp' in protocols:
+        packages.append('lksctp-tools')
+    firewall_rules = ['firewall-cmd --permanent --add-port=5201/tcp']
+    if 'udp' in protocols:
+        firewall_rules.append('firewall-cmd --permanent --add-port=5201/udp')
+    if 'sctp' in protocols:
+        firewall_rules.append('firewall-cmd --permanent --add-port=5201/sctp')
+    package_list = ' '.join(packages)
+    firewall_commands = '\n  '.join(firewall_rules)
+    sctp_verification = ''
+    if 'sctp' in protocols:
+        sctp_verification = f'''
+{sctp_kernel_support_command()}
+IPERF_HELP="$(/usr/bin/iperf3 --help 2>&1)"
+grep -q -- '--sctp' <<< "$IPERF_HELP"
+'''
+    return f'''#!/bin/bash
 set -euo pipefail
+PACKAGES_READY=false
 for attempt in 1 2 3 4 5 6; do
   if dnf -y --disablerepo=ol9_ksplice \
-      --setopt=retries=10 --setopt=timeout=30 install iperf3; then
+      --setopt=retries=10 --setopt=timeout=30 install {package_list}; then
+    PACKAGES_READY=true
     break
   fi
   sleep 10
 done
+if [ "$PACKAGES_READY" != true ]; then
+  echo "Unable to install the iperf3 peer prerequisites: {package_list}." >&2
+  exit 1
+fi
 test -x /usr/bin/iperf3
+{sctp_verification.rstrip()}
 if command -v firewall-cmd >/dev/null 2>&1 \
     && systemctl is-active --quiet firewalld; then
-  firewall-cmd --permanent --add-port=5201/tcp
-  firewall-cmd --permanent --add-port=5201/udp
+  {firewall_commands}
   firewall-cmd --reload
 fi
 cat > /etc/systemd/system/iperf3-server.service <<'EOF'
@@ -411,6 +554,15 @@ def report_summary(report_path):
         item['id']: item['name']
         for item in [*BENCHMARKS, *LLM_BENCHMARKS]
     }
+    catalog_names.update({
+        'sysbench_cpu': 'Sysbench — CPU',
+        'sysbench_memory': 'Sysbench — Memory',
+        'sysbench_fileio': 'Sysbench — File I/O',
+        'iperf_tcp': 'iperf3 — TCP',
+        'iperf_udp': 'iperf3 — UDP',
+        'iperf_sctp': 'iperf3 — SCTP',
+        'baseline': 'Cloud baseline suite (legacy)',
+    })
     selected_ids = [
         *plan.get('benchmarks', []),
         *plan.get('llm_benchmarks', []),
@@ -466,6 +618,10 @@ def catalog():
     return {
         'benchmarks': BENCHMARKS,
         'llm_benchmarks': LLM_BENCHMARKS,
+        'sysbench_workloads': SYSBENCH_WORKLOADS,
+        'iperf3_protocols': IPERF3_PROTOCOLS,
+        'phoronix_profiles': PHORONIX_PROFILES,
+        'apachebench_workloads': APACHEBENCH_WORKLOADS,
         'deathstarbench_workloads': DEATHSTARBENCH_WORKLOADS,
     }
 
@@ -632,10 +788,10 @@ def report(job_id: str, download: bool = False):
 def report_plan(job_id: str):
     job = jobs.get(job_id)
     if job:
-        return job['plan']
+        return canonicalize_benchmark_plan(job['plan'])
     plan_path = RUNS / job_id / 'plan.json'
     if plan_path.exists():
-        return json.loads(plan_path.read_text())
+        return canonicalize_benchmark_plan(json.loads(plan_path.read_text()))
     report_path = RUNS / job_id / 'report.html'
     if report_path.exists():
         match = re.search(
@@ -644,7 +800,9 @@ def report_plan(job_id: str):
             re.DOTALL,
         )
         if match:
-            return json.loads(html.unescape(match.group(1)))
+            return canonicalize_benchmark_plan(
+                json.loads(html.unescape(match.group(1)))
+            )
     raise HTTPException(404, 'Saved plan not found')
 
 @app.post('/api/jobs/{job_id}/destroy')
@@ -814,14 +972,38 @@ def load_generator_shape(available_shapes):
         if shape_name in by_name:
             return by_name[shape_name]
     raise RuntimeError(
-        'DeathStarBench needs an x86 flexible shape for its separate load '
+        'The selected web benchmark needs an x86 flexible shape for its separate load '
         'generator, but none of the supported shapes are available in the '
         'selected availability domain.'
     )
 
 
+def configured_network_bandwidth_gbps(shape, ocpus):
+    """Resolve a flex shape's configured VNIC bandwidth from OCI metadata."""
+    options = getattr(shape, 'networking_bandwidth_options', None)
+    per_ocpu = getattr(options, 'default_per_ocpu_in_gbps', None)
+    if per_ocpu is not None:
+        bandwidth = float(per_ocpu) * float(ocpus)
+        minimum = getattr(options, 'min_in_gbps', None)
+        maximum = getattr(options, 'max_in_gbps', None)
+        if minimum is not None:
+            bandwidth = max(bandwidth, float(minimum))
+        if maximum is not None:
+            bandwidth = min(bandwidth, float(maximum))
+    else:
+        bandwidth = getattr(shape, 'networking_bandwidth_in_gbps', None)
+    if bandwidth is None or float(bandwidth) <= 0:
+        raise RuntimeError(
+            f'OCI did not report network bandwidth for load-generator shape '
+            f'{getattr(shape, "shape", "unknown")}.'
+        )
+    return float(bandwidth)
+
+
 def provision(job, plan):
     cfg, compute, network, storage, identity = clients(plan.region)
+    iperf3_protocols = selected_iperf3_protocols(plan)
+    uses_load_generator = plan_uses_load_generator(plan)
     compartment = plan.compartment_id or cfg['tenancy']; suffix = job['id']; tags = {'oci-benchmark-job': suffix, 'managed-by': 'oci-self-service-benchmarks'}
     ad = plan.availability_domain or identity.list_availability_domains(compartment).data[0].name
     vcn = network.create_vcn(oci.core.models.CreateVcnDetails(compartment_id=compartment, cidr_block='10.42.0.0/16', dns_label=f'b{suffix}', display_name=f'benchmark-{suffix}', freeform_tags=tags)).data
@@ -831,14 +1013,19 @@ def provision(job, plan):
     igw = network.create_internet_gateway(oci.core.models.CreateInternetGatewayDetails(compartment_id=compartment, vcn_id=vcn.id, is_enabled=True, display_name=f'benchmark-igw-{suffix}', freeform_tags=tags)).data; job['resources']['igw_id'] = igw.id
     nat = network.create_nat_gateway(oci.core.models.CreateNatGatewayDetails(compartment_id=compartment, vcn_id=vcn.id, display_name=f'benchmark-nat-{suffix}', freeform_tags=tags)).data; job['resources']['nat_id'] = nat.id
     rt = network.create_route_table(oci.core.models.CreateRouteTableDetails(compartment_id=compartment, vcn_id=vcn.id, display_name=f'benchmark-routes-{suffix}', route_rules=[oci.core.models.RouteRule(destination='0.0.0.0/0', destination_type='CIDR_BLOCK', network_entity_id=igw.id)], freeform_tags=tags)).data; job['resources']['route_table_id'] = rt.id
-    sl = network.create_security_list(oci.core.models.CreateSecurityListDetails(compartment_id=compartment, vcn_id=vcn.id, display_name=f'benchmark-security-{suffix}', ingress_security_rules=benchmark_security_rules('deathstarbench' in plan.benchmarks), egress_security_rules=[oci.core.models.EgressSecurityRule(protocol='all', destination='0.0.0.0/0')], freeform_tags=tags)).data; job['resources']['security_list_id'] = sl.id
+    sl = network.create_security_list(oci.core.models.CreateSecurityListDetails(compartment_id=compartment, vcn_id=vcn.id, display_name=f'benchmark-security-{suffix}', ingress_security_rules=benchmark_security_rules(include_deathstarbench='deathstarbench' in plan.benchmarks, iperf3_protocols=iperf3_protocols, include_apachebench='apachebench' in plan.benchmarks), egress_security_rules=[oci.core.models.EgressSecurityRule(protocol='all', destination='0.0.0.0/0')], freeform_tags=tags)).data; job['resources']['security_list_id'] = sl.id
     subnet = network.create_subnet(oci.core.models.CreateSubnetDetails(compartment_id=compartment, vcn_id=vcn.id, cidr_block='10.42.1.0/24', dns_label='public', display_name=f'benchmark-public-{suffix}', route_table_id=rt.id, dhcp_options_id=vcn.default_dhcp_options_id, security_list_ids=[sl.id], prohibit_public_ip_on_vnic=False, freeform_tags=tags)).data; job['resources']['subnet_id'] = subnet.id
     event(job, 'Provision', 'Public subnet uses the VCN default Internet and VCN Resolver DHCP options.')
     image = latest_oracle_linux_image(
         compute,
         compartment,
         plan.shape,
-        require_ol9='deathstarbench' in plan.benchmarks,
+        require_ol9=(
+            'deathstarbench' in plan.benchmarks
+            or 'apachebench' in plan.benchmarks
+            or plan_uses_sysbench(plan)
+            or plan_uses_iperf3(plan)
+        ),
     )
     available_shapes = compute.list_shapes(
         compartment,
@@ -888,7 +1075,7 @@ def provision(job, plan):
             'lifecycle_state',
             'ATTACHED',
         )
-    if 'deathstarbench' in plan.benchmarks:
+    if uses_load_generator:
         loadgen_shape = load_generator_shape(available_shapes)
         loadgen_image = latest_oracle_linux_image(
             compute,
@@ -923,11 +1110,15 @@ def provision(job, plan):
         loadgen = compute.launch_instance(loadgen_launch).data
         job['resources']['loadgen_instance_id'] = loadgen.id
         job['resources']['loadgen_shape'] = loadgen_shape.shape
+        job['resources']['loadgen_network_bandwidth_gbps'] = (
+            configured_network_bandwidth_gbps(loadgen_shape, 2)
+        )
         event(
             job,
             'Provision',
             f'Launched separate {loadgen_shape.shape} load generator with '
-            '2 OCPUs and 8 GB; waiting for it to become RUNNING.',
+            '2 OCPUs and 8 GB for the selected web benchmark(s); waiting for '
+            'it to become RUNNING.',
         )
         oci.wait_until(
             compute,
@@ -943,14 +1134,24 @@ def provision(job, plan):
         job['resources']['loadgen_public_ip'] = loadgen_vnic.public_ip
         job['resources']['loadgen_private_ip'] = loadgen_vnic.private_ip
 
-    if {'iperf_tcp', 'iperf_udp'} & set(plan.benchmarks):
-        event(job, 'Provision', 'Creating a NAT-backed private peer for iperf3 tests.')
+    if iperf3_protocols:
+        event(
+            job,
+            'Provision',
+            'Creating a NAT-backed private peer for the selected iperf3 '
+            f'protocols: {", ".join(protocol.upper() for protocol in iperf3_protocols)}.',
+        )
         peer_rt = network.create_route_table(oci.core.models.CreateRouteTableDetails(compartment_id=compartment, vcn_id=vcn.id, display_name=f'benchmark-peer-routes-{suffix}', route_rules=[oci.core.models.RouteRule(destination='0.0.0.0/0', destination_type='CIDR_BLOCK', network_entity_id=nat.id)], freeform_tags=tags)).data
         job['resources']['peer_route_table_id'] = peer_rt.id
         peer_subnet = network.create_subnet(oci.core.models.CreateSubnetDetails(compartment_id=compartment, vcn_id=vcn.id, cidr_block='10.42.2.0/24', dns_label='peer', display_name=f'benchmark-peer-{suffix}', route_table_id=peer_rt.id, dhcp_options_id=vcn.default_dhcp_options_id, security_list_ids=[sl.id], prohibit_public_ip_on_vnic=True, freeform_tags=tags)).data
         job['resources']['peer_subnet_id'] = peer_subnet.id
-        peer_image = next(i for i in compute.list_images(compartment, operating_system='Oracle Linux', shape='VM.Standard.E5.Flex', sort_by='TIMECREATED', sort_order='DESC').data if i.lifecycle_state == 'AVAILABLE')
-        peer_script = iperf_peer_cloud_init()
+        peer_image = latest_oracle_linux_image(
+            compute,
+            compartment,
+            'VM.Standard.E5.Flex',
+            require_ol9=True,
+        )
+        peer_script = iperf_peer_cloud_init(iperf3_protocols)
         peer_launch = oci.core.models.LaunchInstanceDetails(compartment_id=compartment, availability_domain=ad, shape='VM.Standard.E5.Flex', shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(ocpus=1, memory_in_gbs=8), display_name=f'benchmark-peer-{suffix}', metadata={'user_data': base64.b64encode(peer_script.encode()).decode()}, source_details=oci.core.models.InstanceSourceViaImageDetails(source_type='image', image_id=peer_image.id, boot_volume_size_in_gbs=50), create_vnic_details=oci.core.models.CreateVnicDetails(subnet_id=peer_subnet.id, assign_public_ip=False, assign_private_dns_record=True, hostname_label='peer'), freeform_tags=tags)
         peer = compute.launch_instance(peer_launch).data; job['resources']['peer_instance_id'] = peer.id
         oci.wait_until(compute, compute.get_instance(peer.id), 'lifecycle_state', 'RUNNING')
@@ -1110,23 +1311,39 @@ def wait_for_guest_readiness(
     )
 
 
-def iperf_peer_readiness_command(peer_private_ip):
+def iperf_peer_readiness_command(peer_private_ip, protocols=('tcp',)):
     peer_private_ip = str(ip_address(peer_private_ip))
+    sctp_probe = ''
+    if 'sctp' in protocols:
+        sctp_probe = (
+            'for attempt in $(seq 1 6); do '
+            'if timeout 20 iperf3 -c "$PEER_IP" --sctp -t 1 -J '
+            '>/tmp/iperf3-sctp-readiness.json 2>&1; then '
+            'echo "iperf3 SCTP data path is ready."; '
+            'rm -f /tmp/iperf3-sctp-readiness.json; exit 0; fi; '
+            'sleep 2; done; '
+            'echo "The private peer did not complete an SCTP readiness test." '
+            '>&2; cat /tmp/iperf3-sctp-readiness.json >&2 || true; exit 1'
+        )
     return (
         f'PEER_IP={peer_private_ip}; '
+        'CONTROL_READY=false; '
         'for attempt in $(seq 1 60); do '
         'if timeout 2 bash -c '
         '"exec 3<>/dev/tcp/$PEER_IP/5201" 2>/dev/null; then '
-        'echo "iperf3 peer $PEER_IP:5201 is ready."; exit 0; fi; '
+        'CONTROL_READY=true; break; fi; '
         'echo "Waiting for iperf3 peer ($attempt/60)."; '
         'sleep 5; '
         'done; '
-        'echo "The private iperf3 peer did not open TCP port 5201 '
-        'after 300 seconds." >&2; exit 1'
+        'if [ "$CONTROL_READY" != true ]; then '
+        'echo "The private iperf3 peer did not open TCP control port 5201 '
+        'after 300 seconds." >&2; exit 1; fi; '
+        'echo "iperf3 TCP control connection at $PEER_IP:5201 is ready."; '
+        f'{sctp_probe}'
     )
 
 
-def wait_for_iperf_peer(job):
+def wait_for_iperf_peer(job, protocols=('tcp',)):
     peer_private_ip = job.get('resources', {}).get('peer_private_ip')
     if not peer_private_ip:
         raise RuntimeError(
@@ -1139,7 +1356,7 @@ def wait_for_iperf_peer(job):
     )
     output = ssh(
         job,
-        iperf_peer_readiness_command(peer_private_ip),
+        iperf_peer_readiness_command(peer_private_ip, protocols),
         timeout=360,
     )
     event(job, 'Network', output.strip())
@@ -1173,6 +1390,12 @@ def enable_ol9_developer_epel(job, host_key='public_ip'):
 
 def install_benchmark_tools(job, plan, selected):
     packages = set()
+    iperf3_protocols = selected_iperf3_protocols(plan)
+    phoronix_profiles = (
+        tuple(plan.phoronix.profiles)
+        if 'phoronix' in selected
+        else ()
+    )
     sysbench_selected = bool(
         {'sysbench_cpu', 'sysbench_memory', 'sysbench_fileio'} & selected
     )
@@ -1180,21 +1403,12 @@ def install_benchmark_tools(job, plan, selected):
         packages.update({'git', 'gcc', 'make'})
     if {'fio'} & selected:
         packages.add('fio')
-    if {'iperf_tcp', 'iperf_udp'} & set(plan.benchmarks):
+    if iperf3_protocols:
         packages.add('iperf3')
-    if {'phoronix'} & selected:
-        packages.update({
-            'curl',
-            'gcc-c++',
-            'git',
-            'make',
-            'php-cli',
-            'php-common',
-            'php-process',
-            'php-xml',
-            'unzip',
-            'xz',
-        })
+    if 'sctp' in iperf3_protocols:
+        packages.add('lksctp-tools')
+    if phoronix_profiles:
+        packages.update(phoronix_required_packages(phoronix_profiles))
     if plan.llm_benchmarks:
         packages.update({
             'git',
@@ -1211,6 +1425,21 @@ def install_benchmark_tools(job, plan, selected):
             f'{", ".join(sorted(packages))}.',
         )
         dnf_install(job, packages)
+    if 'sctp' in iperf3_protocols:
+        event(
+            job,
+            'Install',
+            'Installing SCTP modules for the running kernel when needed, '
+            'then verifying the kernel and iperf3 SCTP support.',
+        )
+        output = ssh(
+            job,
+            sctp_kernel_support_command(use_sudo=True) + '; '
+            'IPERF_HELP="$(iperf3 --help 2>&1)" && '
+            'grep -q -- "--sctp" <<< "$IPERF_HELP" && '
+            'echo "iperf3 SCTP support is ready."',
+        )
+        event(job, 'Install', output.strip())
     if plan.llm_benchmarks:
         event(job, 'Install', 'Verifying the GCC Toolset 12 compiler and assembler.')
         toolchain = ssh(
@@ -1348,6 +1577,482 @@ def execute_benchmark(
         f'Completed {name} in {duration:.2f}s and captured '
         f'{len(output.encode())} bytes of output.',
     )
+
+
+def run_phoronix_profiles(job, plan):
+    """Prepare PTS once, then run every selected profile independently."""
+    runs = phoronix_profile_runs(plan.phoronix.profiles, job['id'])
+    if not runs:
+        return ()
+
+    event(
+        job,
+        'Phoronix prepare',
+        'Checking out the pinned Phoronix Test Suite client and refreshing '
+        'the official OpenBenchmarking profile index.',
+    )
+    try:
+        preparation_output = ssh(
+            job,
+            phoronix_prepare_command(),
+            timeout=PHORONIX_PREPARE_TIMEOUT_SECONDS,
+            include_stderr=True,
+        )
+        architecture = ssh(job, 'uname -m').strip().splitlines()[-1]
+        if architecture not in {'x86_64', 'aarch64'}:
+            raise RuntimeError(
+                f'Phoronix profiles support x86_64 and aarch64, not '
+                f'{architecture or "an unknown architecture"}.'
+            )
+        event(
+            job,
+            'Phoronix prepare',
+            f'Pinned client and profile index are ready on {architecture}: '
+            f'{preparation_output.strip()[-500:]}.',
+        )
+    except Exception as exc:
+        failure_output = (
+            exc.output
+            if isinstance(exc, SSHCommandError) and exc.output
+            else str(exc)
+        )
+        for run in runs:
+            job['results'].append({
+                'id': run.benchmark_id,
+                'name': run.name,
+                'command': run.command,
+                'started_at': now(),
+                'duration_seconds': 0,
+                'status': 'failed',
+                'error': f'Phoronix preparation failed. {exc}',
+                'output': failure_output,
+                'metadata': run.metadata,
+            })
+        return (f'Phoronix preparation failed. {exc}',)
+
+    failures = []
+    for run in runs:
+        metadata = {
+            **run.metadata,
+            'architecture': architecture,
+            'shape': plan.shape,
+            'ocpus': plan.ocpus,
+            'memory_gb': plan.memory_gb,
+        }
+        result_count = len(job['results'])
+        try:
+            def parse_selected_profile(output, expected=run.profile):
+                return parse_phoronix_result(
+                    output,
+                    expected_profile=expected,
+                )
+
+            execute_benchmark(
+                job,
+                run.benchmark_id,
+                run.name,
+                run.command,
+                timeout=run.timeout_seconds,
+                parser=parse_selected_profile,
+                metadata=metadata,
+                output_limit=None,
+                include_stderr=True,
+            )
+        except Exception as exc:
+            failures.append(f'{run.name}: {exc}')
+            if len(job['results']) == result_count:
+                job['results'].append({
+                    'id': run.benchmark_id,
+                    'name': run.name,
+                    'command': run.command,
+                    'started_at': now(),
+                    'duration_seconds': 0,
+                    'status': 'failed',
+                    'error': str(exc),
+                    'output': (
+                        exc.output
+                        if isinstance(exc, SSHCommandError) and exc.output
+                        else ''
+                    ),
+                    'metadata': metadata,
+                })
+            event(
+                job,
+                'Phoronix warning',
+                f'{run.name} failed; continuing with the remaining selected '
+                f'Phoronix profiles. {exc}',
+            )
+    return tuple(failures)
+
+
+def apachebench_request_timeout(request_count):
+    """Allow slow shapes to finish large user-selected request counts."""
+    return min(86400, max(1800, int(request_count / 25) + 600))
+
+
+def run_apachebench(job, plan):
+    """Run each selected HTTP mode from the shared private load generator."""
+    options = plan.apachebench
+    resources = job.get('resources', {})
+    selected_workloads = tuple(options.workloads)
+    diagnostics = []
+    failures = []
+    try:
+        target_private_ip = str(ip_address(resources.get('private_ip', '')))
+        loadgen_private_ip = str(
+            ip_address(resources.get('loadgen_private_ip', ''))
+        )
+        loadgen_network_bandwidth_gbps = float(
+            resources.get('loadgen_network_bandwidth_gbps', 0)
+        )
+        if loadgen_network_bandwidth_gbps <= 0:
+            raise ValueError('invalid load-generator network capacity')
+    except (TypeError, ValueError) as exc:
+        error = RuntimeError(
+            'ApacheBench provisioning did not produce valid private target '
+            'and load-generator addresses plus a network-capacity value.'
+        )
+        for workload_id in selected_workloads:
+            settings = apachebench_workload(workload_id)
+            name = f'ApacheBench — {settings["name"]}'
+            job['results'].append({
+                'id': f'apachebench_{workload_id}',
+                'name': name,
+                'command': 'ApacheBench HTTP server lifecycle',
+                'started_at': now(),
+                'duration_seconds': 0,
+                'status': 'failed',
+                'error': str(error),
+                'output': '',
+            })
+            failures.append(f'{name}: {error}')
+        event(job, 'ApacheBench warning', str(error))
+        return tuple(failures)
+    if not resources.get('loadgen_public_ip'):
+        error = RuntimeError(
+            'ApacheBench provisioning did not produce a reachable load '
+            'generator.'
+        )
+        for workload_id in selected_workloads:
+            settings = apachebench_workload(workload_id)
+            name = f'ApacheBench — {settings["name"]}'
+            job['results'].append({
+                'id': f'apachebench_{workload_id}',
+                'name': name,
+                'command': 'ApacheBench HTTP server lifecycle',
+                'started_at': now(),
+                'duration_seconds': 0,
+                'status': 'failed',
+                'error': str(error),
+                'output': '',
+            })
+            failures.append(f'{name}: {error}')
+        event(job, 'ApacheBench warning', str(error))
+        return tuple(failures)
+    httpd_installed = False
+    httpd_ready = False
+
+    def stage(label, message, command, host_key='public_ip', timeout=1800):
+        event(job, label, message)
+        try:
+            output = ssh(
+                job,
+                command,
+                timeout=timeout,
+                host_key=host_key,
+                include_stderr=True,
+            )
+        except SSHCommandError as exc:
+            if exc.output:
+                diagnostics.append(
+                    f'--- {label} (failed) ---\n{exc.output[-20000:]}'
+                )
+            raise
+        diagnostics.append(f'--- {label} ---\n{output[-12000:]}')
+        event(job, label, f'{message} Complete.')
+        return output
+
+    try:
+        regional_yum = f'yum.{plan.region}.oci.oraclecloud.com'
+        wait_for_guest_readiness(
+            job,
+            plan.region,
+            label='ApacheBench web-server instance',
+            required_hosts=[regional_yum],
+        )
+        wait_for_guest_readiness(
+            job,
+            plan.region,
+            host_key='loadgen_public_ip',
+            label='ApacheBench load generator',
+            required_hosts=[regional_yum],
+        )
+        event(
+            job,
+            'ApacheBench install',
+            'Installing Apache HTTP Server on the target and ApacheBench on '
+            'the separate load-generator VM.',
+        )
+        dnf_install(job, {'firewalld', 'httpd'})
+        httpd_installed = True
+        dnf_install(
+            job,
+            {'httpd-tools', 'time'},
+            host_key='loadgen_public_ip',
+        )
+        stage(
+            'ApacheBench target',
+            'Configuring the deterministic static response and restricting '
+            'guest TCP/80 ingress to the load generator.',
+            apachebench_target_prepare_command(
+                options.response_size_kib,
+                loadgen_private_ip,
+            ),
+        )
+        httpd_ready = True
+        stage(
+            'ApacheBench load generator',
+            'Verifying ApacheBench and preparing client resource limits.',
+            apachebench_loadgen_prepare_command(),
+            host_key='loadgen_public_ip',
+        )
+        service_architecture = stage(
+            'ApacheBench architecture',
+            'Recording the web-server VM architecture.',
+            'uname -m',
+        ).strip().splitlines()[-1]
+        loadgen_architecture = stage(
+            'ApacheBench architecture',
+            'Recording the load-generator VM architecture.',
+            'uname -m',
+            host_key='loadgen_public_ip',
+        ).strip().splitlines()[-1]
+        stage(
+            'ApacheBench readiness',
+            'Verifying HTTP 200 and the configured response size over the '
+            'private VCN path.',
+            apachebench_readiness_command(
+                target_private_ip,
+                options.response_size_kib,
+            ),
+            host_key='loadgen_public_ip',
+            timeout=600,
+        )
+        common_metadata = {
+            'service_shape': plan.shape,
+            'service_ocpus': plan.ocpus,
+            'service_memory_gb': plan.memory_gb,
+            'service_architecture': service_architecture,
+            'load_generator_shape': resources.get('loadgen_shape'),
+            'load_generator_ocpus': 2,
+            'load_generator_memory_gb': 8,
+            'load_generator_architecture': loadgen_architecture,
+            'load_generator_network_bandwidth_gbps': resources.get(
+                'loadgen_network_bandwidth_gbps'
+            ),
+            'traffic_path': 'OCI private VCN address',
+            'target_private_ip': target_private_ip,
+        }
+        timeout = apachebench_request_timeout(options.request_count)
+        for workload_id in selected_workloads:
+            settings = apachebench_workload(workload_id)
+            result_id = f'apachebench_{workload_id}'
+            result_name = f'ApacheBench — {settings["name"]}'
+            started_at = now()
+            started = time.monotonic()
+            trial_outputs = []
+            trial_metrics = []
+            commands = []
+            try:
+                if options.warmup_requests:
+                    warmup_output = stage(
+                        'ApacheBench warm-up',
+                        f'Running {options.warmup_requests:,} untimed '
+                        f'{settings["name"]} warm-up requests.',
+                        apachebench_warmup_command(
+                            workload_id,
+                            target_private_ip,
+                            options,
+                        ),
+                        host_key='loadgen_public_ip',
+                        timeout=apachebench_request_timeout(
+                            options.warmup_requests
+                        ),
+                    )
+                    warmup_metrics = parse_apachebench_output(warmup_output)
+                    record_apachebench_network_capacity(
+                        warmup_metrics,
+                        loadgen_network_bandwidth_gbps,
+                    )
+                    validate_apachebench_metrics(
+                        warmup_metrics,
+                        workload_id,
+                        options.warmup_requests,
+                        min(options.concurrency, options.warmup_requests),
+                        options.response_size_kib,
+                    )
+                    event(
+                        job,
+                        'ApacheBench warm-up',
+                        f'{settings["name"]} warm-up achieved '
+                        f'{warmup_metrics["requests_per_second"]:.2f} '
+                        'requests/second; these results are excluded from '
+                        'the report.',
+                    )
+                for trial in range(1, options.trials + 1):
+                    command = apachebench_command(
+                        workload_id,
+                        target_private_ip,
+                        options,
+                        trial,
+                    )
+                    commands.append(command)
+                    event(
+                        job,
+                        'ApacheBench run',
+                        f'Started {settings["name"]} trial {trial} of '
+                        f'{options.trials}.',
+                    )
+                    output = ssh(
+                        job,
+                        command,
+                        timeout=timeout,
+                        host_key='loadgen_public_ip',
+                        include_stderr=True,
+                    )
+                    trial_outputs.append(
+                        f'--- Trial {trial} of {options.trials} ---\n{output}'
+                    )
+                    metrics = parse_apachebench_output(output)
+                    record_apachebench_network_capacity(
+                        metrics,
+                        loadgen_network_bandwidth_gbps,
+                    )
+                    validate_apachebench_metrics(
+                        metrics,
+                        workload_id,
+                        options.request_count,
+                        options.concurrency,
+                        options.response_size_kib,
+                    )
+                    trial_metrics.append(metrics)
+                    event(
+                        job,
+                        'ApacheBench run',
+                        f'Completed {settings["name"]} trial {trial} at '
+                        f'{metrics["requests_per_second"]:.2f} requests/second.',
+                    )
+                metadata = {
+                    **apachebench_metadata(workload_id, options),
+                    **common_metadata,
+                    'measured_trials': options.trials,
+                }
+                job['results'].append({
+                    'id': result_id,
+                    'name': result_name,
+                    'command': '\n'.join(commands),
+                    'started_at': started_at,
+                    'duration_seconds': round(time.monotonic() - started, 2),
+                    'status': 'completed',
+                    'metadata': metadata,
+                    'metrics': aggregate_apachebench_trials(trial_metrics),
+                    'trial_metrics': trial_metrics,
+                    'output': '\n\n'.join(trial_outputs),
+                    'setup_output': '\n\n'.join(diagnostics),
+                })
+                event(
+                    job,
+                    'ApacheBench complete',
+                    f'Completed {result_name} across {options.trials} measured '
+                    'trials.',
+                )
+            except Exception as exc:
+                if isinstance(exc, SSHCommandError) and exc.output:
+                    trial_outputs.append(
+                        f'--- Trial {len(trial_metrics) + 1} failed ---\n'
+                        f'{exc.output}'
+                    )
+                failure_metadata = {
+                    **common_metadata,
+                    **apachebench_metadata(workload_id, options),
+                    'measured_trials': options.trials,
+                    'completed_trials': len(trial_metrics),
+                }
+                job['results'].append({
+                    'id': result_id,
+                    'name': result_name,
+                    'command': '\n'.join(commands) or 'ApacheBench lifecycle',
+                    'started_at': started_at,
+                    'duration_seconds': round(time.monotonic() - started, 2),
+                    'status': 'failed',
+                    'error': str(exc),
+                    'metadata': failure_metadata,
+                    'trial_metrics': trial_metrics,
+                    'output': '\n\n'.join(trial_outputs),
+                    'setup_output': '\n\n'.join(diagnostics),
+                })
+                failures.append(f'{result_name}: {exc}')
+                event(
+                    job,
+                    'ApacheBench warning',
+                    f'{result_name} failed; continuing with the remaining '
+                    f'selected connection modes. {exc}',
+                )
+    except Exception as exc:
+        failure_output = '\n\n'.join(diagnostics)
+        if isinstance(exc, SSHCommandError) and exc.output:
+            failure_output += f'\n\n--- failure ---\n{exc.output[-20000:]}'
+        existing_ids = {result.get('id') for result in job.get('results', [])}
+        for workload_id in selected_workloads:
+            result_id = f'apachebench_{workload_id}'
+            if result_id in existing_ids:
+                continue
+            settings = apachebench_workload(workload_id)
+            name = f'ApacheBench — {settings["name"]}'
+            job['results'].append({
+                'id': result_id,
+                'name': name,
+                'command': 'ApacheBench HTTP server lifecycle',
+                'started_at': now(),
+                'duration_seconds': 0,
+                'status': 'failed',
+                'error': str(exc),
+                'output': failure_output,
+            })
+            failures.append(f'{name}: {exc}')
+        event(job, 'ApacheBench warning', f'ApacheBench setup failed. {exc}')
+    finally:
+        retain_httpd = (
+            httpd_ready
+            and not getattr(plan, 'destroy_after_completion', True)
+            and 'deathstarbench' not in plan.benchmarks
+        )
+        if retain_httpd:
+            event(
+                job,
+                'ApacheBench retained',
+                'Apache HTTP Server remains active for follow-up testing on '
+                'the retained benchmark VM.',
+            )
+        elif httpd_installed:
+            try:
+                ssh(
+                    job,
+                    'sudo systemctl stop httpd >/dev/null 2>&1 || true',
+                    timeout=120,
+                )
+                event(
+                    job,
+                    'ApacheBench teardown',
+                    'Stopped Apache HTTP Server after the benchmark.',
+                )
+            except Exception as exc:
+                event(
+                    job,
+                    'ApacheBench teardown warning',
+                    f'Unable to stop Apache HTTP Server: {exc}',
+                )
+    return tuple(failures)
 
 
 def run_deathstarbench(job, plan):
@@ -1628,9 +2333,8 @@ def run_deathstarbench(job, plan):
 
 
 def run_benchmarks(job, plan):
-    selected = set(plan.benchmarks)
-    if 'baseline' in selected:
-        selected.update({'sysbench_cpu', 'stream', 'sysbench_memory', 'fio'})
+    selected = expanded_benchmark_ids(plan)
+    apachebench_failures = ()
     readiness_hosts = [f'yum.{plan.region}.oci.oraclecloud.com']
     if {'stream', 'phoronix', 'deathstarbench'} & selected or plan.llm_benchmarks:
         readiness_hosts.append('github.com')
@@ -1644,23 +2348,35 @@ def run_benchmarks(job, plan):
         required_hosts=readiness_hosts,
     )
     install_benchmark_tools(job, plan, selected)
-    if {'iperf_tcp', 'iperf_udp'} & set(plan.benchmarks):
-        wait_for_iperf_peer(job)
+    iperf3_protocols = selected_iperf3_protocols(plan)
+    if iperf3_protocols:
+        wait_for_iperf_peer(job, iperf3_protocols)
     if plan.storage.additional_volume:
         mount_data_volume(job)
     commands = {
-      'sysbench_cpu': ('sysbench CPU', f'sysbench cpu --threads={int(plan.ocpus)} --time=60 run'),
-      'sysbench_memory': ('sysbench memory', f'sysbench memory --threads={int(plan.ocpus)} --time=60 --memory-block-size=1M run'),
+      'sysbench_cpu': ('Sysbench — CPU', f'sysbench cpu --threads={int(plan.ocpus)} --time=60 run'),
+      'sysbench_memory': ('Sysbench — Memory', f'sysbench memory --threads={int(plan.ocpus)} --time=60 --memory-block-size=1M run'),
       'stream': ('STREAM', f'{git_clone_command("https://github.com/jeffhammond/STREAM.git", "/tmp/stream")} && cd /tmp/stream && gcc -O3 -fopenmp stream.c -o stream && OMP_NUM_THREADS=$(nproc) ./stream'),
       'fio': ('fio storage suite', 'for W in read write randread randwrite; do fio --name=$W --directory=/data --rw=$W --bs=$([ "$W" = "read" -o "$W" = "write" ] && echo 1M || echo 4k) --size=4G --direct=1 --time_based --runtime=60 --group_reporting --output-format=json; done'),
-      'sysbench_fileio': ('sysbench file I/O', 'cd /data && sysbench fileio --file-total-size=4G prepare && sysbench fileio --file-total-size=4G --time=60 --file-test-mode=rndrw run && sysbench fileio --file-total-size=4G cleanup'),
-      'phoronix': ('Phoronix 7-Zip CPU', phoronix_command()),
+      'sysbench_fileio': (
+          'Sysbench — File I/O',
+          'cd /data '
+          '&& sysbench fileio --file-total-size=4G prepare '
+          "&& trap 'sysbench fileio --file-total-size=4G cleanup "
+          ">/dev/null 2>&1 || true' EXIT "
+          '&& sysbench fileio --file-total-size=4G --time=60 '
+          '--file-test-mode=rndrw run',
+      ),
     }
-    for key in selected:
-        if key not in commands: continue
-        name, command = commands[key]
-        execute_benchmark(job, key, name, command)
-    network_selected = set(plan.benchmarks) & {'iperf_tcp', 'iperf_udp'}
+    for key, (name, command) in commands.items():
+        if key in selected:
+            execute_benchmark(job, key, name, command)
+    phoronix_failures = (
+        run_phoronix_profiles(job, plan)
+        if 'phoronix' in selected
+        else ()
+    )
+    network_selected = expanded_iperf3_result_ids(plan)
     network_commands = network_benchmark_commands(job, network_selected)
     for key in network_selected:
         name, command = network_commands[key]
@@ -1669,7 +2385,7 @@ def run_benchmarks(job, plan):
             'Network',
             f'Targeting private peer {job["resources"]["peer_private_ip"]}.',
         )
-        execute_benchmark(job, key, name, command)
+        execute_benchmark(job, key, name, command, output_limit=None)
     if 'llama_bench' in plan.llm_benchmarks:
         event(job, 'Run', 'Building and running llama.cpp CPU benchmark.')
         execute_benchmark(
@@ -1678,8 +2394,17 @@ def run_benchmarks(job, plan):
             'llama.cpp throughput (CPU)',
             llama_benchmark_command(),
         )
+    if 'apachebench' in plan.benchmarks:
+        apachebench_failures = run_apachebench(job, plan)
     if 'deathstarbench' in plan.benchmarks:
         run_deathstarbench(job, plan)
+    deferred_failures = (*phoronix_failures, *apachebench_failures)
+    if deferred_failures:
+        raise RuntimeError(
+            'One or more independently selected benchmark workloads failed '
+            'after the remaining workloads were attempted: '
+            + ' | '.join(deferred_failures)
+        )
 
 
 def network_benchmark_commands(job, selected):
@@ -1692,12 +2417,16 @@ def network_benchmark_commands(job, selected):
         )
     return {
         'iperf_tcp': (
-            'iperf3 TCP',
-            f'iperf3 -c {peer_private_ip} -t 60 -P 4 -J',
+            'iperf3 — TCP',
+            f'iperf3 -4 -c {peer_private_ip} -t 60 -P 4 -J',
         ),
         'iperf_udp': (
-            'iperf3 UDP',
-            f'iperf3 -c {peer_private_ip} -u -b 0 -t 60 -J',
+            'iperf3 — UDP',
+            f'iperf3 -4 -c {peer_private_ip} -u -b 0 -t 60 -J',
+        ),
+        'iperf_sctp': (
+            'iperf3 — SCTP',
+            f'iperf3 -4 -c {peer_private_ip} --sctp -t 60 -P 4 -J',
         ),
     }
 
@@ -1872,6 +2601,7 @@ def destroy_resources(job, preserve_status=False):
             'loadgen_public_ip',
             'loadgen_private_ip',
             'loadgen_shape',
+            'loadgen_network_bandwidth_gbps',
         ),
         'peer_instance_id': ('peer_private_ip',),
     }

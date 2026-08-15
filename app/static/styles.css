@@ -206,20 +206,22 @@ small,
     margin-top: 3px
 }
 
-.deathstar-settings {
+.benchmark-settings {
     border-left: 4px solid var(--orange)
 }
 
-.deathstar-settings>p:first-of-type {
+.benchmark-settings>p:first-of-type {
     margin-top: 0
 }
 
-.deathstar-settings .grid {
+.deathstar-settings .grid,
+.apachebench-settings .grid {
     margin: 16px 0
 }
 
 .deathstar-settings input,
-.deathstar-settings select {
+.deathstar-settings select,
+.apachebench-settings input {
     width: 100%
 }
 

@@ -1,0 +1,558 @@
+import html
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from app import comparison
+
+
+def aws_plan(**overrides):
+    plan = {
+        'provider': 'aws',
+        'region': 'us-east-2',
+        'shape': 'c7i.2xlarge',
+        'ocpus': 8,
+        'memory_gb': 16,
+        'benchmarks': ['apachebench'],
+        'llm_benchmarks': [],
+        'apachebench': {
+            'workloads': ['new_connections'],
+            'request_count': 500000,
+            'concurrency': 100,
+            'response_size_kib': 64,
+            'warmup_requests': 10000,
+            'trials': 3,
+        },
+    }
+    plan.update(overrides)
+    return plan
+
+
+def apache_result(value=1000.0, *, status='completed'):
+    return {
+        'id': 'apachebench_new_connections',
+        'name': 'ApacheBench — New Connections',
+        'status': status,
+        'started_at': '2026-08-26T12:00:00+00:00',
+        'duration_seconds': 61.5,
+        'metadata': {
+            'provider': 'AWS',
+            'architecture': 'x86_64',
+            'httpd_mpm': 'event',
+            'httpd_keep_alive': 'On',
+        },
+        'metrics': {
+            'mean_requests_per_second': value,
+            'standard_deviation_requests_per_second': 25.0,
+            'mean_time_per_request_ms': 10.0,
+            'mean_p50_ms': 8.0,
+            'mean_p90_ms': 15.0,
+            'mean_p95_ms': 18.0,
+            'mean_p99_ms': 25.0,
+            'mean_transfer_rate_kib_per_second': 64000.0,
+        },
+        'command': 'ab -n 500000 http://10.0.0.1/',
+        'output': 'raw benchmark output',
+    }
+
+
+def artifact(run_id, value, *, plan=None):
+    return comparison.build_results_artifact({
+        'id': run_id,
+        'status': 'destroyed',
+        'benchmark_status': 'complete',
+        'created_at': '2026-08-26T12:00:00+00:00',
+        'updated_at': '2026-08-26T12:02:00+00:00',
+        'plan': plan or aws_plan(),
+        'results': [apache_result(value)],
+    })
+
+
+class ResultArtifactTests(unittest.TestCase):
+    def test_artifact_is_versioned_and_excludes_raw_or_sensitive_data(self):
+        result = apache_result()
+        result['setup_output'] = 'private setup details'
+        result['metadata'].update({
+            'target_private_ip': '10.0.0.4',
+            'auth_token': 'secret-token',
+            'nested': {'command': 'curl example.test', 'safe': 'yes'},
+        })
+        result['metrics']['invalid'] = float('nan')
+        job = {
+            'id': 'safe-run',
+            'status': 'complete',
+            'benchmark_status': 'complete',
+            'updated_at': '2026-08-26T12:02:00+00:00',
+            'plan': {
+                **aws_plan(),
+                'ssh_private_key': 'private',
+                'gcp_project_id': 'account-identifier',
+            },
+            'results': [result],
+        }
+
+        document = comparison.build_results_artifact(job)
+        encoded = json.dumps(document)
+
+        self.assertEqual(document['$schema'], comparison.RESULTS_SCHEMA)
+        self.assertEqual(document['schema_version'], 1)
+        self.assertEqual(document['provenance'], 'results_artifact')
+        self.assertNotIn('raw benchmark output', encoded)
+        self.assertNotIn('private setup details', encoded)
+        self.assertNotIn('curl example.test', encoded)
+        self.assertNotIn('secret-token', encoded)
+        self.assertNotIn('10.0.0.4', encoded)
+        self.assertNotIn('ssh_private_key', encoded)
+        self.assertNotIn('gcp_project_id', document['plan'])
+        self.assertEqual(
+            document['results'][0]['metadata']['nested'],
+            {'safe': 'yes'},
+        )
+        self.assertNotIn('invalid', document['results'][0]['metrics'])
+        self.assertFalse(
+            document['results'][0]['comparison']['contract_unknown']
+        )
+
+    def test_writer_is_atomic_and_reader_validates_the_schema(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / 'run-1'
+            path = comparison.write_results_artifact(
+                run,
+                {
+                    'id': 'run-1',
+                    'status': 'complete',
+                    'benchmark_status': 'complete',
+                    'plan': aws_plan(),
+                    'results': [apache_result()],
+                },
+            )
+
+            loaded = comparison.read_results_artifact(run)
+
+            self.assertEqual(path, run / 'results.json')
+            self.assertEqual(loaded['run']['id'], 'run-1')
+            self.assertEqual(len(loaded['results']), 1)
+            self.assertEqual(list(run.glob('.results-*.tmp')), [])
+
+            path.write_text(json.dumps({'schema_version': 99}))
+            with self.assertRaisesRegex(ValueError, 'unknown schema'):
+                comparison.read_results_artifact(path)
+
+
+class MetricRegistryTests(unittest.TestCase):
+    def test_registry_covers_every_canonical_result_and_subtests(self):
+        expected = {
+            'sysbench_cpu', 'sysbench_memory', 'sysbench_fileio', 'stream',
+            'fio', 'iperf_tcp', 'iperf_udp', 'iperf_sctp',
+            'apachebench_new_connections', 'apachebench_keep_alive',
+            'deathstarbench', 'llama_bench',
+            'phoronix_compress_7zip', 'phoronix_openssl',
+            'phoronix_build_linux_kernel', 'phoronix_tinymembench',
+        }
+        self.assertEqual(comparison.CANONICAL_RESULT_IDS, expected)
+        self.assertEqual(
+            {spec['subtest'] for spec in comparison.metric_specs('stream')},
+            {'copy', 'scale', 'add', 'triad'},
+        )
+        self.assertEqual(len(comparison.metric_specs('fio')), 8)
+        llama = comparison.metric_specs('llama_bench')
+        self.assertEqual(len(llama), 4)
+        self.assertTrue(all(spec['uncertainty_key'] for spec in llama))
+        self.assertEqual(comparison.metric_specs('unknown'), [])
+
+    def test_phoronix_configurations_become_separate_metrics_with_uncertainty(self):
+        result = {
+            'id': 'phoronix_compress_7zip',
+            'status': 'completed',
+            'metrics': {
+                'measurement_count': 2,
+                'measurements': [
+                    {
+                        'profile': 'pts/compress-7zip-1.13.1',
+                        'configuration': 'Compression Rating',
+                        'score': 31000,
+                        'unit': 'MIPS',
+                        'direction': 'Higher is better',
+                        'measured_trials': [30000, 31000, 32000],
+                    },
+                    {
+                        'profile': 'pts/compress-7zip-1.13.1',
+                        'configuration': 'Decompression Rating',
+                        'score': 20000,
+                        'unit': 'MIPS',
+                        'direction': 'Higher is better',
+                        'measured_trials': [19500, 20000, 20500],
+                    },
+                ],
+            },
+        }
+
+        metrics = comparison.extract_chart_metrics(result)
+
+        self.assertEqual(len(metrics), 2)
+        self.assertNotEqual(metrics[0]['key'], metrics[1]['key'])
+        self.assertEqual(metrics[0]['direction'], 'higher_is_better')
+        self.assertGreater(metrics[0]['uncertainty'], 0)
+
+    def test_unknown_nonfinite_and_failed_metrics_are_not_charted(self):
+        self.assertEqual(comparison.extract_chart_metrics({
+            'id': 'new_benchmark',
+            'status': 'completed',
+            'metrics': {'score': 5},
+        }), [])
+        self.assertEqual(comparison.extract_chart_metrics({
+            'id': 'sysbench_cpu',
+            'status': 'completed',
+            'metrics': {'events_per_second': float('inf')},
+        }), [])
+        self.assertEqual(comparison.extract_chart_metrics({
+            'id': 'sysbench_cpu',
+            'status': 'failed',
+            'metrics': {'events_per_second': 10},
+        }), [])
+
+
+class WorkloadContractTests(unittest.TestCase):
+    def test_hardware_dimensions_do_not_change_apachebench_fingerprint(self):
+        left = comparison.workload_fingerprint(
+            'apachebench_new_connections',
+            aws_plan(),
+            {'httpd_mpm': 'event', 'target_private_ip': '10.0.0.1'},
+        )
+        right = comparison.workload_fingerprint(
+            'apachebench_new_connections',
+            {
+                **aws_plan(
+                    provider='gcp',
+                    region='us-central1',
+                    shape='c4-standard-8',
+                    ocpus=16,
+                    memory_gb=32,
+                ),
+                'gcp_zone': 'us-central1-a',
+            },
+            {'httpd_mpm': 'event', 'target_private_ip': '10.4.0.9'},
+        )
+
+        self.assertFalse(left['contract_unknown'])
+        self.assertEqual(left['fingerprint'], right['fingerprint'])
+        self.assertNotIn('10.0.0.1', json.dumps(left))
+
+    def test_option_change_is_explained(self):
+        left = comparison.workload_fingerprint(
+            'apachebench_new_connections', aws_plan(), {}
+        )
+        changed_plan = aws_plan()
+        changed_plan['apachebench'] = {
+            **changed_plan['apachebench'],
+            'concurrency': 200,
+        }
+        right = comparison.workload_fingerprint(
+            'apachebench_new_connections', changed_plan, {}
+        )
+
+        differences = comparison.explain_workload_mismatch(left, right)
+
+        self.assertNotEqual(left['fingerprint'], right['fingerprint'])
+        self.assertIn(
+            'settings.concurrency',
+            {difference['path'] for difference in differences},
+        )
+
+    def test_oci_portable_marker_and_kernel_architecture_are_conservative(self):
+        oci = aws_plan(provider='oci')
+        legacy = comparison.workload_fingerprint('stream', oci, {})
+        portable = comparison.workload_fingerprint(
+            'stream', oci, {'portable_result_contract': 'v1'}
+        )
+        kernel_metadata = {
+            'phoronix_profile': 'pts/build-linux-kernel-1.18.0',
+            'phoronix_client_revision': 'pinned',
+            'measured_trials': 3,
+            'fixed_options': 'build-linux-kernel.build=defconfig',
+        }
+        missing_arch = comparison.workload_fingerprint(
+            'phoronix_build_linux_kernel', aws_plan(), kernel_metadata
+        )
+        x86 = comparison.workload_fingerprint(
+            'phoronix_build_linux_kernel',
+            aws_plan(),
+            {**kernel_metadata, 'architecture': 'amd64'},
+        )
+        arm = comparison.workload_fingerprint(
+            'phoronix_build_linux_kernel',
+            aws_plan(),
+            {**kernel_metadata, 'architecture': 'arm64'},
+        )
+
+        self.assertTrue(legacy['contract_unknown'])
+        self.assertFalse(portable['contract_unknown'])
+        self.assertTrue(missing_arch['contract_unknown'])
+        self.assertNotEqual(x86['fingerprint'], arm['fingerprint'])
+        self.assertEqual(
+            x86['contract']['settings']['architecture'], 'x86_64'
+        )
+
+    def test_llama_toolchain_is_required_and_changes_the_fingerprint(self):
+        metadata = {
+            'llama_cpp_revision': 'de699957b92f490efebad149665b0dccf127eaff',
+            'model_revision': 'c1d7cb837a660d93ba28f936efb148591bfba3e9',
+            'model_sha256': (
+                '9fecc3b3cd76bba89d504f29b616eedf7da85b96540e490ca5824d3f7d2776a0'
+            ),
+            'model_quantization': 'Q4_K_M',
+            'execution_backend': 'CPU',
+            'llama_compiler_version': '15.2.1',
+            'llama_cxx_compiler_version': '15.2.1',
+            'llama_assembler_version': '2.44',
+            'llama_native_optimization': True,
+        }
+        plan = aws_plan(benchmarks=[], llm_benchmarks=['llama_cpp'])
+
+        baseline = comparison.workload_fingerprint(
+            'llama_bench', plan, metadata
+        )
+        changed = comparison.workload_fingerprint(
+            'llama_bench',
+            plan,
+            {**metadata, 'llama_assembler_version': '2.35.2'},
+        )
+        missing = comparison.workload_fingerprint(
+            'llama_bench',
+            plan,
+            {key: value for key, value in metadata.items()
+             if key != 'llama_compiler_version'},
+        )
+
+        self.assertFalse(baseline['contract_unknown'])
+        self.assertNotEqual(baseline['fingerprint'], changed['fingerprint'])
+        self.assertTrue(missing['contract_unknown'])
+        self.assertEqual(
+            baseline['contract']['settings']['compiler_version'],
+            '15.2.1',
+        )
+        self.assertEqual(
+            baseline['contract']['settings']['cxx_compiler_version'],
+            '15.2.1',
+        )
+
+
+class ComparisonPayloadTests(unittest.TestCase):
+    def test_payload_charts_largest_matching_cohort_and_explains_mismatch(self):
+        changed = aws_plan()
+        changed['apachebench'] = {
+            **changed['apachebench'],
+            'concurrency': 200,
+        }
+        payload = comparison.build_comparison_payload([
+            artifact('run-a', 1000),
+            artifact('run-b', 1100),
+            artifact('run-c', 1200, plan=changed),
+        ])
+
+        request_chart = next(
+            chart for chart in payload['charts']
+            if chart['metric_id'] == 'mean_requests_per_second'
+        )
+        self.assertEqual(
+            [value['run_id'] for value in request_chart['values']],
+            ['run-a', 'run-b'],
+        )
+        self.assertEqual(request_chart['direction'], 'higher')
+        self.assertEqual(request_chart['values'][0]['error_low'], 975.0)
+        self.assertEqual(request_chart['values'][0]['error_high'], 1025.0)
+        self.assertTrue(request_chart['primary'])
+        self.assertEqual(len(payload['mismatches']), 2)
+        self.assertTrue(any(
+            item['run_id'] == 'run-c'
+            and item['result_name'] == 'ApacheBench — New Connections'
+            and any('differ' in reason for reason in item['reasons'])
+            for item in payload['excluded']
+        ))
+        self.assertEqual(payload['runs'][0]['ocpus'], 8)
+
+    def test_dynamic_subtests_have_distinct_stable_chart_ids(self):
+        plan = aws_plan(
+            benchmarks=['phoronix'],
+            phoronix={'profiles': ['compress_7zip']},
+        )
+
+        def document(run_id, offset):
+            return comparison.build_results_artifact({
+                'id': run_id,
+                'plan': plan,
+                'results': [{
+                    'id': 'phoronix_compress_7zip',
+                    'name': 'Phoronix — 7-Zip Compression',
+                    'status': 'completed',
+                    'metadata': {
+                        'phoronix_profile': 'pts/compress-7zip-1.13.1',
+                        'phoronix_client_revision': 'pinned',
+                        'measured_trials': 3,
+                    },
+                    'metrics': {
+                        'measurements': [
+                            {
+                                'profile': 'pts/compress-7zip-1.13.1',
+                                'configuration': 'Compression Rating',
+                                'score': 31000 + offset,
+                                'unit': 'MIPS',
+                                'direction': 'Higher is better',
+                                'measured_trials': [30000, 31000, 32000],
+                            },
+                            {
+                                'profile': 'pts/compress-7zip-1.13.1',
+                                'configuration': 'Decompression Rating',
+                                'score': 21000 + offset,
+                                'unit': 'MIPS',
+                                'direction': 'Higher is better',
+                                'measured_trials': [20000, 21000, 22000],
+                            },
+                        ],
+                    },
+                }],
+            })
+
+        first = comparison.build_comparison_payload([
+            document('run-a', 0),
+            document('run-b', 100),
+        ])
+        second = comparison.build_comparison_payload([
+            document('run-a', 0),
+            document('run-b', 100),
+        ])
+
+        self.assertEqual(len(first['charts']), 2)
+        self.assertEqual(
+            {chart['id'] for chart in first['charts']},
+            {chart['id'] for chart in second['charts']},
+        )
+        self.assertEqual(len({chart['id'] for chart in first['charts']}), 2)
+
+    def test_unknown_metric_is_excluded_with_a_reason(self):
+        document = comparison.build_results_artifact({
+            'id': 'unknown-run',
+            'plan': aws_plan(benchmarks=['new_benchmark']),
+            'results': [{
+                'id': 'new_benchmark',
+                'name': 'New benchmark',
+                'status': 'completed',
+                'metrics': {'score': 5},
+            }],
+        })
+
+        payload = comparison.build_comparison_payload([document])
+
+        self.assertEqual(payload['charts'], [])
+        self.assertTrue(any(
+            'No registered chart metrics' in reason
+            for item in payload['excluded']
+            for reason in item['reasons']
+        ))
+
+
+class LegacyReportTests(unittest.TestCase):
+    def report(self, plan):
+        nested = [{
+            'profile': 'pts/compress-7zip-1.13.1',
+            'configuration': 'Compression Rating',
+            'score': 31000,
+            'unit': 'MIPS',
+            'direction': 'Higher is better',
+            'measured_trials': [30000, 31000, 32000],
+        }]
+        plan_html = html.escape(json.dumps(plan, indent=2))
+        nested_html = html.escape(str(nested))
+        return (
+            '<!doctype html><html><body><h1>AWS Compute Benchmark Report</h1>'
+            '<p>Run legacy-1 · 2026-08-26T12:00:00+00:00</p>'
+            f'<h2>Configuration</h2><pre>{plan_html}</pre>'
+            '<section><h2>Sysbench — CPU</h2>'
+            '<p>Started 2026-08-26T12:01:00+00:00 · 60.1 seconds</p>'
+            '<p>Status: <strong>completed</strong></p>'
+            '<h3>Environment</h3><table><tbody>'
+            '<tr><th>Provider</th><td>AWS</td></tr>'
+            '<tr><th>Architecture</th><td>x86_64</td></tr>'
+            '</tbody></table>'
+            '<h3>Measured results</h3><table><tbody>'
+            '<tr><th>Events Per Second</th><td>1234.5</td></tr>'
+            '</tbody></table><h3>Command</h3><p><code>secret command</code></p>'
+            '<h3>Raw benchmark output</h3><pre>secret output</pre></section>'
+            '<section><h2>Phoronix — 7-Zip Compression</h2>'
+            '<p>Started 2026-08-26T12:02:00+00:00 · 90 seconds</p>'
+            '<p>Status: <strong>completed</strong></p>'
+            '<h3>Environment</h3><table><tbody>'
+            '<tr><th>Phoronix Profile</th><td>pts/compress-7zip-1.13.1</td></tr>'
+            '<tr><th>Phoronix Client Revision</th><td>pinned</td></tr>'
+            '<tr><th>Measured Trials</th><td>3</td></tr>'
+            '</tbody></table>'
+            '<h3>Measured results</h3><table><tbody>'
+            f'<tr><th>Measurements</th><td>{nested_html}</td></tr>'
+            '</tbody></table></section></body></html>'
+        )
+
+    def test_legacy_report_recovers_safe_metrics_and_known_contracts(self):
+        plan = aws_plan(
+            benchmarks=['sysbench', 'phoronix'],
+            sysbench={'workloads': ['cpu']},
+            phoronix={'profiles': ['compress_7zip']},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / 'legacy-1'
+            run.mkdir()
+            (run / 'report.html').write_text(self.report(plan))
+
+            document = comparison.load_results_document(run)
+
+        encoded = json.dumps(document)
+        self.assertEqual(document['provenance'], 'legacy_report')
+        self.assertFalse(document['contract_unknown'])
+        self.assertEqual(document['results'][0]['id'], 'sysbench_cpu')
+        self.assertEqual(
+            document['results'][0]['metrics']['events_per_second'], 1234.5
+        )
+        self.assertIsInstance(
+            document['results'][1]['metrics']['measurements'], list
+        )
+        self.assertFalse(
+            document['results'][1]['comparison']['contract_unknown']
+        )
+        self.assertNotIn('secret command', encoded)
+        self.assertNotIn('secret output', encoded)
+
+    def test_loader_prefers_results_json_over_legacy_html(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / 'run-1'
+            run.mkdir()
+            (run / 'report.html').write_text(self.report(aws_plan()))
+            comparison.write_results_artifact(run, {
+                'id': 'normalized-run',
+                'plan': aws_plan(),
+                'results': [apache_result()],
+            })
+
+            document = comparison.load_results_document(run)
+
+        self.assertEqual(document['provenance'], 'results_artifact')
+        self.assertEqual(document['run']['id'], 'normalized-run')
+
+    def test_loader_uses_a_valid_embedded_artifact_before_scalar_tables(self):
+        embedded = artifact('embedded-run', 1250)
+        encoded = json.dumps(embedded).replace('<', r'\u003c')
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / 'embedded-run'
+            run.mkdir()
+            (run / 'report.html').write_text(
+                '<html><body><script id="benchmark-results" '
+                f'type="application/json">{encoded}</script></body></html>'
+            )
+
+            document = comparison.load_results_document(run)
+
+        self.assertEqual(document['provenance'], 'embedded_results_artifact')
+        self.assertEqual(document['run']['id'], 'embedded-run')
+
+
+if __name__ == '__main__':
+    unittest.main()

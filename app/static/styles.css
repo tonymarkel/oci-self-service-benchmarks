@@ -7,6 +7,10 @@
     --navy: #222244;
 }
 
+[hidden] {
+    display: none !important
+}
+
 * {
     box-sizing: border-box
 }
@@ -151,6 +155,11 @@ textarea {
     color: var(--ink)
 }
 
+input[readonly] {
+    background: #f2f4f7;
+    color: #475467
+}
+
 textarea {
     min-height: 110px;
     font-family: ui-monospace, SFMono-Regular, monospace;
@@ -201,6 +210,19 @@ small,
     border-radius: 6px
 }
 
+.checks label.unavailable {
+    background: #f8fafc;
+    color: #98a2b3
+}
+
+.checks label.unavailable small {
+    color: #98a2b3
+}
+
+.checks label.unavailable input {
+    cursor: not-allowed
+}
+
 .checks small {
     display: block;
     margin-top: 3px
@@ -208,6 +230,14 @@ small,
 
 .benchmark-settings {
     border-left: 4px solid var(--orange)
+}
+
+.provider-notice {
+    margin: -8px 0 0;
+    padding: 12px 14px;
+    border-radius: 6px;
+    background: #f2f4f7;
+    color: #475467
 }
 
 .benchmark-settings>p:first-of-type {
@@ -248,6 +278,44 @@ button,
     border: 1px solid var(--orange);
     color: var(--orange);
     margin-left: 10px
+}
+
+.live-run-stop {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    margin: -26px 0 28px;
+    padding: 18px 20px;
+    background: #fff4f4;
+    border: 2px solid #b42318;
+    border-radius: 10px;
+    box-shadow: 0 4px 14px rgb(180 35 24 / 10%)
+}
+
+.live-run-stop strong {
+    color: #7a271a;
+    font-size: 16px
+}
+
+.live-run-stop p {
+    margin: 5px 0 0;
+    color: #912018
+}
+
+.danger-action {
+    flex: 0 0 auto;
+    background: #b42318;
+    white-space: nowrap
+}
+
+.danger-action:hover:not(:disabled) {
+    background: #912018
+}
+
+.danger-action:disabled {
+    cursor: wait;
+    opacity: .72
 }
 
 .status {
@@ -323,6 +391,16 @@ button,
     form {
         padding: 14px
     }
+
+    .live-run-stop {
+        align-items: stretch;
+        flex-direction: column
+    }
+
+    .danger-action {
+        width: 100%;
+        white-space: normal
+    }
 }
 
 .header-reset {
@@ -355,7 +433,8 @@ button,
 }
 
 .history-main {
-    max-width: 1180px
+    max-width: 1180px;
+    padding-bottom: 150px
 }
 
 .history-toolbar {
@@ -370,6 +449,35 @@ button,
     margin-bottom: 0
 }
 
+.history-filters {
+    display: grid;
+    grid-template-columns: minmax(240px, 2fr) repeat(2, minmax(150px, 1fr)) auto;
+    align-items: end;
+    gap: 14px;
+    margin-bottom: 22px;
+    padding: 18px
+}
+
+.history-filters input,
+.history-filters select {
+    width: 100%
+}
+
+.history-completed-filter {
+    min-height: 42px;
+    padding: 10px 12px;
+    flex-direction: row;
+    align-items: center;
+    border: 1px solid #c8d0de;
+    border-radius: 6px;
+    white-space: nowrap
+}
+
+.history-completed-filter input {
+    width: auto;
+    margin: 0
+}
+
 .run-list {
     display: grid;
     gap: 16px
@@ -380,6 +488,11 @@ button,
     border: 1px solid var(--line);
     border-radius: 10px;
     padding: 20px
+}
+
+.run-card-selected {
+    border-color: var(--orange);
+    box-shadow: 0 0 0 2px rgb(187 34 34 / 10%)
 }
 
 .run-card-head {
@@ -400,6 +513,31 @@ button,
     font-size: 12px
 }
 
+.run-card-status {
+    display: flex;
+    align-items: flex-end;
+    flex-direction: column;
+    gap: 10px
+}
+
+.run-comparison-choice {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 7px;
+    color: #344054;
+    font-size: 12px
+}
+
+.run-comparison-choice input {
+    width: auto;
+    margin: 0
+}
+
+.run-comparison-choice:has(input:disabled) {
+    color: #98a2b3
+}
+
 .status-pill {
     border-radius: 999px;
     padding: 5px 9px;
@@ -418,14 +556,15 @@ button,
 }
 
 .status-failed,
-.status-cleanup_failed {
+.status-cleanup_failed,
+.status-interrupted {
     background: #fef3f2;
     color: #b42318
 }
 
 .run-meta {
     display: grid;
-    grid-template-columns: 1fr 1.5fr .7fr .8fr 2fr;
+    grid-template-columns: .7fr 1fr 1.5fr .7fr .8fr 2fr;
     gap: 16px;
     margin: 0
 }
@@ -470,6 +609,278 @@ button,
     border-radius: 10px
 }
 
+.comparison-tray {
+    position: fixed;
+    z-index: 10;
+    bottom: 16px;
+    left: 50%;
+    width: min(calc(100% - 56px), 1124px);
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 15px 18px;
+    background: #222244;
+    color: #fff;
+    border-radius: 10px;
+    box-shadow: 0 10px 32px rgb(17 34 51 / 25%)
+}
+
+.comparison-tray strong,
+.comparison-tray span {
+    display: block
+}
+
+.comparison-tray span {
+    margin-top: 3px;
+    color: #cbd5e1;
+    font-size: 12px
+}
+
+.comparison-tray-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px
+}
+
+.comparison-tray-actions .secondary {
+    margin: 0;
+    border-color: #fff;
+    background: transparent;
+    color: #fff
+}
+
+.comparison-tray button:disabled {
+    cursor: not-allowed;
+    opacity: .55
+}
+
+.comparison-workspace {
+    scroll-margin-top: 18px;
+    margin: 32px 0 0;
+    padding: 24px;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 12px
+}
+
+.comparison-heading-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 28px
+}
+
+.comparison-heading-row h2 {
+    margin: 0;
+    font-size: 28px
+}
+
+.comparison-heading-row h2:focus {
+    outline: 3px solid rgb(187 34 34 / 30%);
+    outline-offset: 4px
+}
+
+.comparison-context,
+.comparison-status {
+    margin: 7px 0 0
+}
+
+.comparison-status {
+    min-height: 22px;
+    color: #475467;
+    font-size: 13px
+}
+
+.comparison-selectors {
+    display: grid;
+    flex: 1 1 400px;
+    grid-template-columns: minmax(190px, 1fr) minmax(190px, 1fr);
+    gap: 12px;
+    min-width: min(460px, 100%)
+}
+
+.comparison-chart {
+    margin-top: 24px
+}
+
+.comparison-figure {
+    margin: 0;
+    padding: 20px;
+    background: #f8fafc;
+    border: 1px solid #e4e7ec;
+    border-radius: 10px
+}
+
+.comparison-plot {
+    display: grid;
+    gap: 18px
+}
+
+.comparison-bar-row {
+    display: grid;
+    grid-template-columns: minmax(190px, 30%) 1fr;
+    align-items: center;
+    gap: 18px
+}
+
+.comparison-bar-label strong,
+.comparison-bar-label small {
+    display: block
+}
+
+.comparison-bar-label small {
+    margin-top: 4px;
+    overflow-wrap: anywhere
+}
+
+.comparison-bar-track {
+    --zero-position: 0%;
+    position: relative;
+    height: 26px;
+    overflow: visible;
+    background: #e8edf3;
+    border-radius: 4px
+}
+
+.comparison-bar-track::after {
+    content: '';
+    position: absolute;
+    z-index: 3;
+    top: -4px;
+    bottom: -4px;
+    left: var(--zero-position);
+    width: 1px;
+    background: #475467
+}
+
+.comparison-bar {
+    position: absolute;
+    z-index: 1;
+    top: 3px;
+    bottom: 3px;
+    min-width: 2px;
+    background: var(--orange);
+    border-radius: 3px
+}
+
+.comparison-bar-negative {
+    background: #667085
+}
+
+.comparison-error-bar {
+    position: absolute;
+    z-index: 4;
+    top: 11px;
+    height: 4px;
+    min-width: 2px;
+    border-left: 2px solid #112233;
+    border-right: 2px solid #112233;
+    background: #112233
+}
+
+.comparison-bar-value {
+    margin-top: 5px;
+    color: #344054;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums
+}
+
+.comparison-table-wrap {
+    max-width: 100%;
+    margin-top: 24px;
+    overflow-x: auto;
+    border: 1px solid #e4e7ec;
+    border-radius: 8px
+}
+
+.comparison-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    font-size: 12px
+}
+
+.comparison-table caption {
+    padding: 12px 14px;
+    color: #475467;
+    font-weight: 700;
+    text-align: left
+}
+
+.comparison-table th,
+.comparison-table td {
+    min-width: 110px;
+    padding: 11px 12px;
+    border-top: 1px solid #e4e7ec;
+    text-align: left;
+    vertical-align: top
+}
+
+.comparison-table thead th {
+    background: #f8fafc;
+    color: #475467;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .04em
+}
+
+.comparison-table tbody th {
+    min-width: 180px
+}
+
+.comparison-table .button {
+    margin: 0;
+    padding: 7px 10px;
+    font-size: 11px
+}
+
+.comparison-excluded {
+    margin-top: 20px;
+    padding: 16px 18px;
+    background: #fffaeb;
+    border-left: 4px solid #f79009;
+    border-radius: 6px
+}
+
+.comparison-excluded h3 {
+    margin: 0;
+    font-size: 15px
+}
+
+.comparison-excluded ul {
+    margin: 9px 0 0;
+    padding-left: 20px;
+    color: #7a2e0e
+}
+
+.comparison-excluded li + li {
+    margin-top: 6px
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0
+}
+
+.run-comparison-choice input:focus-visible,
+.history-filters input:focus-visible,
+.history-filters select:focus-visible,
+.comparison-selectors select:focus-visible,
+.comparison-tray button:focus-visible {
+    outline: 3px solid rgb(187 34 34 / 28%);
+    outline-offset: 2px
+}
+
 @media(max-width:720px) {
 
     .history-toolbar,
@@ -478,8 +889,53 @@ button,
         flex-direction: column
     }
 
+    .history-filters {
+        grid-template-columns: 1fr
+    }
+
+    .history-completed-filter {
+        white-space: normal
+    }
+
+    .run-card-status {
+        align-items: flex-start;
+        flex-direction: row;
+        justify-content: space-between
+    }
+
     .run-meta {
         grid-template-columns: 1fr 1fr
+    }
+
+    .comparison-heading-row,
+    .comparison-tray {
+        align-items: stretch;
+        flex-direction: column
+    }
+
+    .comparison-tray {
+        bottom: 12px;
+        width: calc(100% - 24px);
+        transform: translateX(-50%)
+    }
+
+    .comparison-selectors {
+        grid-template-columns: 1fr;
+        min-width: 0
+    }
+
+    .comparison-workspace {
+        padding: 18px 14px
+    }
+
+    .comparison-bar-row {
+        grid-template-columns: 1fr;
+        gap: 8px
+    }
+
+    .comparison-tray-actions,
+    .comparison-tray-actions button {
+        width: 100%
     }
 
     .header-reset {

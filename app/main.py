@@ -2,8 +2,10 @@ import asyncio
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 import base64
@@ -14,6 +16,7 @@ from ipaddress import ip_address
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 import oci
 from cryptography.hazmat.primitives import serialization
@@ -44,6 +47,13 @@ from .catalog import (
     PHORONIX_PROFILES,
     SYSBENCH_WORKLOADS,
 )
+from .comparison import (
+    build_comparison_payload,
+    build_results_artifact,
+    extract_chart_metrics,
+    load_results_document,
+    write_results_artifact,
+)
 from .deathstarbench import (
     build_workload_command,
     deploy_workload_command,
@@ -60,6 +70,17 @@ from .deathstarbench import (
     workload as deathstarbench_workload,
 )
 from .models import BenchmarkPlan, canonicalize_benchmark_plan
+from .guests import amazon_linux, rocky_linux, web as web_guest
+from . import llama_cpp
+from .iperf3 import parse_output as parse_iperf3_output
+from .providers import aws as aws_provider
+from .providers import azure as azure_provider
+from .providers import gcp as gcp_provider
+from .providers.registry import (
+    dispatch_provider_operation,
+    provider_adapter,
+    providers as registered_providers,
+)
 from .phoronix import (
     PREPARE_TIMEOUT_SECONDS as PHORONIX_PREPARE_TIMEOUT_SECONDS,
     parse_result_output as parse_phoronix_result,
@@ -72,9 +93,13 @@ ROOT = Path(__file__).parent
 PROJECT_ROOT = ROOT.parent
 RUNS = ROOT / 'runs'
 RUNS.mkdir(exist_ok=True)
-app = FastAPI(title='OCI Self-Service Benchmarks')
+app = FastAPI(title='Cloud Self-Service Benchmarks')
 app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')
 jobs: dict[str, dict[str, Any]] = {}
+job_tasks: dict[str, asyncio.Task] = {}
+job_cancel_events: dict[str, threading.Event] = {}
+job_processes: dict[str, set[subprocess.Popen]] = {}
+job_processes_lock = threading.Lock()
 LLAMA_TOOLSET_PACKAGE = 'gcc-toolset-12'
 LLAMA_TOOLSET_ENABLE = '/opt/rh/gcc-toolset-12/enable'
 LOAD_GENERATOR_SHAPES = (
@@ -93,6 +118,8 @@ IPERF3_RESULT_IDS = {
     'udp': 'iperf_udp',
     'sctp': 'iperf_sctp',
 }
+IPERF_PEER_READINESS_TIMEOUT_SECONDS = 720
+RUN_ID_PATTERN = re.compile(r'^[0-9a-f]{12}$')
 
 
 class SSHCommandError(RuntimeError):
@@ -100,6 +127,83 @@ class SSHCommandError(RuntimeError):
         super().__init__(message)
         self.output = output
         self.returncode = returncode
+
+
+class RunCancelled(BaseException):
+    """Cooperative live-run cancellation that bypasses workload wrappers."""
+
+
+def cancellation_event(job):
+    event_value = job.get('_cancel_event')
+    if isinstance(event_value, threading.Event):
+        return event_value
+    return job_cancel_events.get(str(job.get('id', '')))
+
+
+def cancellation_requested(job):
+    event_value = cancellation_event(job)
+    return bool(event_value and event_value.is_set())
+
+
+def raise_if_cancelled(job):
+    if cancellation_requested(job):
+        raise RunCancelled('The benchmark run was stopped by the user.')
+
+
+def register_job_process(job, process):
+    job_id = str(job['id'])
+    with job_processes_lock:
+        job_processes.setdefault(job_id, set()).add(process)
+
+
+def unregister_job_process(job, process):
+    job_id = str(job['id'])
+    with job_processes_lock:
+        processes = job_processes.get(job_id)
+        if not processes:
+            return
+        processes.discard(process)
+        if not processes:
+            job_processes.pop(job_id, None)
+
+
+def signal_process_termination(process):
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == 'posix':
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except (ProcessLookupError, OSError):
+        # The process may have exited between poll() and the signal.
+        return
+
+
+def signal_job_processes(job_id):
+    with job_processes_lock:
+        processes = tuple(job_processes.get(str(job_id), ()))
+    for process in processes:
+        signal_process_termination(process)
+
+
+def retain_job_task(job_id, task, *, cancel_event=None):
+    job_id = str(job_id)
+    job_tasks[job_id] = task
+    if cancel_event is not None:
+        job_cancel_events[job_id] = cancel_event
+
+    def release(completed_task):
+        if job_tasks.get(job_id) is completed_task:
+            job_tasks.pop(job_id, None)
+            job_cancel_events.pop(job_id, None)
+        try:
+            completed_task.exception()
+        except (asyncio.CancelledError, RunCancelled):
+            pass
+
+    task.add_done_callback(release)
+    return task
 
 
 def selected_sysbench_workloads(plan):
@@ -151,6 +255,113 @@ def plan_uses_iperf3(plan):
 
 def plan_uses_load_generator(plan):
     return bool({'deathstarbench', 'apachebench'} & set(plan.benchmarks))
+
+
+def expected_benchmark_result_ids(plan):
+    """Return the result rows required to complete a saved benchmark plan."""
+    if hasattr(plan, 'model_dump'):
+        plan = plan.model_dump()
+    if not isinstance(plan, dict):
+        return set()
+
+    canonical = canonicalize_benchmark_plan(dict(plan))
+    expected = set()
+    for benchmark_id in canonical.get('benchmarks') or []:
+        if benchmark_id == 'sysbench':
+            options = canonical.get('sysbench') or {}
+            workloads = options.get('workloads') or ['cpu']
+            expected.update(
+                SYSBENCH_RESULT_IDS.get(workload, f'sysbench_{workload}')
+                for workload in workloads
+            )
+        elif benchmark_id == 'iperf3':
+            options = canonical.get('iperf3') or {}
+            protocols = options.get('protocols') or ['tcp']
+            expected.update(
+                IPERF3_RESULT_IDS.get(protocol, f'iperf_{protocol}')
+                for protocol in protocols
+            )
+        elif benchmark_id == 'phoronix':
+            options = canonical.get('phoronix') or {}
+            profile_ids = options.get('profiles') or ['compress_7zip']
+            try:
+                expected.update(
+                    run.benchmark_id
+                    for run in phoronix_profile_runs(profile_ids, 'status')
+                )
+            except ValueError:
+                # Preserve unknown selections as impossible-to-satisfy rows so
+                # a stale or corrupt plan cannot be reported as complete.
+                expected.update(
+                    f'phoronix_unknown_{profile_id}'
+                    for profile_id in profile_ids
+                )
+        elif benchmark_id == 'apachebench':
+            options = canonical.get('apachebench') or {}
+            workloads = options.get('workloads') or [
+                'new_connections',
+                'keep_alive',
+            ]
+            expected.update(
+                f'apachebench_{workload}' for workload in workloads
+            )
+        else:
+            expected.add(benchmark_id)
+
+    expected.update(canonical.get('llm_benchmarks') or [])
+    return expected
+
+
+def benchmark_result_name(result_id, plan):
+    """Return a stable friendly name for an expected result row."""
+    if hasattr(plan, 'model_dump'):
+        plan = plan.model_dump()
+    canonical = canonicalize_benchmark_plan(
+        dict(plan) if isinstance(plan, dict) else {}
+    )
+    fixed_names = {
+        'sysbench_cpu': 'Sysbench — CPU',
+        'sysbench_memory': 'Sysbench — Memory',
+        'sysbench_fileio': 'Sysbench — File I/O',
+        'stream': 'STREAM',
+        'fio': 'fio storage suite',
+        'iperf_tcp': 'iperf3 — TCP',
+        'iperf_udp': 'iperf3 — UDP',
+        'iperf_sctp': 'iperf3 — SCTP',
+        'llama_bench': 'llama.cpp throughput (CPU)',
+    }
+    if result_id in fixed_names:
+        return fixed_names[result_id]
+    if result_id.startswith('apachebench_'):
+        workload_id = result_id.removeprefix('apachebench_')
+        try:
+            return f'ApacheBench — {apachebench_workload(workload_id)["name"]}'
+        except ValueError:
+            pass
+    if result_id.startswith('phoronix_'):
+        profile_ids = (canonical.get('phoronix') or {}).get('profiles') or []
+        try:
+            for run in phoronix_profile_runs(profile_ids, 'history'):
+                if run.benchmark_id == result_id:
+                    return run.name
+        except ValueError:
+            pass
+    if result_id == 'deathstarbench':
+        workload_id = (canonical.get('deathstarbench') or {}).get('workload')
+        selected = next(
+            (
+                workload for workload in DEATHSTARBENCH_WORKLOADS
+                if workload['id'] == workload_id
+            ),
+            None,
+        )
+        if selected:
+            return f'DeathStarBench — {selected["name"]}'
+    catalog_names = {
+        item['id']: item['name']
+        for item in [*BENCHMARKS, *LLM_BENCHMARKS]
+    }
+    return catalog_names.get(result_id, result_id)
 
 
 def git_clone_command(repository, destination):
@@ -401,62 +612,174 @@ def clients(region):
 def event(job, stage, message):
     job['events'].append({'at': now(), 'stage': stage, 'message': message})
     job['updated_at'] = now()
+    if job.get('_persist_state'):
+        persist_job_state(job)
 def fail(job, message):
     job['status'] = 'failed'; job['error'] = message; event(job, 'Failed', message)
 
 
 def benchmark_status(job):
-    statuses = [result.get('status') for result in job.get('results', [])]
+    results = job.get('results', [])
+    statuses = [result.get('status') for result in results]
     if 'failed' in statuses:
         return 'failed'
-    if statuses and all(status == 'completed' for status in statuses):
+    if not statuses and job.get('error'):
+        return 'failed'
+    if job.get('benchmark_interrupted'):
+        return 'interrupted'
+    completed_ids = {
+        result.get('id')
+        for result in results
+        if result.get('status') == 'completed' and result.get('id')
+    }
+    expected_ids = expected_benchmark_result_ids(job.get('plan'))
+    if (
+        statuses
+        and all(status == 'completed' for status in statuses)
+        and (not expected_ids or expected_ids <= completed_ids)
+    ):
         return 'complete'
+    if job.get('error'):
+        return 'failed'
     return 'pending'
+
+
+def require_complete_benchmark_results(job):
+    """Fail before reporting when a runner omitted an expected result row."""
+    outcome = benchmark_status(job)
+    if outcome == 'complete':
+        return
+    expected_ids = expected_benchmark_result_ids(job.get('plan'))
+    completed_ids = {
+        result.get('id')
+        for result in job.get('results', [])
+        if result.get('status') == 'completed' and result.get('id')
+    }
+    incomplete_ids = sorted(expected_ids - completed_ids)
+    detail = (
+        ' Incomplete result IDs: ' + ', '.join(incomplete_ids) + '.'
+        if incomplete_ids
+        else ''
+    )
+    raise RuntimeError(
+        'Benchmark execution ended without completing every selected '
+        f'result.{detail}'
+    )
+
+
+def has_recoverable_resources(job):
+    """Return whether a saved run has enough state for provider cleanup."""
+    resources = job.get('resources', {})
+    identity_only_ids = {
+        'image_id',
+        'aws_account_id',
+        'aws_peer_image_id',
+        'azure_subscription_id',
+        'azure_tenant_id',
+        'azure_peer_image_id',
+        'gcp_project_id',
+        'gcp_compute_project_id',
+        'gcp_peer_image_id',
+    }
+    if any(
+        value and key.endswith('_id') and key not in identity_only_ids
+        for key, value in resources.items()
+    ):
+        return True
+    plan = job.get('plan', {})
+    provider = (
+        plan.get('provider', 'oci')
+        if isinstance(plan, dict)
+        else getattr(plan, 'provider', 'oci')
+    )
+    provider = str(provider).lower()
+    # Provider ownership metadata is persisted before the first create. If a
+    # create succeeds but its response is lost, cleanup can recover the exact
+    # run-owned resources even though no resource ID was saved locally.
+    if provider == 'aws':
+        return bool(resources.get('aws_account_id'))
+    if provider == 'gcp':
+        return bool(
+            resources.get('gcp_project_id')
+            and resources.get('gcp_resource_prefix')
+        )
+    if provider == 'azure':
+        return bool(
+            resources.get('azure_subscription_id')
+            and resources.get('azure_resource_group_name')
+            and resources.get('azure_resource_group_tags')
+        )
+    return False
 
 
 def saved_report_benchmark_status(report_path):
     """Recover benchmark outcome for reports created before state.json existed."""
     report = report_path.read_text(errors='replace')
-    if '<p>Status: <strong>failed</strong></p>' in report:
+    statuses = {
+        html.unescape(status).strip().lower()
+        for status in re.findall(
+            r'<p\b[^>]*>\s*Status:\s*<strong\b[^>]*>'
+            r'\s*([^<]+?)\s*</strong>',
+            report,
+            flags=re.IGNORECASE,
+        )
+    }
+    if 'failed' in statuses:
         return 'failed'
-    if '<p>Status: <strong>completed</strong></p>' in report:
+    if 'completed' in statuses:
         return 'complete'
     return 'unknown'
 
 
 def normalize_saved_job_state(saved):
     """Upgrade states written before benchmark and lifecycle outcomes were split."""
+    cleanup_warnings = [
+        item.get('message')
+        for item in saved.get('events', [])
+        if item.get('stage') == 'Cleanup warning' and item.get('message')
+    ]
     if (
         saved.get('status') == 'failed'
         and saved.get('benchmark_status') == 'complete'
+        and cleanup_warnings
     ):
         saved['lifecycle_warning'] = saved.get('error')
         saved['error'] = None
-        cleanup_warnings = [
-            item.get('message')
-            for item in saved.get('events', [])
-            if item.get('stage') == 'Cleanup warning' and item.get('message')
-        ]
-        if cleanup_warnings:
-            saved['status'] = 'cleanup_failed'
-            saved['cleanup_error'] = (
-                saved.get('cleanup_error') or cleanup_warnings[-1]
-            )
-        else:
-            saved['status'] = 'reported'
+        saved['status'] = 'cleanup_failed'
+        saved['cleanup_error'] = (
+            saved.get('cleanup_error') or cleanup_warnings[-1]
+        )
     return saved
+
+
+def results_artifact_job(job):
+    """Add the computed benchmark outcome to a safe artifact source."""
+    return {**job, 'benchmark_status': benchmark_status(job)}
 
 
 def persist_job_state(job):
     directory = RUNS / job['id']
-    if not (directory / 'report.html').exists():
-        return
+    directory.mkdir(parents=True, exist_ok=True)
+    # Live producers retain the complete parsed result objects in memory, so
+    # persist their safe chart artifact alongside the small lifecycle state.
+    # A job recovered after an app restart contains only state.json summaries;
+    # load_persisted_job marks those jobs read-only for this artifact so a
+    # cleanup retry cannot replace rich metrics with summary rows.
+    if (
+        job.get('_persist_results_artifact', True)
+        and job.get('results')
+    ):
+        write_results_artifact(directory, results_artifact_job(job))
     state = {
         'id': job['id'],
         'status': job['status'],
         'error': job.get('error'),
         'cleanup_error': job.get('cleanup_error'),
+        'cancel_requested_at': job.get('cancel_requested_at'),
+        'benchmark_interrupted': bool(job.get('benchmark_interrupted')),
         'benchmark_status': benchmark_status(job),
+        'created_at': job.get('created_at'),
+        'updated_at': job.get('updated_at'),
         'plan': job.get('plan', {}),
         'events': job.get('events', []),
         'resources': job.get('resources', {}),
@@ -469,7 +792,26 @@ def persist_job_state(job):
             for result in job.get('results', [])
         ],
     }
-    (directory / 'state.json').write_text(json.dumps(state, indent=2))
+    state_path = directory / 'state.json'
+    temporary_path = directory / f'.state-{uuid.uuid4().hex}.tmp'
+    try:
+        temporary_path.write_text(json.dumps(state, indent=2))
+        os.replace(temporary_path, state_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def record_resource(job, key, value):
+    """Record a managed resource before a later provisioning step can fail."""
+    job.setdefault('resources', {})[key] = value
+    if job.get('_persist_state'):
+        persist_job_state(job)
+
+
+def forget_resource(job, key):
+    job.setdefault('resources', {}).pop(key, None)
+    if job.get('_persist_state'):
+        persist_job_state(job)
 
 
 def resolve_env_path(value, env_path):
@@ -484,16 +826,23 @@ def load_ssh_defaults(env_path=None):
     if not env_path.exists():
         return {'configured': False}
     settings = dotenv_values(env_path)
-    private_value = settings.get('OCI_BENCHMARK_SSH_PRIVATE_KEY_FILE')
-    public_value = settings.get('OCI_BENCHMARK_SSH_PUBLIC_KEY_FILE')
+    private_value = (
+        settings.get('BENCHMARK_SSH_PRIVATE_KEY_FILE')
+        or settings.get('OCI_BENCHMARK_SSH_PRIVATE_KEY_FILE')
+    )
+    public_value = (
+        settings.get('BENCHMARK_SSH_PUBLIC_KEY_FILE')
+        or settings.get('OCI_BENCHMARK_SSH_PUBLIC_KEY_FILE')
+    )
     if not private_value and not public_value:
         return {'configured': False}
     if not private_value or not public_value:
         return {
             'configured': False,
             'error': (
-                'Set both OCI_BENCHMARK_SSH_PRIVATE_KEY_FILE and '
-                'OCI_BENCHMARK_SSH_PUBLIC_KEY_FILE in .env.'
+                'Set both BENCHMARK_SSH_PRIVATE_KEY_FILE and '
+                'BENCHMARK_SSH_PUBLIC_KEY_FILE in .env (the existing '
+                'OCI_BENCHMARK_SSH_* aliases are also supported).'
             ),
         }
     paths = {
@@ -511,10 +860,130 @@ def load_ssh_defaults(env_path=None):
 
 
 def is_loopback_request(request):
+    if request.client and request.client.host == 'testclient':
+        return True
     try:
         return bool(request.client and ip_address(request.client.host).is_loopback)
     except ValueError:
         return False
+
+
+def parse_host_header(value):
+    """Return a normalized ``(host, port)`` pair for a strict Host header."""
+    value = str(value or '').strip()
+    if not value or any(character.isspace() for character in value) or ',' in value:
+        return None
+    port = None
+    if value.startswith('['):
+        closing = value.find(']')
+        if closing < 0:
+            return None
+        host = value[1:closing]
+        suffix = value[closing + 1:]
+        if suffix:
+            if not suffix.startswith(':') or not suffix[1:].isdigit():
+                return None
+            port = int(suffix[1:])
+    else:
+        if value.count(':') > 1:
+            # RFC-compliant IPv6 literals in Host are enclosed in brackets.
+            return None
+        if ':' in value:
+            host, port_value = value.rsplit(':', 1)
+            if not port_value.isdigit():
+                return None
+            port = int(port_value)
+        else:
+            host = value
+    host = host.casefold().rstrip('.')
+    if not host or (port is not None and not 1 <= port <= 65535):
+        return None
+    return host, port
+
+
+def request_host_is_local(request):
+    host_values = request.headers.getlist('host')
+    if len(host_values) != 1:
+        return False
+    parsed = parse_host_header(host_values[0])
+    if not parsed:
+        return False
+    host, _ = parsed
+    if (
+        request.client
+        and request.client.host == 'testclient'
+        and host == 'testserver'
+    ):
+        return True
+    if host == 'localhost':
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def request_origin_is_same(request):
+    """Require browser mutations to originate from this exact local origin."""
+    origins = request.headers.getlist('origin')
+    if not origins:
+        # Starlette's in-process test client is not a browser and does not add
+        # Origin automatically. Real unsafe HTTP requests must provide it.
+        return bool(request.client and request.client.host == 'testclient')
+    if len(origins) != 1:
+        return False
+    try:
+        origin = urlsplit(origins[0])
+    except ValueError:
+        return False
+    if (
+        origin.scheme not in {'http', 'https'}
+        or origin.username is not None
+        or origin.password is not None
+        or origin.path not in {'', '/'}
+        or origin.query
+        or origin.fragment
+    ):
+        return False
+    request_host_values = request.headers.getlist('host')
+    if len(request_host_values) != 1:
+        return False
+    request_host = parse_host_header(request_host_values[0])
+    if not request_host or not origin.hostname:
+        return False
+    try:
+        origin_port = origin.port
+    except ValueError:
+        return False
+    origin_host = origin.hostname.casefold().rstrip('.')
+    request_hostname, request_port = request_host
+    default_port = 443 if request.url.scheme == 'https' else 80
+    return (
+        origin.scheme == request.url.scheme
+        and origin_host == request_hostname
+        and (origin_port or default_port) == (request_port or default_port)
+    )
+
+
+@app.middleware('http')
+async def require_loopback_for_api(request: Request, call_next):
+    """Never expose local cloud credentials or mutations to remote clients."""
+    is_api = request.url.path == '/api' or request.url.path.startswith('/api/')
+    if is_api:
+        if not is_loopback_request(request) or not request_host_is_local(request):
+            return JSONResponse(
+                {'detail': 'The benchmark API is available only over loopback.'},
+                status_code=403,
+                headers={'Cache-Control': 'no-store'},
+            )
+        if request.method.upper() not in {'GET', 'HEAD', 'OPTIONS'}:
+            if not request_origin_is_same(request):
+                return JSONResponse(
+                    {'detail': 'The benchmark API rejected a cross-origin request.'},
+                    status_code=403,
+                    headers={'Cache-Control': 'no-store'},
+                )
+    return await call_next(request)
 
 
 def read_json_file(path, default):
@@ -524,15 +993,55 @@ def read_json_file(path, default):
         return default
 
 
-def report_summary(report_path):
-    directory = report_path.parent
+def run_summary(directory):
+    report_path = directory / 'report.html'
+    state_path = directory / 'state.json'
+    results_path = directory / 'results.json'
+    report_ready = report_path.exists()
+    state = read_json_file(state_path, {})
     plan = read_json_file(directory / 'plan.json', {})
-    state = read_json_file(directory / 'state.json', {})
+    results_document = None
+    if results_path.exists():
+        try:
+            results_document = load_results_document(directory)
+        except ValueError:
+            # Keep history usable when one artifact is truncated or corrupt;
+            # the state/report paths below remain authoritative fallbacks.
+            results_document = None
+    if not state and results_document:
+        state = dict(results_document.get('run') or {})
+        state['results'] = results_document.get('results') or []
+        state['plan'] = results_document.get('plan') or {}
+    if not plan and isinstance(state.get('plan'), dict):
+        plan = state['plan']
     if state:
         state = normalize_saved_job_state(state)
-        benchmark_outcome = state.get('benchmark_status', 'unknown')
+        status_job = {**state, 'plan': plan}
+        benchmark_outcome = (
+            benchmark_status(status_job)
+            if expected_benchmark_result_ids(plan)
+            else state.get('benchmark_status', 'unknown')
+        )
+        if (
+            benchmark_outcome in (None, 'pending', 'unknown')
+            and state.get('error')
+        ):
+            # Older state files may have persisted ``pending`` before failures
+            # without a benchmark result were classified separately from the
+            # infrastructure lifecycle.
+            benchmark_outcome = 'failed'
         status = state.get('status', 'reported')
-        created_at = next(
+        if status in {
+            'queued',
+            'provisioning',
+            'testing',
+            'reporting',
+            'cancelling',
+            'cleanup_pending',
+            'destroying',
+        }:
+            status = 'interrupted'
+        created_at = state.get('created_at') or next(
             (
                 item.get('at')
                 for item in state.get('events', [])
@@ -540,16 +1049,57 @@ def report_summary(report_path):
             ),
             None,
         )
+        recorded_results = state.get('results', [])
+        recorded_result_ids = {
+            item.get('id') for item in recorded_results if item.get('id')
+        }
         result_names = [
-            item.get('name')
-            for item in state.get('results', [])
-            if item.get('name')
+            item.get('name') or benchmark_result_name(item.get('id'), plan)
+            for item in recorded_results
+            if item.get('name') or item.get('id')
         ]
+        resources = state.get('resources') or {}
+        architecture = (
+            resources.get('architecture')
+            or resources.get('aws_architecture')
+            or resources.get('azure_architecture')
+            or resources.get('gcp_architecture')
+        )
     else:
+        if not report_ready:
+            raise ValueError(f'Run {directory.name} has no saved state or report.')
         benchmark_outcome = saved_report_benchmark_status(report_path)
         status = 'failed' if benchmark_outcome == 'failed' else 'reported'
         created_at = None
+        recorded_result_ids = set()
         result_names = []
+        architecture = None
+    if results_document is None:
+        try:
+            results_document = load_results_document(directory)
+        except (FileNotFoundError, ValueError):
+            results_document = None
+    comparison_result_ids = sorted({
+        result.get('id')
+        for result in (
+            results_document.get('results', []) if results_document else []
+        )
+        if (
+            result.get('id')
+            and result.get('status') == 'completed'
+            and extract_chart_metrics(result)
+        )
+    })
+    if architecture is None and results_document:
+        architecture = next(
+            (
+                result.get('metadata', {}).get('architecture')
+                for result in results_document.get('results', [])
+                if isinstance(result.get('metadata'), dict)
+                and result['metadata'].get('architecture')
+            ),
+            None,
+        )
     catalog_names = {
         item['id']: item['name']
         for item in [*BENCHMARKS, *LLM_BENCHMARKS]
@@ -567,31 +1117,70 @@ def report_summary(report_path):
         *plan.get('benchmarks', []),
         *plan.get('llm_benchmarks', []),
     ]
-    benchmark_names = result_names or [
-        catalog_names.get(item, item) for item in selected_ids
+    if result_names:
+        benchmark_names = list(dict.fromkeys(result_names))
+        missing_result_ids = (
+            expected_benchmark_result_ids(plan) - recorded_result_ids
+        )
+        for result_id in sorted(missing_result_ids):
+            name = benchmark_result_name(result_id, plan)
+            if name not in benchmark_names:
+                benchmark_names.append(name)
+    else:
+        benchmark_names = [
+            catalog_names.get(item, item) for item in selected_ids
+        ]
+    artifacts = [
+        path for path in (
+            report_path,
+            state_path,
+            results_path,
+        )
+        if path.exists()
     ]
     modified_at = datetime.fromtimestamp(
-        report_path.stat().st_mtime,
+        max(path.stat().st_mtime for path in artifacts),
         tz=timezone.utc,
     ).isoformat()
+    recoverable = has_recoverable_resources(state)
+    provider = plan.get('provider', 'oci')
     return {
         'id': directory.name,
+        'provider': provider,
         'created_at': created_at or modified_at,
         'modified_at': modified_at,
         'status': status,
         'benchmark_status': benchmark_outcome,
+        'report_ready': report_ready,
+        'recoverable': recoverable,
         'region': plan.get('region'),
+        'gcp_project_id': plan.get('gcp_project_id'),
+        'gcp_zone': plan.get('gcp_zone'),
+        'azure_subscription_id': plan.get('azure_subscription_id'),
+        'azure_zone': plan.get('azure_zone'),
         'availability_domain': plan.get('availability_domain'),
         'shape': plan.get('shape'),
         'ocpus': plan.get('ocpus'),
+        'cpu_kind': 'OCPU' if provider == 'oci' else 'vCPU',
         'memory_gb': plan.get('memory_gb'),
+        'architecture': architecture,
         'benchmarks': benchmark_names,
+        'comparison_result_ids': comparison_result_ids,
     }
 
 
+def report_summary(report_path):
+    return run_summary(report_path.parent)
+
+
 def saved_report_summaries():
-    reports = [report_summary(path) for path in RUNS.glob('*/report.html')]
-    return sorted(reports, key=lambda item: item['created_at'], reverse=True)
+    directories = {
+        path.parent
+        for pattern in ('*/report.html', '*/state.json', '*/results.json')
+        for path in RUNS.glob(pattern)
+    }
+    runs = [run_summary(directory) for directory in directories]
+    return sorted(runs, key=lambda item: item['created_at'], reverse=True)
 
 @app.get('/')
 def home(): return FileResponse(ROOT / 'static' / 'index.html')
@@ -626,6 +1215,11 @@ def catalog():
     }
 
 
+@app.get('/api/providers')
+def providers():
+    return {'items': [provider.as_dict() for provider in registered_providers()]}
+
+
 @app.get('/api/reports')
 def reports():
     return JSONResponse(
@@ -635,11 +1229,10 @@ def reports():
 
 @app.get('/api/reports/latest')
 def latest_report():
-    reports = list(RUNS.glob('*/report.html'))
-    if not reports:
-        raise HTTPException(404, 'No reports are available')
-    latest = max(reports, key=lambda path: path.stat().st_mtime)
-    return {'id': latest.parent.name}
+    runs = saved_report_summaries()
+    if not runs:
+        raise HTTPException(404, 'No saved runs are available')
+    return {'id': runs[0]['id']}
 
 @app.get('/api/oci/bootstrap')
 def bootstrap():
@@ -701,8 +1294,209 @@ def shapes(region: str, compartment_id: str | None = None, availability_domain: 
         return {'items': unique_shape_summaries(items)}
     except Exception as exc: raise HTTPException(400, str(exc))
 
+
+def aws_api_error(action, exc):
+    message = str(exc)
+    if 'SSO' in message and ('expired' in message.lower() or 'token' in message.lower()):
+        message += ' Run `aws sso login --profile default` and try again.'
+    return HTTPException(
+        400,
+        f'Unable to {action} with the local AWS profile: {message}',
+        headers={'Cache-Control': 'no-store'},
+    )
+
+
+def gcp_api_error(action, exc):
+    message = str(exc)
+    if 'credential' in message.casefold() or 'auth' in message.casefold():
+        message += (
+            ' Run `gcloud auth application-default login` and try again.'
+        )
+    return HTTPException(
+        400,
+        f'Unable to {action} with local Google Cloud ADC: {message}',
+        headers={'Cache-Control': 'no-store'},
+    )
+
+
+def azure_api_error(action, exc):
+    message = str(exc)
+    lowered = message.casefold()
+    if 'credential' in lowered or 'authentication' in lowered or 'login' in lowered:
+        message += ' Run `az login`, select a subscription, and try again.'
+    return HTTPException(
+        400,
+        f'Unable to {action} with the local Azure CLI session: {message}',
+        headers={'Cache-Control': 'no-store'},
+    )
+
+
+@app.get('/api/providers/aws/bootstrap')
+def aws_bootstrap(profile: str = 'default'):
+    try:
+        return JSONResponse(
+            aws_provider.bootstrap(
+                profile=(profile or 'default').strip(),
+                default_region='us-east-2',
+            ),
+            headers={'Cache-Control': 'no-store'},
+        )
+    except Exception as exc:
+        raise aws_api_error('read AWS identity and regions', exc) from exc
+
+
+@app.get('/api/providers/aws/placement')
+def aws_placement(
+    region: str = 'us-east-2',
+    profile: str = 'default',
+):
+    try:
+        return JSONResponse(
+            aws_provider.placement(
+                profile=(profile or 'default').strip(),
+                region=(region or 'us-east-2').strip(),
+            ),
+            headers={'Cache-Control': 'no-store'},
+        )
+    except Exception as exc:
+        raise aws_api_error('list AWS Availability Zones', exc) from exc
+
+
+@app.get('/api/providers/aws/instance-types')
+def aws_instance_types(
+    region: str = 'us-east-2',
+    profile: str = 'default',
+    availability_zone: str | None = None,
+):
+    try:
+        return JSONResponse(
+            aws_provider.instance_types(
+                profile=(profile or 'default').strip(),
+                region=(region or 'us-east-2').strip(),
+                availability_zone=(availability_zone or '').strip() or None,
+            ),
+            headers={'Cache-Control': 'no-store'},
+        )
+    except Exception as exc:
+        raise aws_api_error('list AWS EC2 instance types', exc) from exc
+
+
+@app.get('/api/providers/gcp/bootstrap')
+def gcp_bootstrap(project_id: str | None = None):
+    try:
+        return JSONResponse(
+            gcp_provider.bootstrap(
+                project_id=(
+                    project_id or os.getenv('GCP_PROJECT_ID') or ''
+                ).strip() or None,
+                default_region=(
+                    os.getenv('GCP_DEFAULT_REGION') or 'us-east1'
+                ).strip(),
+            ),
+            headers={'Cache-Control': 'no-store'},
+        )
+    except Exception as exc:
+        raise gcp_api_error(
+            'read the Google Cloud ADC identity and regions',
+            exc,
+        ) from exc
+
+
+@app.get('/api/providers/gcp/placement')
+def gcp_placement(project_id: str, region: str):
+    try:
+        return JSONResponse(
+            gcp_provider.placement(
+                project_id=project_id.strip(),
+                region=region.strip(),
+            ),
+            headers={'Cache-Control': 'no-store'},
+        )
+    except Exception as exc:
+        raise gcp_api_error('list Google Cloud zones', exc) from exc
+
+
+@app.get('/api/providers/gcp/machine-types')
+def gcp_machine_types(project_id: str, zone: str):
+    try:
+        return JSONResponse(
+            gcp_provider.machine_types(
+                project_id=project_id.strip(),
+                zone=zone.strip(),
+            ),
+            headers={'Cache-Control': 'no-store'},
+        )
+    except Exception as exc:
+        raise gcp_api_error(
+            'list Google Cloud Compute Engine machine types',
+            exc,
+        ) from exc
+
+
+@app.get('/api/providers/azure/bootstrap')
+def azure_bootstrap(subscription_id: str | None = None):
+    try:
+        return JSONResponse(
+            azure_provider.bootstrap(
+                subscription_id=(
+                    subscription_id
+                    or os.getenv('AZURE_SUBSCRIPTION_ID')
+                    or ''
+                ).strip() or None,
+                default_region=(
+                    os.getenv('AZURE_DEFAULT_REGION') or 'eastus2'
+                ).strip(),
+            ),
+            headers={'Cache-Control': 'no-store'},
+        )
+    except Exception as exc:
+        raise azure_api_error(
+            'read the Azure CLI identity, subscriptions, and regions',
+            exc,
+        ) from exc
+
+
+@app.get('/api/providers/azure/placement')
+def azure_placement(subscription_id: str, region: str):
+    try:
+        return JSONResponse(
+            azure_provider.placement(
+                subscription_id=subscription_id.strip(),
+                region=region.strip(),
+            ),
+            headers={'Cache-Control': 'no-store'},
+        )
+    except Exception as exc:
+        raise azure_api_error(
+            'list Azure availability zones and quota usage',
+            exc,
+        ) from exc
+
+
+@app.get('/api/providers/azure/vm-sizes')
+def azure_vm_sizes(
+    subscription_id: str,
+    region: str,
+    zone: str | None = None,
+):
+    try:
+        return JSONResponse(
+            azure_provider.vm_sizes(
+                subscription_id=subscription_id.strip(),
+                region=region.strip(),
+                zone=(zone or '').strip() or None,
+            ),
+            headers={'Cache-Control': 'no-store'},
+        )
+    except Exception as exc:
+        raise azure_api_error(
+            'list Azure virtual machine sizes',
+            exc,
+        ) from exc
+
 @app.post('/api/jobs')
 async def create_job(plan: BenchmarkPlan):
+    adapter = provider_adapter(plan)
     try:
         derived_public_key = derive_public_key(
             plan.ssh_private_key,
@@ -716,15 +1510,27 @@ async def create_job(plan: BenchmarkPlan):
             422,
             'The uploaded public key does not match the supplied private key.',
         )
+    if (
+        adapter.id == 'aws'
+        and not uploaded_public_key.startswith(('ssh-rsa ', 'ssh-ed25519 '))
+    ):
+        raise HTTPException(
+            422,
+            'AWS EC2 key-pair import supports RSA and Ed25519 public keys. '
+            'Configure one of those key types in .env for an AWS run.',
+        )
     job_id = uuid.uuid4().hex[:12]
+    sanitized_plan = plan.model_dump(
+        exclude={'ssh_private_key', 'ssh_public_key', 'ssh_key_passphrase'}
+    )
     job = {
         'id': job_id,
-        'plan': plan.model_dump(
-            exclude={'ssh_private_key', 'ssh_public_key', 'ssh_key_passphrase'}
-        ),
+        'plan': sanitized_plan,
         '_key': normalize_private_key(plan.ssh_private_key),
         '_passphrase': plan.ssh_key_passphrase,
         '_public_key': uploaded_public_key,
+        '_persist_state': True,
+        '_cancel_event': threading.Event(),
         'status': 'queued',
         'events': [],
         'resources': {},
@@ -732,29 +1538,64 @@ async def create_job(plan: BenchmarkPlan):
         'created_at': now(),
         'updated_at': now(),
     }
+    run_directory = RUNS / job_id
+    run_directory.mkdir(parents=True, exist_ok=False)
+    (run_directory / 'plan.json').write_text(json.dumps(sanitized_plan, indent=2))
     jobs[job_id] = job
-    event(job, 'Queued', 'Plan accepted. Waiting to provision OCI resources.')
-    asyncio.create_task(run_job(job, plan))
+    event(
+        job,
+        'Queued',
+        f'Plan accepted. Waiting to provision {adapter.short_name} resources.',
+    )
+    task = asyncio.create_task(run_job(job, plan))
+    retain_job_task(job_id, task, cancel_event=job['_cancel_event'])
     return {'id': job_id}
+
+
+def load_persisted_job(job_id):
+    state_path = RUNS / job_id / 'state.json'
+    if not state_path.exists():
+        return None
+    saved = normalize_saved_job_state(read_json_file(state_path, {}))
+    if not saved or saved.get('id') != job_id:
+        return None
+    saved.setdefault('events', [])
+    saved.setdefault('resources', {})
+    saved.setdefault('results', [])
+    saved.setdefault('plan', read_json_file(state_path.parent / 'plan.json', {}))
+    if expected_benchmark_result_ids(saved['plan']):
+        saved['benchmark_status'] = benchmark_status(saved)
+    saved['_persist_state'] = True
+    saved['_persist_results_artifact'] = False
+    return saved
 
 @app.get('/api/jobs/{job_id}')
 def job_status(job_id: str):
     job = jobs.get(job_id)
     if not job:
         report_path = RUNS / job_id / 'report.html'
+        saved = load_persisted_job(job_id)
+        if saved:
+            safe = {k: v for k, v in saved.items() if not k.startswith('_')}
+            safe['report_ready'] = report_path.exists()
+            safe['live'] = False
+            safe['recoverable'] = has_recoverable_resources(safe)
+            if safe.get('status') in {
+                'queued',
+                'provisioning',
+                'testing',
+                'reporting',
+                'cancelling',
+                'cleanup_pending',
+                'destroying',
+            }:
+                safe['status'] = 'interrupted'
+                safe['error'] = (
+                    'The local app stopped before this lifecycle completed. '
+                    'Its recorded resources can still be destroyed.'
+                )
+            return safe
         if report_path.exists():
-            state_path = RUNS / job_id / 'state.json'
-            if state_path.exists():
-                saved = normalize_saved_job_state(
-                    json.loads(state_path.read_text())
-                )
-                saved.setdefault(
-                    'plan',
-                    read_json_file(report_path.parent / 'plan.json', {}),
-                )
-                saved['report_ready'] = True
-                saved['live'] = False
-                return saved
             return {
                 'id': job_id,
                 'status': 'reported',
@@ -770,6 +1611,7 @@ def job_status(job_id: str):
     safe['benchmark_status'] = benchmark_status(job)
     safe['report_ready'] = (RUNS / job_id / 'report.html').exists()
     safe['live'] = True
+    safe['recoverable'] = has_recoverable_resources(safe)
     return safe
 
 @app.get('/api/jobs/{job_id}/report')
@@ -777,10 +1619,12 @@ def report(job_id: str, download: bool = False):
     path = RUNS / job_id / 'report.html'
     if not path.exists(): raise HTTPException(404, 'Report not ready')
     if download:
+        plan = read_json_file(path.parent / 'plan.json', {})
+        provider = str(plan.get('provider', 'oci')).lower()
         return FileResponse(
             path,
             media_type='text/html',
-            filename=f'oci-benchmark-{job_id}.html',
+            filename=f'{provider}-benchmark-{job_id}.html',
         )
     return FileResponse(path, media_type='text/html')
 
@@ -805,12 +1649,187 @@ def report_plan(job_id: str):
             )
     raise HTTPException(404, 'Saved plan not found')
 
+
+def results_document_for_job(job_id):
+    """Load a saved result document, with a safe live-run fallback."""
+    try:
+        document = load_results_document(RUNS / job_id)
+    except FileNotFoundError:
+        job = jobs.get(job_id)
+        if job is not None:
+            document = build_results_artifact(results_artifact_job(job))
+        else:
+            raise
+    recorded_id = str((document.get('run') or {}).get('id') or '')
+    if recorded_id and recorded_id != job_id:
+        raise ValueError(
+            f'The saved run identity {recorded_id!r} does not match '
+            f'{job_id!r}.'
+        )
+    return document
+
+
+def parse_comparison_run_ids(value):
+    """Validate the bounded canonical run-ID list accepted by the API."""
+    if not isinstance(value, str):
+        raise ValueError('Provide exactly one runs query parameter.')
+    run_ids = value.split(',')
+    if not 2 <= len(run_ids) <= 8:
+        raise ValueError('Select between 2 and 8 runs for comparison.')
+    if any(not RUN_ID_PATTERN.fullmatch(run_id) for run_id in run_ids):
+        raise ValueError(
+            'Every comparison run ID must be exactly 12 lowercase '
+            'hexadecimal characters.'
+        )
+    if len(set(run_ids)) != len(run_ids):
+        raise ValueError('Comparison run IDs must be unique.')
+    return run_ids
+
+
+@app.get('/api/jobs/{job_id}/results')
+def job_results(job_id: str):
+    if not RUN_ID_PATTERN.fullmatch(job_id):
+        raise HTTPException(
+            404,
+            'Results not found',
+            headers={'Cache-Control': 'no-store'},
+        )
+    try:
+        document = results_document_for_job(job_id)
+    except FileNotFoundError:
+        raise HTTPException(
+            404,
+            'Results not found',
+            headers={'Cache-Control': 'no-store'},
+        ) from None
+    except ValueError as exc:
+        raise HTTPException(
+            422,
+            str(exc),
+            headers={'Cache-Control': 'no-store'},
+        ) from exc
+    return JSONResponse(
+        document,
+        headers={'Cache-Control': 'no-store'},
+    )
+
+
+@app.get('/api/comparisons')
+def comparisons(runs: str | None = None):
+    try:
+        run_ids = parse_comparison_run_ids(runs)
+    except ValueError as exc:
+        raise HTTPException(
+            422,
+            str(exc),
+            headers={'Cache-Control': 'no-store'},
+        ) from exc
+
+    documents = []
+    for run_id in run_ids:
+        try:
+            documents.append(results_document_for_job(run_id))
+        except FileNotFoundError:
+            raise HTTPException(
+                404,
+                f'Run {run_id} has no saved benchmark results.',
+                headers={'Cache-Control': 'no-store'},
+            ) from None
+        except ValueError as exc:
+            raise HTTPException(
+                422,
+                f'Run {run_id} has invalid saved results: {exc}',
+                headers={'Cache-Control': 'no-store'},
+            ) from exc
+    return JSONResponse(
+        build_comparison_payload(documents),
+        headers={'Cache-Control': 'no-store'},
+    )
+
 @app.post('/api/jobs/{job_id}/destroy')
 async def destroy(job_id: str):
     job = jobs.get(job_id)
+    live_job = job is not None
+    if not job:
+        job = load_persisted_job(job_id)
+        if job:
+            jobs[job_id] = job
     if not job: raise HTTPException(404, 'Job not found')
-    if job['status'] in ('destroying', 'destroyed'): return {'status': job['status']}
-    asyncio.create_task(asyncio.to_thread(destroy_with_status, job))
+    if job['status'] == 'destroyed':
+        return {'status': job['status']}
+    supervisor = job_tasks.get(job_id)
+    supervisor_active = bool(supervisor and not supervisor.done())
+    if live_job and supervisor_active:
+        cancellable_statuses = {
+            'queued',
+            'provisioning',
+            'testing',
+            'reporting',
+            'cancelling',
+        }
+        if job['status'] in {
+            'cleanup_pending',
+            'destroying',
+        }:
+            # The supervisor already owns this cleanup attempt. Never launch a
+            # second cleanup worker against the same resource manifest.
+            return {'status': job['status']}
+        if job['status'] in cancellable_statuses:
+            cancel = cancellation_event(job)
+            if cancel is None:
+                cancel = threading.Event()
+                job['_cancel_event'] = cancel
+                job_cancel_events[job_id] = cancel
+            if not cancel.is_set():
+                outcome_before_stop = benchmark_status(job)
+                if outcome_before_stop not in {'complete', 'failed'}:
+                    job['benchmark_interrupted'] = True
+                job['cancel_requested_at'] = now()
+                job['status'] = 'cancelling'
+                event(
+                    job,
+                    'Stop requested',
+                    'Stopping the active benchmark operation before '
+                    'destroying its infrastructure.',
+                )
+                cancel.set()
+            signal_job_processes(job_id)
+            return {'status': job['status']}
+        # A retained or failed run can become terminal immediately before its
+        # supervisor's final persistence step. Wait for that producer to exit
+        # before starting manual cleanup; do not relabel completed results as
+        # interrupted merely because the task callback has not run yet.
+        await asyncio.shield(supervisor)
+        if job['status'] == 'destroyed':
+            return {'status': job['status']}
+    if live_job and job['status'] == 'destroying':
+        return {'status': job['status']}
+    persisted_status = job.get('status')
+    if (
+        not live_job
+        and persisted_status in {
+            'queued',
+            'provisioning',
+            'testing',
+            'reporting',
+            'cancelling',
+        }
+        and job.get('benchmark_status') not in {'complete', 'failed'}
+    ):
+        # A restarted app cannot resume the benchmark process itself. Preserve
+        # that partial outcome before cleanup changes the lifecycle status to
+        # ``destroying`` and later ``destroyed``.
+        job['benchmark_interrupted'] = True
+    # A persisted ``destroying`` state means the process stopped before the
+    # cleanup task finished.  Mark the retry synchronously so a second click
+    # cannot enqueue another cleanup task, then resume from the exact recorded
+    # provider resource manifest.
+    job['status'] = 'destroying'
+    persist_job_state(job)
+    cleanup_task = asyncio.create_task(
+        asyncio.to_thread(destroy_with_status, job)
+    )
+    retain_job_task(job_id, cleanup_task)
     return {'status': 'destroying'}
 
 def normalize_private_key(private_key):
@@ -899,19 +1918,69 @@ def platform_config(plan):
         is_memory_encryption_enabled=plan.security.mode == 'confidential',
     )
 
+async def finish_cancelled_job(job):
+    """Let the one run supervisor serialize interruption and cloud cleanup."""
+    if job.get('_cancellation_cleanup_started'):
+        return
+    job['_cancellation_cleanup_started'] = True
+    outcome_before_cleanup = benchmark_status(job)
+    if outcome_before_cleanup not in {'complete', 'failed'}:
+        job['benchmark_interrupted'] = True
+        job['error'] = None
+    if job.get('status') == 'destroyed':
+        persist_job_state(job)
+        return
+    job['status'] = 'cleanup_pending'
+    event(
+        job,
+        'Stopped',
+        'The active run operation stopped. Saving any available results before '
+        'destroying its infrastructure.',
+    )
+    if job.get('results'):
+        try:
+            await asyncio.to_thread(make_report, job)
+        except Exception as report_error:
+            event(job, 'Report warning', str(report_error))
+    await asyncio.to_thread(destroy_with_status, job)
+
+
 async def run_job(job, plan):
     try:
-        job['status'] = 'provisioning'; event(job, 'Provision', 'Creating VCN, gateway, subnet, and security rules.')
+        raise_if_cancelled(job)
+        adapter = provider_adapter(plan)
+        job['status'] = 'provisioning'
+        event(
+            job,
+            'Provision',
+            adapter.provisioning_message,
+        )
         await asyncio.to_thread(provision, job, plan)
+        raise_if_cancelled(job)
         job['status'] = 'testing'; event(job, 'Connect', 'Instance is ready; connecting with SSH.')
         await asyncio.to_thread(run_benchmarks, job, plan)
+        raise_if_cancelled(job)
+        require_complete_benchmark_results(job)
         job['status'] = 'reporting'; event(job, 'Report', 'Generating standalone HTML report.')
         await asyncio.to_thread(make_report, job)
+        raise_if_cancelled(job)
         if plan.destroy_after_completion:
+            job['status'] = 'cleanup_pending'
+            event(
+                job,
+                'Cleanup',
+                'The report is ready; starting automatic infrastructure '
+                'cleanup.',
+            )
             await asyncio.to_thread(destroy_with_status, job)
         else:
             job['status'] = 'complete'; event(job, 'Complete', 'Benchmarks and report are ready. Infrastructure has been retained.')
+    except RunCancelled:
+        await finish_cancelled_job(job)
     except Exception as exc:
+        if cancellation_requested(job):
+            await finish_cancelled_job(job)
+            return
         fail(job, str(exc))
         if plan.destroy_after_completion:
             job['status'] = 'cleanup_pending'
@@ -932,16 +2001,21 @@ async def run_job(job, plan):
             except Exception as cleanup:
                 event(job, 'Cleanup warning', str(cleanup))
         elif job['resources'].get('public_ip'):
+            ssh_user = job['resources'].get('ssh_user', 'opc')
             event(
                 job,
                 'Retained',
                 f'Infrastructure retained after failure. Connect with: ssh -i '
-                f'/path/to/private-key opc@{job["resources"]["public_ip"]}',
+                f'/path/to/private-key {ssh_user}@'
+                f'{job["resources"]["public_ip"]}',
             )
     finally:
+        if cancellation_requested(job):
+            await finish_cancelled_job(job)
         job.pop('_key', None)
         job.pop('_passphrase', None)
         job.pop('_public_key', None)
+        job.pop('_cancel_event', None)
         persist_job_state(job)
 
 
@@ -1001,20 +2075,51 @@ def configured_network_bandwidth_gbps(shape, ocpus):
 
 
 def provision(job, plan):
+    return dispatch_provider_operation(
+        plan,
+        'provision',
+        {
+            'oci': lambda: provision_oci(job, plan),
+            'aws': lambda: aws_provider.provision(
+                job,
+                plan,
+                public_key=job.get('_public_key'),
+                emit=event,
+                persist=persist_job_state,
+            ),
+            'gcp': lambda: gcp_provider.provision(
+                job,
+                plan,
+                public_key=job.get('_public_key'),
+                emit=event,
+                persist=persist_job_state,
+            ),
+            'azure': lambda: azure_provider.provision(
+                job,
+                plan,
+                public_key=job.get('_public_key'),
+                emit=event,
+                persist=persist_job_state,
+            ),
+        },
+    )
+
+
+def provision_oci(job, plan):
     cfg, compute, network, storage, identity = clients(plan.region)
     iperf3_protocols = selected_iperf3_protocols(plan)
     uses_load_generator = plan_uses_load_generator(plan)
     compartment = plan.compartment_id or cfg['tenancy']; suffix = job['id']; tags = {'oci-benchmark-job': suffix, 'managed-by': 'oci-self-service-benchmarks'}
     ad = plan.availability_domain or identity.list_availability_domains(compartment).data[0].name
     vcn = network.create_vcn(oci.core.models.CreateVcnDetails(compartment_id=compartment, cidr_block='10.42.0.0/16', dns_label=f'b{suffix}', display_name=f'benchmark-{suffix}', freeform_tags=tags)).data
-    job['resources']['vcn_id'] = vcn.id
+    record_resource(job, 'vcn_id', vcn.id)
     oci.wait_until(network, network.get_vcn(vcn.id), 'lifecycle_state', 'AVAILABLE')
     vcn = network.get_vcn(vcn.id).data
-    igw = network.create_internet_gateway(oci.core.models.CreateInternetGatewayDetails(compartment_id=compartment, vcn_id=vcn.id, is_enabled=True, display_name=f'benchmark-igw-{suffix}', freeform_tags=tags)).data; job['resources']['igw_id'] = igw.id
-    nat = network.create_nat_gateway(oci.core.models.CreateNatGatewayDetails(compartment_id=compartment, vcn_id=vcn.id, display_name=f'benchmark-nat-{suffix}', freeform_tags=tags)).data; job['resources']['nat_id'] = nat.id
-    rt = network.create_route_table(oci.core.models.CreateRouteTableDetails(compartment_id=compartment, vcn_id=vcn.id, display_name=f'benchmark-routes-{suffix}', route_rules=[oci.core.models.RouteRule(destination='0.0.0.0/0', destination_type='CIDR_BLOCK', network_entity_id=igw.id)], freeform_tags=tags)).data; job['resources']['route_table_id'] = rt.id
-    sl = network.create_security_list(oci.core.models.CreateSecurityListDetails(compartment_id=compartment, vcn_id=vcn.id, display_name=f'benchmark-security-{suffix}', ingress_security_rules=benchmark_security_rules(include_deathstarbench='deathstarbench' in plan.benchmarks, iperf3_protocols=iperf3_protocols, include_apachebench='apachebench' in plan.benchmarks), egress_security_rules=[oci.core.models.EgressSecurityRule(protocol='all', destination='0.0.0.0/0')], freeform_tags=tags)).data; job['resources']['security_list_id'] = sl.id
-    subnet = network.create_subnet(oci.core.models.CreateSubnetDetails(compartment_id=compartment, vcn_id=vcn.id, cidr_block='10.42.1.0/24', dns_label='public', display_name=f'benchmark-public-{suffix}', route_table_id=rt.id, dhcp_options_id=vcn.default_dhcp_options_id, security_list_ids=[sl.id], prohibit_public_ip_on_vnic=False, freeform_tags=tags)).data; job['resources']['subnet_id'] = subnet.id
+    igw = network.create_internet_gateway(oci.core.models.CreateInternetGatewayDetails(compartment_id=compartment, vcn_id=vcn.id, is_enabled=True, display_name=f'benchmark-igw-{suffix}', freeform_tags=tags)).data; record_resource(job, 'igw_id', igw.id)
+    nat = network.create_nat_gateway(oci.core.models.CreateNatGatewayDetails(compartment_id=compartment, vcn_id=vcn.id, display_name=f'benchmark-nat-{suffix}', freeform_tags=tags)).data; record_resource(job, 'nat_id', nat.id)
+    rt = network.create_route_table(oci.core.models.CreateRouteTableDetails(compartment_id=compartment, vcn_id=vcn.id, display_name=f'benchmark-routes-{suffix}', route_rules=[oci.core.models.RouteRule(destination='0.0.0.0/0', destination_type='CIDR_BLOCK', network_entity_id=igw.id)], freeform_tags=tags)).data; record_resource(job, 'route_table_id', rt.id)
+    sl = network.create_security_list(oci.core.models.CreateSecurityListDetails(compartment_id=compartment, vcn_id=vcn.id, display_name=f'benchmark-security-{suffix}', ingress_security_rules=benchmark_security_rules(include_deathstarbench='deathstarbench' in plan.benchmarks, iperf3_protocols=iperf3_protocols, include_apachebench='apachebench' in plan.benchmarks), egress_security_rules=[oci.core.models.EgressSecurityRule(protocol='all', destination='0.0.0.0/0')], freeform_tags=tags)).data; record_resource(job, 'security_list_id', sl.id)
+    subnet = network.create_subnet(oci.core.models.CreateSubnetDetails(compartment_id=compartment, vcn_id=vcn.id, cidr_block='10.42.1.0/24', dns_label='public', display_name=f'benchmark-public-{suffix}', route_table_id=rt.id, dhcp_options_id=vcn.default_dhcp_options_id, security_list_ids=[sl.id], prohibit_public_ip_on_vnic=False, freeform_tags=tags)).data; record_resource(job, 'subnet_id', subnet.id)
     event(job, 'Provision', 'Public subnet uses the VCN default Internet and VCN Resolver DHCP options.')
     image = latest_oracle_linux_image(
         compute,
@@ -1027,16 +2132,25 @@ def provision(job, plan):
             or plan_uses_iperf3(plan)
         ),
     )
+    image_id = str(getattr(image, 'id', '') or '').strip()
+    image_name = str(getattr(image, 'display_name', '') or '').strip()
+    if not image_id or not image_name:
+        raise RuntimeError(
+            'OCI did not return the immutable ID and display name for the '
+            'selected runner image.'
+        )
+    record_resource(job, 'image_id', image_id)
+    record_resource(job, 'image_name', image_name)
     available_shapes = compute.list_shapes(
         compartment,
         availability_domain=ad,
     ).data
     listed_shape = next(x for x in available_shapes if x.shape == plan.shape)
     shape_config = oci.core.models.LaunchInstanceShapeConfigDetails(ocpus=plan.ocpus, memory_in_gbs=plan.memory_gb) if (listed_shape.ocpu_options or listed_shape.memory_options) else None
-    source = oci.core.models.InstanceSourceViaImageDetails(source_type='image', image_id=image.id, boot_volume_size_in_gbs=plan.storage.boot_size_gb, boot_volume_vpus_per_gb=plan.storage.boot_performance)
+    source = oci.core.models.InstanceSourceViaImageDetails(source_type='image', image_id=image_id, boot_volume_size_in_gbs=plan.storage.boot_size_gb, boot_volume_vpus_per_gb=plan.storage.boot_performance)
     launch_options = oci.core.models.LaunchOptions(network_type='VFIO' if plan.networking == 'sriov' else 'PARAVIRTUALIZED')
     launch = oci.core.models.LaunchInstanceDetails(compartment_id=compartment, availability_domain=ad, fault_domain=plan.fault_domain, shape=plan.shape, shape_config=shape_config, launch_options=launch_options, platform_config=platform_config(plan), display_name=f'benchmark-{suffix}', metadata={'ssh_authorized_keys': job['_public_key']}, source_details=source, create_vnic_details=oci.core.models.CreateVnicDetails(subnet_id=subnet.id, assign_public_ip=True, assign_private_dns_record=True, hostname_label='runner', skip_source_dest_check=False), freeform_tags=tags)
-    instance = compute.launch_instance(launch).data; job['resources']['instance_id'] = instance.id
+    instance = compute.launch_instance(launch).data; record_resource(job, 'instance_id', instance.id)
     event(job, 'Provision', f'Launched {plan.shape}; waiting for it to become RUNNING.')
     oci.wait_until(compute, compute.get_instance(instance.id), 'lifecycle_state', 'RUNNING')
     vnic_attachment = compute.list_vnic_attachments(
@@ -1045,10 +2159,10 @@ def provision(job, plan):
     ).data[0]
     runner_vnic = network.get_vnic(vnic_attachment.vnic_id).data
     pub = runner_vnic.public_ip
-    job['resources']['public_ip'] = pub
-    job['resources']['private_ip'] = runner_vnic.private_ip
+    record_resource(job, 'public_ip', pub)
+    record_resource(job, 'private_ip', runner_vnic.private_ip)
     if plan.storage.additional_volume:
-        vol = storage.create_volume(oci.core.models.CreateVolumeDetails(compartment_id=compartment, availability_domain=ad, size_in_gbs=plan.storage.additional_size_gb, vpus_per_gb=plan.storage.additional_performance, display_name=f'benchmark-data-{suffix}', freeform_tags=tags)).data; job['resources']['volume_id'] = vol.id
+        vol = storage.create_volume(oci.core.models.CreateVolumeDetails(compartment_id=compartment, availability_domain=ad, size_in_gbs=plan.storage.additional_size_gb, vpus_per_gb=plan.storage.additional_performance, display_name=f'benchmark-data-{suffix}', freeform_tags=tags)).data; record_resource(job, 'volume_id', vol.id)
         oci.wait_until(storage, storage.get_volume(vol.id), 'lifecycle_state', 'AVAILABLE')
         if plan.storage.mount_style == 'iscsi':
             attach_details = oci.core.models.AttachIScsiVolumeDetails(
@@ -1067,7 +2181,7 @@ def provision(job, plan):
                 is_shareable=False,
             )
         attachment = compute.attach_volume(attach_details).data
-        job['resources']['volume_attachment_id'] = attachment.id
+        record_resource(job, 'volume_attachment_id', attachment.id)
         event(job, 'Provision', 'Waiting for the /data volume attachment.')
         oci.wait_until(
             compute,
@@ -1108,9 +2222,9 @@ def provision(job, plan):
             freeform_tags=tags,
         )
         loadgen = compute.launch_instance(loadgen_launch).data
-        job['resources']['loadgen_instance_id'] = loadgen.id
-        job['resources']['loadgen_shape'] = loadgen_shape.shape
-        job['resources']['loadgen_network_bandwidth_gbps'] = (
+        record_resource(job, 'loadgen_instance_id', loadgen.id)
+        record_resource(job, 'loadgen_shape', loadgen_shape.shape)
+        record_resource(job, 'loadgen_network_bandwidth_gbps',
             configured_network_bandwidth_gbps(loadgen_shape, 2)
         )
         event(
@@ -1131,8 +2245,8 @@ def provision(job, plan):
             instance_id=loadgen.id,
         ).data[0]
         loadgen_vnic = network.get_vnic(loadgen_attachment.vnic_id).data
-        job['resources']['loadgen_public_ip'] = loadgen_vnic.public_ip
-        job['resources']['loadgen_private_ip'] = loadgen_vnic.private_ip
+        record_resource(job, 'loadgen_public_ip', loadgen_vnic.public_ip)
+        record_resource(job, 'loadgen_private_ip', loadgen_vnic.private_ip)
 
     if iperf3_protocols:
         event(
@@ -1142,9 +2256,9 @@ def provision(job, plan):
             f'protocols: {", ".join(protocol.upper() for protocol in iperf3_protocols)}.',
         )
         peer_rt = network.create_route_table(oci.core.models.CreateRouteTableDetails(compartment_id=compartment, vcn_id=vcn.id, display_name=f'benchmark-peer-routes-{suffix}', route_rules=[oci.core.models.RouteRule(destination='0.0.0.0/0', destination_type='CIDR_BLOCK', network_entity_id=nat.id)], freeform_tags=tags)).data
-        job['resources']['peer_route_table_id'] = peer_rt.id
+        record_resource(job, 'peer_route_table_id', peer_rt.id)
         peer_subnet = network.create_subnet(oci.core.models.CreateSubnetDetails(compartment_id=compartment, vcn_id=vcn.id, cidr_block='10.42.2.0/24', dns_label='peer', display_name=f'benchmark-peer-{suffix}', route_table_id=peer_rt.id, dhcp_options_id=vcn.default_dhcp_options_id, security_list_ids=[sl.id], prohibit_public_ip_on_vnic=True, freeform_tags=tags)).data
-        job['resources']['peer_subnet_id'] = peer_subnet.id
+        record_resource(job, 'peer_subnet_id', peer_subnet.id)
         peer_image = latest_oracle_linux_image(
             compute,
             compartment,
@@ -1153,11 +2267,50 @@ def provision(job, plan):
         )
         peer_script = iperf_peer_cloud_init(iperf3_protocols)
         peer_launch = oci.core.models.LaunchInstanceDetails(compartment_id=compartment, availability_domain=ad, shape='VM.Standard.E5.Flex', shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(ocpus=1, memory_in_gbs=8), display_name=f'benchmark-peer-{suffix}', metadata={'user_data': base64.b64encode(peer_script.encode()).decode()}, source_details=oci.core.models.InstanceSourceViaImageDetails(source_type='image', image_id=peer_image.id, boot_volume_size_in_gbs=50), create_vnic_details=oci.core.models.CreateVnicDetails(subnet_id=peer_subnet.id, assign_public_ip=False, assign_private_dns_record=True, hostname_label='peer'), freeform_tags=tags)
-        peer = compute.launch_instance(peer_launch).data; job['resources']['peer_instance_id'] = peer.id
+        peer = compute.launch_instance(peer_launch).data; record_resource(job, 'peer_instance_id', peer.id)
         oci.wait_until(compute, compute.get_instance(peer.id), 'lifecycle_state', 'RUNNING')
         peer_attachment = compute.list_vnic_attachments(compartment, instance_id=peer.id).data[0]
-        job['resources']['peer_private_ip'] = network.get_vnic(peer_attachment.vnic_id).data.private_ip
+        record_resource(job, 'peer_private_ip', network.get_vnic(peer_attachment.vnic_id).data.private_ip)
     event(job, 'Provision', f'Infrastructure ready. Public IP: {pub}')
+
+def terminate_process_and_collect(process, grace_seconds=2):
+    signal_process_termination(process)
+    try:
+        return process.communicate(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name == 'posix':
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except (ProcessLookupError, OSError):
+            pass
+        return process.communicate()
+    except (OSError, ValueError):
+        # If a local pipe was unexpectedly closed, output recovery is no
+        # longer possible, but the producer still must be reaped before cloud
+        # cleanup can begin.
+        try:
+            process.wait(timeout=grace_seconds)
+        except subprocess.TimeoutExpired:
+            try:
+                if os.name == 'posix':
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except (ProcessLookupError, OSError):
+                pass
+            process.wait()
+        return '', ''
+
+
+def command_output(stdout, stderr):
+    return '\n'.join(
+        part.strip()
+        for part in (stdout, stderr)
+        if part and part.strip()
+    )
+
 
 def ssh(
     job,
@@ -1165,7 +2318,15 @@ def ssh(
     timeout=1800,
     host_key='public_ip',
     include_stderr=False,
+    transport_attempts=12,
+    transport_retry_delay_seconds=10,
 ):
+    transport_attempts = int(transport_attempts)
+    transport_retry_delay_seconds = float(transport_retry_delay_seconds)
+    if transport_attempts < 1:
+        raise ValueError('SSH transport attempts must be at least one.')
+    if transport_retry_delay_seconds < 0:
+        raise ValueError('SSH transport retry delay cannot be negative.')
     target = job.get('resources', {}).get(host_key)
     if not target:
         raise RuntimeError(f'SSH target {host_key!r} is not available for this run.')
@@ -1189,63 +2350,159 @@ def ssh(
             'SSH_ASKPASS_REQUIRE': 'force',
             'OCI_BENCHMARK_SSH_PASSPHRASE': job['_passphrase'],
         })
+    ssh_user = job.get('resources', {}).get('ssh_user', 'opc')
+    known_hosts_path = RUNS / str(job['id']) / 'known_hosts'
+    known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+    known_hosts_path.touch(exist_ok=True)
+    os.chmod(known_hosts_path, 0o600)
     args = [
         'ssh',
-        '-o', 'StrictHostKeyChecking=no',
+        '-F', '/dev/null',
+        '-o', 'ForwardAgent=no',
+        '-o', 'ClearAllForwardings=yes',
+        '-o', 'IdentityAgent=none',
+        '-o', 'StrictHostKeyChecking=accept-new',
+        '-o', f'UserKnownHostsFile={known_hosts_path}',
+        '-o', 'GlobalKnownHostsFile=/dev/null',
         '-o', 'ConnectTimeout=15',
         '-o', 'NumberOfPasswordPrompts=1',
+        '-o', 'PasswordAuthentication=no',
+        '-o', 'KbdInteractiveAuthentication=no',
+        '-o', 'PreferredAuthentications=publickey',
+        '-o', 'IdentitiesOnly=yes',
         '-i', path,
-        f'opc@{target}',
+        f'{ssh_user}@{target}',
         command,
     ]
     try:
-        for attempt in range(12):
+        for attempt in range(transport_attempts):
+            raise_if_cancelled(job)
+            process = subprocess.Popen(
+                args,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=ssh_env,
+                start_new_session=os.name == 'posix',
+            )
+            register_job_process(job, process)
+            deadline = time.monotonic() + timeout
+            stdout = ''
+            stderr = ''
             try:
-                result = subprocess.run(
-                    args,
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    env=ssh_env,
-                )
-            except subprocess.TimeoutExpired as exc:
-                stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else exc.stdout
-                stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else exc.stderr
-                output = '\n'.join(
-                    part.strip()
-                    for part in (stdout, stderr)
-                    if part and part.strip()
-                )
-                raise SSHCommandError(
-                    f'SSH command timed out after {timeout} seconds.',
-                    output=output,
-                ) from exc
-            if result.returncode == 0:
+                while True:
+                    if cancellation_requested(job):
+                        stdout, stderr = terminate_process_and_collect(process)
+                        raise RunCancelled(
+                            'The benchmark run was stopped by the user.'
+                        )
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        stdout, stderr = terminate_process_and_collect(process)
+                        raise SSHCommandError(
+                            f'SSH command timed out after {timeout} seconds.',
+                            output=command_output(stdout, stderr),
+                        )
+                    try:
+                        stdout, stderr = process.communicate(
+                            timeout=min(0.25, remaining)
+                        )
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+            finally:
+                try:
+                    if process.poll() is None:
+                        # Never let an unexpected local pipe/communicate
+                        # failure leave SSH (and its remote producer) running
+                        # while the supervisor moves on to cloud cleanup.
+                        terminate_process_and_collect(process)
+                finally:
+                    unregister_job_process(job, process)
+            raise_if_cancelled(job)
+            if process.returncode == 0:
                 if include_stderr:
-                    return '\n'.join(
-                        part.strip()
-                        for part in (result.stdout, result.stderr)
-                        if part and part.strip()
-                    )
-                return result.stdout
-            if result.returncode != 255 or attempt == 11:
-                output = '\n'.join(
-                    part.strip()
-                    for part in (result.stdout, result.stderr)
-                    if part and part.strip()
-                )
+                    return command_output(stdout, stderr)
+                return stdout
+            if (
+                process.returncode != 255
+                or attempt == transport_attempts - 1
+            ):
+                output = command_output(stdout, stderr)
                 raise SSHCommandError(
                     f'SSH command failed: {output[-2000:]}',
                     output=output,
-                    returncode=result.returncode,
+                    returncode=process.returncode,
                 )
-            time.sleep(10)
+            cancel = cancellation_event(job)
+            if cancel is None:
+                time.sleep(transport_retry_delay_seconds)
+            elif cancel.wait(transport_retry_delay_seconds):
+                raise RunCancelled('The benchmark run was stopped by the user.')
         raise RuntimeError('SSH connection failed.')
     finally:
         os.unlink(path)
         if askpass_path:
             os.unlink(askpass_path)
+
+
+def wait_for_ssh_transport(
+    job,
+    *,
+    attempts=24,
+    retry_delay_seconds=5,
+):
+    """Wait for first-boot SSH without rerunning a remote setup command."""
+    attempts = int(attempts)
+    retry_delay_seconds = float(retry_delay_seconds)
+    if attempts < 1:
+        raise ValueError('SSH readiness attempts must be at least one.')
+    if retry_delay_seconds < 0:
+        raise ValueError('SSH readiness retry delay cannot be negative.')
+    event(
+        job,
+        'Connect',
+        'Waiting for the guest SSH service and metadata-backed user key.',
+    )
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        raise_if_cancelled(job)
+        try:
+            ssh(
+                job,
+                'true',
+                timeout=30,
+                transport_attempts=1,
+                transport_retry_delay_seconds=0,
+            )
+            event(job, 'Connect', 'Guest SSH transport is ready.')
+            return
+        except SSHCommandError as exc:
+            # OpenSSH uses 255 for connection/authentication transport errors.
+            # A timeout of this no-op command is likewise a connection-class
+            # failure. Any real remote exit status fails immediately.
+            if exc.returncode not in {None, 255}:
+                raise
+            last_error = exc
+        if attempt < attempts:
+            event(
+                job,
+                'Connect',
+                f'Guest SSH is not ready; retrying in '
+                f'{retry_delay_seconds:g} seconds ({attempt}/{attempts}).',
+            )
+            cancel = cancellation_event(job)
+            if cancel is None:
+                time.sleep(retry_delay_seconds)
+            elif cancel.wait(retry_delay_seconds):
+                raise RunCancelled(
+                    'The benchmark run was stopped by the user.'
+                )
+    raise RuntimeError(
+        f'Guest SSH did not become ready after {attempts} bounded attempts. '
+        f'{last_error or "Connection failed."}'
+    ) from last_error
 
 def wait_for_guest_readiness(
     job,
@@ -1311,8 +2568,43 @@ def wait_for_guest_readiness(
     )
 
 
-def iperf_peer_readiness_command(peer_private_ip, protocols=('tcp',)):
+def iperf_peer_readiness_command(
+    peer_private_ip,
+    protocols=('tcp',),
+    *,
+    verify_tcp_udp=False,
+):
     peer_private_ip = str(ip_address(peer_private_ip))
+    protocols = tuple(dict.fromkeys(protocols))
+    unsupported = set(protocols) - {'tcp', 'udp', 'sctp'}
+    if unsupported:
+        raise ValueError(
+            f'Unsupported iperf3 readiness protocol: {sorted(unsupported)[0]}'
+        )
+    data_probes = ''
+    if verify_tcp_udp:
+        probe_commands = {
+            'tcp': 'iperf3 -4 -c "$PEER_IP" -t 1 -J',
+            'udp': 'iperf3 -4 -c "$PEER_IP" -u -b 10M -t 1 -J',
+        }
+        probes = []
+        for protocol in protocols:
+            command = probe_commands.get(protocol)
+            if not command:
+                continue
+            label = protocol.upper()
+            path = f'/tmp/iperf3-{protocol}-readiness.json'
+            probes.append(
+                f'{label}_READY=false; for attempt in $(seq 1 6); do '
+                f'if timeout 20 {command} >{path} 2>&1; then '
+                f'{label}_READY=true; break; fi; '
+                f'if [ "$attempt" -lt 6 ]; then sleep 2; fi; done; '
+                f'if [ "${label}_READY" != true ]; then '
+                f'echo "The private peer did not complete an iperf3 {label} '
+                f'readiness test." >&2; cat {path} >&2 || true; exit 1; fi; '
+                f'rm -f {path}; echo "iperf3 {label} data path is ready."; '
+            )
+        data_probes = ''.join(probes)
     sctp_probe = ''
     if 'sctp' in protocols:
         sctp_probe = (
@@ -1321,7 +2613,7 @@ def iperf_peer_readiness_command(peer_private_ip, protocols=('tcp',)):
             '>/tmp/iperf3-sctp-readiness.json 2>&1; then '
             'echo "iperf3 SCTP data path is ready."; '
             'rm -f /tmp/iperf3-sctp-readiness.json; exit 0; fi; '
-            'sleep 2; done; '
+            'if [ "$attempt" -lt 6 ]; then sleep 2; fi; done; '
             'echo "The private peer did not complete an SCTP readiness test." '
             '>&2; cat /tmp/iperf3-sctp-readiness.json >&2 || true; exit 1'
         )
@@ -1333,17 +2625,22 @@ def iperf_peer_readiness_command(peer_private_ip, protocols=('tcp',)):
         '"exec 3<>/dev/tcp/$PEER_IP/5201" 2>/dev/null; then '
         'CONTROL_READY=true; break; fi; '
         'echo "Waiting for iperf3 peer ($attempt/60)."; '
-        'sleep 5; '
+        'if [ "$attempt" -lt 60 ]; then sleep 5; fi; '
         'done; '
         'if [ "$CONTROL_READY" != true ]; then '
         'echo "The private iperf3 peer did not open TCP control port 5201 '
-        'after 300 seconds." >&2; exit 1; fi; '
+        'after 60 bounded attempts." >&2; exit 1; fi; '
         'echo "iperf3 TCP control connection at $PEER_IP:5201 is ready."; '
-        f'{sctp_probe}'
+        f'{data_probes}{sctp_probe}'
     )
 
 
-def wait_for_iperf_peer(job, protocols=('tcp',)):
+def wait_for_iperf_peer(
+    job,
+    protocols=('tcp',),
+    *,
+    verify_tcp_udp=False,
+):
     peer_private_ip = job.get('resources', {}).get('peer_private_ip')
     if not peer_private_ip:
         raise RuntimeError(
@@ -1356,8 +2653,12 @@ def wait_for_iperf_peer(job, protocols=('tcp',)):
     )
     output = ssh(
         job,
-        iperf_peer_readiness_command(peer_private_ip, protocols),
-        timeout=360,
+        iperf_peer_readiness_command(
+            peer_private_ip,
+            protocols,
+            verify_tcp_udp=verify_tcp_udp,
+        ),
+        timeout=IPERF_PEER_READINESS_TIMEOUT_SECONDS,
     )
     event(job, 'Network', output.strip())
 
@@ -1388,6 +2689,145 @@ def enable_ol9_developer_epel(job, host_key='public_ip'):
         host_key=host_key,
     )
 
+
+def wait_for_web_guest_readiness(
+    job,
+    plan,
+    benchmark_id,
+    *,
+    role,
+    host_key='public_ip',
+    label='web benchmark instance',
+):
+    """Wait for one web guest without leaking provider logic into runners."""
+    provider = web_guest.provider_id(plan)
+    hosts = web_guest.readiness_hosts(
+        provider,
+        benchmark_id,
+        role,
+        region=getattr(plan, 'region', None),
+    )
+    if provider == 'oci':
+        wait_for_guest_readiness(
+            job,
+            plan.region,
+            host_key=host_key,
+            label=label,
+            required_hosts=hosts,
+        )
+        return
+
+    resources = job.get('resources', {})
+    architecture = (
+        resources.get('architecture')
+        if role == 'service'
+        else resources.get('loadgen_architecture', 'x86_64')
+    )
+    event(
+        job,
+        'Connect',
+        f'Waiting for {label} DNS and package repositories on '
+        f'{provider.upper()}.',
+    )
+    output = ssh(
+        job,
+        web_guest.readiness_command(
+            provider,
+            benchmark_id,
+            role,
+            region=getattr(plan, 'region', None),
+            expected_architecture=architecture,
+        ),
+        host_key=host_key,
+        timeout=600,
+        include_stderr=True,
+    )
+    event(
+        job,
+        'Connect',
+        f'{label.capitalize()} readiness passed: {output.strip()[-1000:]}',
+    )
+
+
+def install_apachebench_guest(job, plan, *, role, host_key='public_ip'):
+    """Install ApacheBench target/client packages for the selected provider."""
+    provider = web_guest.provider_id(plan)
+    if provider == 'oci':
+        packages = (
+            {'firewalld', 'httpd'}
+            if role == 'service'
+            else {'httpd-tools', 'time'}
+        )
+        dnf_install(job, packages, host_key=host_key)
+        return
+    for step in web_guest.apachebench_install_steps(provider, role):
+        event(job, 'ApacheBench install', f'Installing {step.name}.')
+        output = ssh(
+            job,
+            step.command,
+            host_key=host_key,
+            timeout=step.timeout_seconds,
+            include_stderr=True,
+        )
+        event(
+            job,
+            'ApacheBench install',
+            f'{step.name} is ready: {output.strip()[-1000:]}',
+        )
+
+
+def install_deathstarbench_guest(job, plan, *, role, host_key='public_ip'):
+    """Install Podman service or wrk2 load-generator prerequisites."""
+    provider = web_guest.provider_id(plan)
+    if provider == 'oci':
+        if role == 'service':
+            dnf_install(
+                job,
+                {
+                    'container-tools',
+                    'curl',
+                    'git',
+                    'python3',
+                    'python3-pyyaml',
+                },
+                host_key=host_key,
+            )
+            enable_ol9_developer_epel(job, host_key=host_key)
+            dnf_install(job, {'podman-compose'}, host_key=host_key)
+            return
+        enable_ol9_developer_epel(job, host_key=host_key)
+        dnf_install(
+            job,
+            {
+                'curl',
+                'gcc',
+                'git',
+                'luarocks',
+                'make',
+                'openssl-devel',
+                'python3',
+                'python3-aiohttp',
+                'time',
+            },
+            host_key=host_key,
+        )
+        return
+
+    for step in web_guest.deathstarbench_install_steps(provider, role):
+        event(job, 'DeathStarBench install', f'Installing {step.name}.')
+        output = ssh(
+            job,
+            step.command,
+            host_key=host_key,
+            timeout=step.timeout_seconds,
+            include_stderr=True,
+        )
+        event(
+            job,
+            'DeathStarBench install',
+            f'{step.name} is ready: {output.strip()[-1000:]}',
+        )
+
 def install_benchmark_tools(job, plan, selected):
     packages = set()
     iperf3_protocols = selected_iperf3_protocols(plan)
@@ -1400,9 +2840,11 @@ def install_benchmark_tools(job, plan, selected):
         {'sysbench_cpu', 'sysbench_memory', 'sysbench_fileio'} & selected
     )
     if {'stream'} & selected:
-        packages.update({'git', 'gcc', 'make'})
+        packages.update(amazon_linux.STREAM_PACKAGES)
     if {'fio'} & selected:
         packages.add('fio')
+    if sysbench_selected:
+        packages.update(amazon_linux.SYSBENCH_BUILD_PACKAGES)
     if iperf3_protocols:
         packages.add('iperf3')
     if 'sctp' in iperf3_protocols:
@@ -1410,13 +2852,12 @@ def install_benchmark_tools(job, plan, selected):
     if phoronix_profiles:
         packages.update(phoronix_required_packages(phoronix_profiles))
     if plan.llm_benchmarks:
-        packages.update({
-            'git',
-            'make',
-            'cmake',
-            'curl',
-            LLAMA_TOOLSET_PACKAGE,
-        })
+        packages.update(llama_cpp.REQUIRED_PACKAGES)
+        packages.add(LLAMA_TOOLSET_PACKAGE)
+    # Oracle Linux 9 images provide the curl command through curl-minimal.
+    # Installing the full curl RPM can conflict with that stock provider, but
+    # the minimal build supports every HTTPS option in the pinned workloads.
+    packages.discard('curl')
     if packages:
         event(
             job,
@@ -1459,39 +2900,169 @@ def install_benchmark_tools(job, plan, selected):
         event(
             job,
             'Install',
-            'Enabling Oracle Linux 9 Developer EPEL and installing sysbench.',
+            f'Building checksum-pinned sysbench '
+            f'{amazon_linux.SYSBENCH_VERSION}.',
         )
-        dnf_install(job, {'dnf-plugins-core', 'oracle-epel-release-el9'})
-        ssh(
+        output = ssh(
             job,
-            'sudo dnf config-manager --enable ol9_developer_EPEL '
-            '&& sudo dnf -y --disablerepo=ol9_ksplice '
-            '--setopt=retries=10 --setopt=timeout=30 install sysbench',
+            amazon_linux.sysbench_install_command(),
+            timeout=1800,
+            include_stderr=True,
         )
+        event(
+            job,
+            'Install',
+            f'Pinned sysbench is ready: {output.strip()[-1000:]}',
+        )
+
+def aws_data_volume_mount_command(volume_id, hypervisor):
+    """Resolve one exact EBS volume and mount it without touching local NVMe."""
+    volume_id = str(volume_id or '')
+    if not re.fullmatch(r'vol-[0-9a-f]+', volume_id):
+        raise ValueError('The recorded AWS data volume ID is invalid.')
+    hypervisor = str(hypervisor or '').strip().lower()
+    if hypervisor not in {'nitro', 'xen'}:
+        raise ValueError('The recorded AWS hypervisor must be nitro or xen.')
+    return (
+        'set -euo pipefail; '
+        f'EXPECTED_VOLUME_ID={volume_id}; '
+        f'HYPERVISOR={hypervisor}; '
+        'EXPECTED_SERIAL="${EXPECTED_VOLUME_ID//-/}"; '
+        'sudo mkdir -p /data; '
+        'ROOT_SOURCE="$(findmnt -rn -o SOURCE /)"; '
+        'ROOT_PARENT="$(lsblk -ndo PKNAME "$ROOT_SOURCE" 2>/dev/null '
+        '|| true)"; '
+        'if test -n "$ROOT_PARENT"; then '
+        'ROOT_DEVICE="$(readlink -f "/dev/$ROOT_PARENT")"; else '
+        'ROOT_DEVICE="$(readlink -f "$ROOT_SOURCE")"; fi; '
+        'if findmnt -rn /data >/dev/null; then '
+        'MOUNTED_SOURCE="$(findmnt -rn -o SOURCE /data)"; '
+        'MOUNTED_DEVICE="$(readlink -f "$MOUNTED_SOURCE")"; '
+        'MOUNTED_SERIAL="$(lsblk -dnro SERIAL "$MOUNTED_DEVICE" '
+        '2>/dev/null '
+        "| tr -d '[:space:]-' | tr '[:upper:]' '[:lower:]')\"; "
+        'if test "$MOUNTED_SERIAL" = "$EXPECTED_SERIAL"; then '
+        'findmnt /data; exit 0; fi; '
+        'if test "$HYPERVISOR" = xen; then '
+        'for alias in /dev/xvdf /dev/sdf; do '
+        'test -b "$alias" || continue; '
+        'device="$(readlink -f "$alias")"; '
+        'if test "$MOUNTED_DEVICE" = "$device" '
+        '&& test "$device" != "$ROOT_DEVICE" '
+        '&& test "$(lsblk -dnro TYPE "$device")" = disk; then '
+        'findmnt /data; exit 0; fi; done; fi; '
+        'echo "/data is mounted from a device other than the recorded EBS '
+        'volume; refusing to continue." >&2; exit 1; fi; '
+        'DATA_DEVICE=""; '
+        'for attempt in $(seq 1 36); do '
+        'while IFS= read -r device; do '
+        'serial="$(lsblk -dnro SERIAL "$device" 2>/dev/null '
+        "| tr -d '[:space:]-' | tr '[:upper:]' '[:lower:]')\"; "
+        'if test "$serial" = "$EXPECTED_SERIAL"; then '
+        'DATA_DEVICE="$device"; break; fi; '
+        "done < <(lsblk -dnpo NAME,TYPE | awk '$2==\"disk\" {print $1}'); "
+        'if test -z "$DATA_DEVICE"; then '
+        'for alias in '
+        '"/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${EXPECTED_SERIAL}"; do '
+        'test -b "$alias" || continue; '
+        'device="$(readlink -f "$alias")"; '
+        'serial="$(lsblk -dnro SERIAL "$device" 2>/dev/null '
+        "| tr -d '[:space:]-' | tr '[:upper:]' '[:lower:]')\"; "
+        'if test "$serial" = "$EXPECTED_SERIAL"; then '
+        'DATA_DEVICE="$device"; break; fi; done; fi; '
+        'if test -z "$DATA_DEVICE" && test "$HYPERVISOR" = xen; then '
+        'for alias in /dev/xvdf /dev/sdf; do '
+        'test -b "$alias" || continue; '
+        'device="$(readlink -f "$alias")"; '
+        'test "$device" != "$ROOT_DEVICE" || continue; '
+        'test "$(lsblk -dnro TYPE "$device")" = disk || continue; '
+        'if ! lsblk -nro MOUNTPOINT "$device" '
+        "| grep -q '[^[:space:]]'; then "
+        'DATA_DEVICE="$device"; break; fi; done; fi; '
+        'test -n "$DATA_DEVICE" && break; sleep 5; done; '
+        'test -b "$DATA_DEVICE" || '
+        '{ echo "Recorded EBS data volume did not appear in the guest; '
+        'refusing to select an arbitrary local disk." >&2; exit 1; }; '
+        'if lsblk -nro MOUNTPOINT "$DATA_DEVICE" '
+        "| grep -q '[^[:space:]]'; then "
+        'echo "Recorded EBS data volume is already mounted somewhere other '
+        'than /data; refusing to format it." >&2; exit 1; fi; '
+        'echo "Using EBS data device $DATA_DEVICE for $EXPECTED_VOLUME_ID"; '
+        'FSTYPE="$(lsblk -dnro FSTYPE "$DATA_DEVICE" | head -n 1)"; '
+        'if test -z "$FSTYPE"; then sudo mkfs.xfs -f "$DATA_DEVICE"; fi; '
+        'sudo mount "$DATA_DEVICE" /data; '
+        'sudo chmod 0777 /data; '
+        'FSTYPE="$(findmnt -rn -o FSTYPE /data)"; '
+        'FILESYSTEM_UUID="$(sudo blkid -s UUID -o value "$DATA_DEVICE")"; '
+        'test -n "$FILESYSTEM_UUID"; '
+        'if ! grep -Fq "UUID=$FILESYSTEM_UUID /data " /etc/fstab; then '
+        'printf "UUID=%s /data %s defaults,nofail 0 2\\n" '
+        '"$FILESYSTEM_UUID" "$FSTYPE" | sudo tee -a /etc/fstab >/dev/null; '
+        'fi; findmnt /data'
+    )
+
 
 def mount_data_volume(job):
     event(job, 'Storage', 'Discovering, formatting, and mounting the data volume.')
-    command = (
-        'sudo mkdir -p /data; '
-        'DATA_DEVICE=""; '
-        'for attempt in $(seq 1 36); do '
-        'for device in $(lsblk -dnpo NAME,TYPE | '
-        """awk '$2=="disk" {print $1}'); do """
-        'if ! lsblk -npo MOUNTPOINT "$device" | grep -q "^/$"; then '
-        'DATA_DEVICE="$device"; break; '
-        'fi; '
-        'done; '
-        'test -n "$DATA_DEVICE" && break; '
-        'sleep 5; '
-        'done; '
-        'test -b "$DATA_DEVICE" || '
-        '{ echo "Attached data volume did not appear in the guest." >&2; exit 1; }; '
-        'echo "Using data device $DATA_DEVICE"; '
-        'sudo mkfs.xfs -f "$DATA_DEVICE"; '
-        'sudo mount "$DATA_DEVICE" /data; '
-        'sudo chmod 777 /data; '
-        'findmnt /data'
-    )
+    resources = job.get('resources', {})
+    aws_volume_id = resources.get('aws_data_volume_id')
+    if resources.get('provider') == 'aws':
+        if not aws_volume_id:
+            raise RuntimeError(
+                'The AWS /data volume ID is missing from the persisted run '
+                'manifest; refusing to inspect or format guest disks.'
+            )
+        command = aws_data_volume_mount_command(
+            aws_volume_id,
+            resources.get('hypervisor'),
+        )
+    elif resources.get('provider') == 'gcp':
+        device_name = resources.get('gcp_data_device_name')
+        if not device_name:
+            raise RuntimeError(
+                'The GCP /data disk device name is missing from the persisted '
+                'run manifest; refusing to inspect or format guest disks.'
+            )
+        command = rocky_linux.data_volume_mount_command(
+            device_name,
+            owner=resources.get('ssh_user') or rocky_linux.SSH_USER,
+        )
+    elif resources.get('provider') == 'azure':
+        lun = resources.get('azure_data_disk_lun')
+        if lun is None:
+            raise RuntimeError(
+                'The Azure /data disk LUN is missing from the persisted run '
+                'manifest; refusing to inspect or format guest disks.'
+            )
+        command = rocky_linux.azure_data_volume_mount_command(
+            lun=lun,
+            owner=resources.get('ssh_user') or rocky_linux.SSH_USER,
+        )
+    else:
+        command = (
+            'sudo mkdir -p /data; '
+            'if findmnt -rn /data >/dev/null; then findmnt /data; exit 0; fi; '
+            'DATA_DEVICE=""; '
+            'for attempt in $(seq 1 36); do '
+            'for device in $(lsblk -dnpo NAME,TYPE | '
+            """awk '$2=="disk" {print $1}'); do """
+            'if ! lsblk -npo MOUNTPOINT "$device" | grep -q "^/$"; then '
+            'DATA_DEVICE="$device"; break; '
+            'fi; '
+            'done; '
+            'test -n "$DATA_DEVICE" && break; '
+            'sleep 5; '
+            'done; '
+            'test -b "$DATA_DEVICE" || '
+            '{ echo "Attached data volume did not appear in the guest." >&2; '
+            'exit 1; }; '
+            'echo "Using data device $DATA_DEVICE"; '
+            'FSTYPE="$(lsblk -dnro FSTYPE "$DATA_DEVICE" | head -n 1)"; '
+            'if test -z "$FSTYPE"; then sudo mkfs.xfs -f "$DATA_DEVICE"; fi; '
+            'sudo mount "$DATA_DEVICE" /data; '
+            'sudo chmod 0777 /data; '
+            'findmnt /data'
+        )
     output = ssh(job, command, timeout=300)
     event(job, 'Storage', f'Data volume mounted successfully: {output.strip()}')
 
@@ -1510,6 +3081,25 @@ def execute_benchmark(
     started_at = now()
     started = time.monotonic()
     event(job, 'Run', f'Started {name}.')
+
+    def record_failure(error, output=''):
+        duration = round(time.monotonic() - started, 2)
+        job['results'].append({
+            'id': benchmark_id,
+            'name': name,
+            'command': command,
+            'started_at': started_at,
+            'duration_seconds': duration,
+            'status': 'failed',
+            'error': str(error),
+            'output': (
+                output
+                if output_limit is None
+                else output[-output_limit:]
+            ),
+            **({'metadata': metadata} if metadata else {}),
+        })
+
     try:
         output = ssh(
             job,
@@ -1518,44 +3108,25 @@ def execute_benchmark(
             host_key=host_key,
             include_stderr=include_stderr,
         )
-    except SSHCommandError as exc:
-        duration = round(time.monotonic() - started, 2)
-        if exc.output.strip():
-            job['results'].append({
-                'id': benchmark_id,
-                'name': name,
-                'command': command,
-                'started_at': started_at,
-                'duration_seconds': duration,
-                'status': 'failed',
-                'error': str(exc),
-                'output': (
-                    exc.output
-                    if output_limit is None
-                    else exc.output[-output_limit:]
-                ),
-                **({'metadata': metadata} if metadata else {}),
-            })
+    except Exception as exc:
+        failure_output = (
+            exc.output
+            if isinstance(exc, SSHCommandError) and exc.output
+            else ''
+        )
+        record_failure(exc, failure_output)
         raise RuntimeError(f'{name} failed. {exc}') from exc
     duration = round(time.monotonic() - started, 2)
     if not output.strip():
-        raise RuntimeError(
+        error = RuntimeError(
             f'{name} exited without producing benchmark output.'
         )
+        record_failure(error)
+        raise error
     try:
         metrics = parser(output) if parser else None
-    except ValueError as exc:
-        job['results'].append({
-            'id': benchmark_id,
-            'name': name,
-            'command': command,
-            'started_at': started_at,
-            'duration_seconds': duration,
-            'status': 'failed',
-            'error': str(exc),
-            'output': output if output_limit is None else output[-output_limit:],
-            **({'metadata': metadata} if metadata else {}),
-        })
+    except Exception as exc:
+        record_failure(exc, output)
         raise RuntimeError(f'{name} produced an invalid result. {exc}') from exc
     result = {
         'id': benchmark_id,
@@ -1577,6 +3148,230 @@ def execute_benchmark(
         f'Completed {name} in {duration:.2f}s and captured '
         f'{len(output.encode())} bytes of output.',
     )
+
+
+def run_llama_benchmark(job, *, metadata=None, toolset_enable=None):
+    """Probe CPU and toolchain provenance, then run the llama.cpp contract."""
+
+    benchmark_id = 'llama_bench'
+    name = 'llama.cpp throughput (CPU)'
+    probe_command = llama_cpp.architecture_command()
+    started_at = now()
+    started = time.monotonic()
+    immutable_metadata = {
+        **(metadata or {}),
+        **llama_cpp.benchmark_metadata(),
+    }
+    event(
+        job,
+        'Run',
+        'Validating the guest CPU architecture and probing its logical CPU '
+        'count immediately before llama.cpp.',
+    )
+    probe_output = ''
+    try:
+        architecture = immutable_metadata.get('architecture')
+        if architecture is None:
+            probe_output = ssh(job, probe_command, timeout=60)
+            architecture = llama_cpp.parse_architecture(probe_output)
+        else:
+            architecture = llama_cpp.parse_architecture(str(architecture))
+        immutable_metadata['architecture'] = architecture
+
+        probe_command = llama_cpp.logical_cpu_count_command()
+        probe_output = ''
+        probe_output = ssh(job, probe_command, timeout=60)
+        logical_cpu_count = llama_cpp.parse_logical_cpu_count(probe_output)
+    except Exception as exc:
+        failure_output = (
+            exc.output
+            if isinstance(exc, SSHCommandError) and exc.output
+            else probe_output
+        )
+        job['results'].append({
+            'id': benchmark_id,
+            'name': name,
+            'command': probe_command,
+            'started_at': started_at,
+            'duration_seconds': round(time.monotonic() - started, 2),
+            'status': 'failed',
+            'error': f'CPU-topology probe failed. {exc}',
+            'output': failure_output,
+            'metadata': immutable_metadata,
+        })
+        raise RuntimeError(
+            f'{name} CPU-topology probe failed. {exc}'
+        ) from exc
+
+    result_metadata = {
+        **immutable_metadata,
+        'logical_cpu_count': logical_cpu_count,
+        'llama_toolset_enable': toolset_enable or 'system-default',
+    }
+    probe_command = llama_cpp.toolchain_probe_command(
+        toolset_enable=toolset_enable
+    )
+    probe_output = ''
+    event(
+        job,
+        'Run',
+        'Recording the exact GCC and GNU assembler selected for the native '
+        'llama.cpp build.',
+    )
+    try:
+        probe_output = ssh(
+            job,
+            probe_command,
+            timeout=60,
+            include_stderr=False,
+        )
+        toolchain_metadata = llama_cpp.parse_toolchain_probe(probe_output)
+    except Exception as exc:
+        failure_output = (
+            exc.output
+            if isinstance(exc, SSHCommandError) and exc.output
+            else probe_output
+        )
+        job['results'].append({
+            'id': benchmark_id,
+            'name': name,
+            'command': probe_command,
+            'started_at': started_at,
+            'duration_seconds': round(time.monotonic() - started, 2),
+            'status': 'failed',
+            'error': f'Build-toolchain probe failed. {exc}',
+            'output': failure_output,
+            'metadata': result_metadata,
+        })
+        raise RuntimeError(
+            f'{name} build-toolchain probe failed. {exc}'
+        ) from exc
+
+    result_metadata.update(toolchain_metadata)
+    event(
+        job,
+        'Run',
+        f'Building and running llama.cpp with {logical_cpu_count} observed '
+        f'guest logical CPUs using GCC '
+        f'{toolchain_metadata["llama_compiler_version"]} and '
+        f'{toolchain_metadata["llama_assembler_version"]}.',
+    )
+    execute_benchmark(
+        job,
+        benchmark_id,
+        name,
+        llama_cpp.benchmark_command(
+            toolset_enable=toolset_enable,
+            threads=logical_cpu_count,
+        ),
+        parser=lambda output: llama_cpp.parse_output(
+            output,
+            expected_threads=logical_cpu_count,
+        ),
+        metadata=result_metadata,
+        output_limit=None,
+        include_stderr=False,
+    )
+
+
+def oci_runtime_environment(
+    job,
+    plan,
+    architecture=None,
+    logical_cpu_count=None,
+):
+    """Return the exact OCI runner profile used by benchmark reports."""
+
+    resources = job.get('resources', {})
+    environment = {
+        'provider': 'OCI',
+        'region': plan.region,
+        'shape': plan.shape,
+        'ocpus': plan.ocpus,
+        'memory_gb': plan.memory_gb,
+        'architecture': architecture or resources.get('architecture'),
+        'logical_cpu_count': logical_cpu_count,
+        'portable_result_contract': 'v1',
+        'image_id': resources.get('image_id'),
+        'image_name': resources.get('image_name'),
+    }
+    return {
+        key: value for key, value in environment.items() if value is not None
+    }
+
+
+def gcp_runtime_environment(job, plan, architecture=None):
+    """Return the exact persisted GCE profile used by benchmark reports."""
+    resources = job.get('resources', {})
+    environment = {
+        'provider': 'GCP',
+        'project_id': plan.gcp_project_id,
+        'region': plan.region,
+        'zone': plan.gcp_zone,
+        'machine_type': plan.shape,
+        'vcpus': plan.ocpus,
+        'memory_gb': plan.memory_gb,
+        'architecture': architecture or resources.get('architecture'),
+        'image_id': resources.get('image_id'),
+        'image_name': resources.get('image_name'),
+        'network_interface_type': resources.get(
+            'gcp_network_interface_type'
+        ),
+        'disk_interface': resources.get('gcp_disk_interface'),
+        'boot_volume_type': resources.get('gcp_boot_disk_type'),
+        'boot_volume_provisioned_iops': resources.get(
+            'gcp_boot_disk_provisioned_iops'
+        ),
+        'boot_volume_provisioned_throughput_mibps': resources.get(
+            'gcp_boot_disk_provisioned_throughput_mibps'
+        ),
+        'data_volume_type': resources.get('gcp_data_disk_type'),
+        'data_volume_size_gb': resources.get('gcp_data_disk_size_gb'),
+        'data_volume_provisioned_iops': resources.get(
+            'gcp_data_disk_provisioned_iops'
+        ),
+        'data_volume_provisioned_throughput_mibps': resources.get(
+            'gcp_data_disk_provisioned_throughput_mibps'
+        ),
+        'iperf3_peer_machine_type': resources.get('gcp_peer_machine_type'),
+        'iperf3_peer_image_id': resources.get('gcp_peer_image_id'),
+    }
+    return {
+        key: value for key, value in environment.items() if value is not None
+    }
+
+
+def azure_runtime_environment(job, plan, architecture=None):
+    """Return the exact persisted Azure VM profile used by reports."""
+    resources = job.get('resources', {})
+    environment = {
+        'provider': 'Azure',
+        'subscription_id': plan.azure_subscription_id,
+        'region': plan.region,
+        'zone': plan.azure_zone,
+        'vm_size': plan.shape,
+        'vcpus': plan.ocpus,
+        'memory_gb': plan.memory_gb,
+        'architecture': architecture or resources.get('architecture'),
+        'image_id': resources.get('image_id'),
+        'image_name': resources.get('image_name'),
+        'resource_group': resources.get('azure_resource_group_name'),
+        'network_accelerated': resources.get('azure_accelerated_networking'),
+        'boot_volume_type': resources.get('azure_boot_disk_type'),
+        'data_volume_type': resources.get('azure_data_disk_type'),
+        'data_volume_size_gb': resources.get('azure_data_disk_size_gb'),
+        'data_volume_provisioned_iops': resources.get(
+            'azure_data_disk_iops'
+        ),
+        'data_volume_provisioned_throughput_mibps': resources.get(
+            'azure_data_disk_throughput_mibps'
+        ),
+        'iperf3_peer_vm_size': resources.get('azure_peer_vm_size'),
+        'iperf3_peer_image_id': resources.get('azure_peer_image_id'),
+    }
+    return {
+        key: value for key, value in environment.items() if value is not None
+    }
 
 
 def run_phoronix_profiles(job, plan):
@@ -1617,6 +3412,9 @@ def run_phoronix_profiles(job, plan):
             else str(exc)
         )
         for run in runs:
+            failure_metadata = dict(run.metadata)
+            if getattr(plan, 'provider', 'oci') == 'gcp':
+                failure_metadata.update(gcp_runtime_environment(job, plan))
             job['results'].append({
                 'id': run.benchmark_id,
                 'name': run.name,
@@ -1626,7 +3424,7 @@ def run_phoronix_profiles(job, plan):
                 'status': 'failed',
                 'error': f'Phoronix preparation failed. {exc}',
                 'output': failure_output,
-                'metadata': run.metadata,
+                'metadata': failure_metadata,
             })
         return (f'Phoronix preparation failed. {exc}',)
 
@@ -1634,11 +3432,19 @@ def run_phoronix_profiles(job, plan):
     for run in runs:
         metadata = {
             **run.metadata,
+            'provider': getattr(plan, 'provider', 'oci').upper(),
+            'region': plan.region,
             'architecture': architecture,
             'shape': plan.shape,
             'ocpus': plan.ocpus,
             'memory_gb': plan.memory_gb,
         }
+        if getattr(plan, 'provider', 'oci') == 'gcp':
+            metadata.update(gcp_runtime_environment(job, plan, architecture))
+        if job.get('resources', {}).get('image_id'):
+            metadata['image_id'] = job['resources']['image_id']
+        if job.get('resources', {}).get('image_name'):
+            metadata['image_name'] = job['resources']['image_name']
         result_count = len(job['results'])
         try:
             def parse_selected_profile(output, expected=run.profile):
@@ -1697,6 +3503,7 @@ def run_apachebench(job, plan):
     selected_workloads = tuple(options.workloads)
     diagnostics = []
     failures = []
+    common_metadata = web_guest.static_runtime_metadata(plan, resources)
     try:
         target_private_ip = str(ip_address(resources.get('private_ip', '')))
         loadgen_private_ip = str(
@@ -1723,6 +3530,10 @@ def run_apachebench(job, plan):
                 'duration_seconds': 0,
                 'status': 'failed',
                 'error': str(error),
+                'metadata': {
+                    **apachebench_metadata(workload_id, options),
+                    **common_metadata,
+                },
                 'output': '',
             })
             failures.append(f'{name}: {error}')
@@ -1744,6 +3555,10 @@ def run_apachebench(job, plan):
                 'duration_seconds': 0,
                 'status': 'failed',
                 'error': str(error),
+                'metadata': {
+                    **apachebench_metadata(workload_id, options),
+                    **common_metadata,
+                },
                 'output': '',
             })
             failures.append(f'{name}: {error}')
@@ -1752,7 +3567,14 @@ def run_apachebench(job, plan):
     httpd_installed = False
     httpd_ready = False
 
-    def stage(label, message, command, host_key='public_ip', timeout=1800):
+    def stage(
+        label,
+        message,
+        command,
+        host_key='public_ip',
+        timeout=1800,
+        include_stderr=True,
+    ):
         event(job, label, message)
         try:
             output = ssh(
@@ -1760,7 +3582,7 @@ def run_apachebench(job, plan):
                 command,
                 timeout=timeout,
                 host_key=host_key,
-                include_stderr=True,
+                include_stderr=include_stderr,
             )
         except SSHCommandError as exc:
             if exc.output:
@@ -1773,19 +3595,21 @@ def run_apachebench(job, plan):
         return output
 
     try:
-        regional_yum = f'yum.{plan.region}.oci.oraclecloud.com'
-        wait_for_guest_readiness(
+        provider = web_guest.provider_id(plan)
+        wait_for_web_guest_readiness(
             job,
-            plan.region,
+            plan,
+            'apachebench',
+            role='service',
             label='ApacheBench web-server instance',
-            required_hosts=[regional_yum],
         )
-        wait_for_guest_readiness(
+        wait_for_web_guest_readiness(
             job,
-            plan.region,
+            plan,
+            'apachebench',
+            role='loadgen',
             host_key='loadgen_public_ip',
             label='ApacheBench load generator',
-            required_hosts=[regional_yum],
         )
         event(
             job,
@@ -1793,11 +3617,12 @@ def run_apachebench(job, plan):
             'Installing Apache HTTP Server on the target and ApacheBench on '
             'the separate load-generator VM.',
         )
-        dnf_install(job, {'firewalld', 'httpd'})
+        install_apachebench_guest(job, plan, role='service')
         httpd_installed = True
-        dnf_install(
+        install_apachebench_guest(
             job,
-            {'httpd-tools', 'time'},
+            plan,
+            role='loadgen',
             host_key='loadgen_public_ip',
         )
         stage(
@@ -1816,21 +3641,23 @@ def run_apachebench(job, plan):
             apachebench_loadgen_prepare_command(),
             host_key='loadgen_public_ip',
         )
-        service_architecture = stage(
+        service_architecture = llama_cpp.parse_architecture(stage(
             'ApacheBench architecture',
             'Recording the web-server VM architecture.',
             'uname -m',
-        ).strip().splitlines()[-1]
-        loadgen_architecture = stage(
+            include_stderr=False,
+        ))
+        loadgen_architecture = llama_cpp.parse_architecture(stage(
             'ApacheBench architecture',
             'Recording the load-generator VM architecture.',
             'uname -m',
             host_key='loadgen_public_ip',
-        ).strip().splitlines()[-1]
+            include_stderr=False,
+        ))
         stage(
             'ApacheBench readiness',
             'Verifying HTTP 200 and the configured response size over the '
-            'private VCN path.',
+            f'{web_guest.traffic_path(provider)}.',
             apachebench_readiness_command(
                 target_private_ip,
                 options.response_size_kib,
@@ -1839,18 +3666,12 @@ def run_apachebench(job, plan):
             timeout=600,
         )
         common_metadata = {
-            'service_shape': plan.shape,
-            'service_ocpus': plan.ocpus,
-            'service_memory_gb': plan.memory_gb,
-            'service_architecture': service_architecture,
-            'load_generator_shape': resources.get('loadgen_shape'),
-            'load_generator_ocpus': 2,
-            'load_generator_memory_gb': 8,
-            'load_generator_architecture': loadgen_architecture,
-            'load_generator_network_bandwidth_gbps': resources.get(
-                'loadgen_network_bandwidth_gbps'
+            **web_guest.runtime_metadata(
+                plan,
+                resources,
+                service_architecture=service_architecture,
+                loadgen_architecture=loadgen_architecture,
             ),
-            'traffic_path': 'OCI private VCN address',
             'target_private_ip': target_private_ip,
         }
         timeout = apachebench_request_timeout(options.request_count)
@@ -2017,6 +3838,10 @@ def run_apachebench(job, plan):
                 'duration_seconds': 0,
                 'status': 'failed',
                 'error': str(exc),
+                'metadata': {
+                    **apachebench_metadata(workload_id, options),
+                    **common_metadata,
+                },
                 'output': failure_output,
             })
             failures.append(f'{name}: {exc}')
@@ -2059,19 +3884,49 @@ def run_deathstarbench(job, plan):
     options = plan.deathstarbench
     settings = deathstarbench_workload(options.workload)
     resources = job.get('resources', {})
-    service_private_ip = resources.get('private_ip')
-    loadgen_public_ip = resources.get('loadgen_public_ip')
-    if not service_private_ip or not loadgen_public_ip:
-        raise RuntimeError(
-            'DeathStarBench provisioning did not produce both service and '
-            'load-generator addresses.'
-        )
-
     diagnostics = []
     started_at = now()
     lifecycle_started = time.monotonic()
+    service_architecture = None
+    loadgen_architecture = None
+    runtime_details = None
+    service_private_ip = None
+    loadgen_private_ip = None
+    base_metadata = {
+        **deathstarbench_metadata(options.workload, options, None, None),
+        **web_guest.static_runtime_metadata(plan, resources),
+    }
 
-    def stage(label, message, command, host_key='public_ip', timeout=1800):
+    def current_metadata():
+        metadata = {
+            **base_metadata,
+            **deathstarbench_metadata(
+                options.workload,
+                options,
+                service_architecture,
+                loadgen_architecture,
+            ),
+            **web_guest.runtime_metadata(
+                plan,
+                resources,
+                service_architecture=service_architecture,
+                loadgen_architecture=loadgen_architecture,
+            ),
+        }
+        if runtime_details:
+            metadata['container_runtime_details'] = runtime_details.strip()
+        if service_private_ip:
+            metadata['target_private_ip'] = service_private_ip
+        return metadata
+
+    def stage(
+        label,
+        message,
+        command,
+        host_key='public_ip',
+        timeout=1800,
+        include_stderr=True,
+    ):
         event(job, label, message)
         try:
             output = ssh(
@@ -2079,7 +3934,7 @@ def run_deathstarbench(job, plan):
                 command,
                 timeout=timeout,
                 host_key=host_key,
-                include_stderr=True,
+                include_stderr=include_stderr,
             )
         except SSHCommandError as exc:
             if exc.output:
@@ -2092,32 +3947,37 @@ def run_deathstarbench(job, plan):
         return output
 
     try:
-        regional_yum = f'yum.{plan.region}.oci.oraclecloud.com'
-        wait_for_guest_readiness(
+        raw_service_private_ip = resources.get('private_ip')
+        loadgen_public_ip = resources.get('loadgen_public_ip')
+        raw_loadgen_private_ip = resources.get('loadgen_private_ip')
+        if (
+            not raw_service_private_ip
+            or not loadgen_public_ip
+            or not raw_loadgen_private_ip
+        ):
+            raise RuntimeError(
+                'DeathStarBench provisioning did not produce a private service '
+                'address plus reachable public and private load-generator '
+                'addresses.'
+            )
+        service_private_ip = str(ip_address(raw_service_private_ip))
+        loadgen_private_ip = str(ip_address(raw_loadgen_private_ip))
+        provider = web_guest.provider_id(plan)
+        compose_path = web_guest.podman_compose_path(provider)
+        wait_for_web_guest_readiness(
             job,
-            plan.region,
+            plan,
+            'deathstarbench',
+            role='service',
             label='DeathStarBench service instance',
-            required_hosts=[
-                regional_yum,
-                'github.com',
-                'registry-1.docker.io',
-                'auth.docker.io',
-                'archive.ubuntu.com',
-                'security.ubuntu.com',
-                'ports.ubuntu.com',
-                'www.openssl.org',
-                'openssl-library.org',
-                'openresty.org',
-                'luarocks.org',
-                'sourceforge.net',
-            ],
         )
-        wait_for_guest_readiness(
+        wait_for_web_guest_readiness(
             job,
-            plan.region,
+            plan,
+            'deathstarbench',
+            role='loadgen',
             host_key='loadgen_public_ip',
             label='DeathStarBench load generator',
-            required_hosts=[regional_yum, 'github.com', 'luarocks.org'],
         )
 
         event(
@@ -2128,30 +3988,23 @@ def run_deathstarbench(job, plan):
             'Podman-supplied Docker compatibility wrapper may be present but '
             'is never called.',
         )
-        dnf_install(
-            job,
-            {
-                'container-tools',
-                'curl',
-                'git',
-                'python3',
-                'python3-pyyaml',
-            },
-        )
-        enable_ol9_developer_epel(job)
-        dnf_install(job, {'podman-compose'})
+        install_deathstarbench_guest(job, plan, role='service')
         runtime_details = stage(
             'DeathStarBench runtime',
             'Verifying rootful Podman, Netavark DNS, podman-compose, and the '
             'absence of Docker Engine. A verified Podman compatibility wrapper '
             'is permitted but never invoked.',
-            podman_runtime_verification_command(),
+            podman_runtime_verification_command(compose_path),
         )
         stage(
             'DeathStarBench network',
-            f'Allowing private-subnet traffic to the {settings["name"]} '
-            f'frontend on TCP {settings["port"]}.',
-            frontend_firewall_command(options.workload),
+            f'Allowing only the load generator at {loadgen_private_ip} to '
+            f'reach the {settings["name"]} frontend on TCP '
+            f'{settings["port"]}.',
+            frontend_firewall_command(
+                options.workload,
+                loadgen_private_ip,
+            ),
         )
         stage(
             'DeathStarBench source',
@@ -2177,7 +4030,7 @@ def run_deathstarbench(job, plan):
             'DeathStarBench deploy',
             'Creating the Podman bridge/DNS network and starting the '
             'microservice stack with podman-compose.',
-            deploy_workload_command(options.workload),
+            deploy_workload_command(options.workload, compose_path),
             timeout=3600,
         )
 
@@ -2187,20 +4040,10 @@ def run_deathstarbench(job, plan):
             'Installing wrk2 build and workload-initialization prerequisites '
             'on the separate x86 load-generator VM.',
         )
-        enable_ol9_developer_epel(job, host_key='loadgen_public_ip')
-        dnf_install(
+        install_deathstarbench_guest(
             job,
-            {
-                'curl',
-                'gcc',
-                'git',
-                'luarocks',
-                'make',
-                'openssl-devel',
-                'python3',
-                'python3-aiohttp',
-                'time',
-            },
+            plan,
+            role='loadgen',
             host_key='loadgen_public_ip',
         )
         stage(
@@ -2210,17 +4053,19 @@ def run_deathstarbench(job, plan):
             host_key='loadgen_public_ip',
             timeout=1800,
         )
-        service_architecture = stage(
+        service_architecture = llama_cpp.parse_architecture(stage(
             'DeathStarBench architecture',
             'Recording the service VM architecture.',
             'uname -m',
-        ).strip().splitlines()[-1]
-        loadgen_architecture = stage(
+            include_stderr=False,
+        ))
+        loadgen_architecture = llama_cpp.parse_architecture(stage(
             'DeathStarBench architecture',
             'Recording the load-generator VM architecture.',
             'uname -m',
             host_key='loadgen_public_ip',
-        ).strip().splitlines()[-1]
+            include_stderr=False,
+        ))
         if loadgen_architecture != 'x86_64':
             raise RuntimeError(
                 'The DeathStarBench load generator must be x86_64 because '
@@ -2264,22 +4109,7 @@ def run_deathstarbench(job, plan):
                 'requests/second; these results are excluded from the report.',
             )
 
-        result_metadata = deathstarbench_metadata(
-            options.workload,
-            options,
-            service_architecture,
-            loadgen_architecture,
-        )
-        result_metadata.update({
-            'service_shape': plan.shape,
-            'service_ocpus': plan.ocpus,
-            'service_memory_gb': plan.memory_gb,
-            'load_generator_shape': resources.get('loadgen_shape'),
-            'load_generator_ocpus': 2,
-            'load_generator_memory_gb': 8,
-            'container_runtime_details': runtime_details.strip(),
-            'traffic_path': 'OCI private VCN address',
-        })
+        result_metadata = current_metadata()
         measured_command = deathstarbench_load_command(
             options.workload,
             service_private_ip,
@@ -2322,6 +4152,7 @@ def run_deathstarbench(job, plan):
                 ),
                 'status': 'failed',
                 'error': str(exc),
+                'metadata': current_metadata(),
                 'output': failure_output,
             })
         else:
@@ -2332,11 +4163,434 @@ def run_deathstarbench(job, plan):
         raise RuntimeError(f'DeathStarBench failed. {exc}') from exc
 
 
+def run_aws_benchmarks(job, plan):
+    """Run the selected supported benchmarks on Amazon Linux 2023."""
+    selected = expanded_benchmark_ids(plan)
+    apachebench_failures = ()
+    iperf3_protocols = selected_iperf3_protocols(plan)
+    amazon_linux.validate_benchmark_selection(
+        plan.benchmarks,
+        sysbench_workloads=selected_sysbench_workloads(plan),
+        iperf3_protocols=iperf3_protocols,
+        phoronix_profiles=(
+            plan.phoronix.profiles if 'phoronix' in plan.benchmarks else ()
+        ),
+        llm_benchmarks=plan.llm_benchmarks,
+    )
+    event(
+        job,
+        'Connect',
+        'Waiting for Amazon Linux cloud-init, DNS, and package repositories.',
+    )
+    readiness_output = ssh(
+        job,
+        amazon_linux.readiness_command(
+            amazon_linux.benchmark_readiness_hosts(
+                plan.benchmarks,
+                llm_benchmarks=plan.llm_benchmarks,
+            )
+        ),
+        timeout=600,
+        include_stderr=True,
+    )
+    event(
+        job,
+        'Connect',
+        f'Amazon Linux readiness passed: {readiness_output.strip()[-1000:]}',
+    )
+
+    for step in amazon_linux.installation_steps(
+        plan.benchmarks,
+        sysbench_workloads=selected_sysbench_workloads(plan),
+        iperf3_protocols=iperf3_protocols,
+        phoronix_profiles=(
+            plan.phoronix.profiles if 'phoronix' in plan.benchmarks else ()
+        ),
+        llm_benchmarks=plan.llm_benchmarks,
+        additional_volume=plan.storage.additional_volume,
+    ):
+        event(job, 'Install', f'Installing {step.name}.')
+        output = ssh(
+            job,
+            step.command,
+            timeout=1800,
+            include_stderr=True,
+        )
+        event(job, 'Install', f'{step.name} is ready: {output.strip()[-1000:]}')
+
+    if iperf3_protocols:
+        wait_for_iperf_peer(
+            job,
+            iperf3_protocols,
+            verify_tcp_udp=True,
+        )
+
+    if plan.storage.additional_volume:
+        mount_data_volume(job)
+
+    commands = amazon_linux.benchmark_commands(plan.ocpus)
+    resources = job.get('resources', {})
+    environment = {
+        'provider': 'AWS',
+        'region': plan.region,
+        'instance_type': plan.shape,
+        'vcpus': plan.ocpus,
+        'memory_gb': plan.memory_gb,
+        'bare_metal': resources.get('bare_metal'),
+        'hypervisor': resources.get('hypervisor'),
+        'architecture': resources.get('architecture'),
+        'image_id': resources.get('image_id'),
+        'image_name': resources.get('image_name'),
+        'data_volume_type': resources.get('aws_data_volume_type'),
+        'data_volume_size_gb': resources.get('aws_data_volume_size_gb'),
+        'data_volume_iops': resources.get('aws_data_volume_iops'),
+        'data_volume_throughput_mibps': resources.get(
+            'aws_data_volume_throughput_mibps'
+        ),
+        'iperf3_peer_instance_type': resources.get(
+            'aws_peer_instance_type'
+        ),
+        'iperf3_peer_image_id': resources.get('aws_peer_image_id'),
+    }
+    environment = {
+        key: value for key, value in environment.items() if value is not None
+    }
+    for key in (
+        'sysbench_cpu',
+        'sysbench_memory',
+        'stream',
+        'fio',
+        'sysbench_fileio',
+    ):
+        if key in selected:
+            name, command = commands[key]
+            parser = None
+            if key == 'sysbench_cpu':
+                parser = amazon_linux.parse_sysbench_cpu_output
+            elif key == 'sysbench_memory':
+                parser = amazon_linux.parse_sysbench_memory_output
+            elif key == 'stream':
+                parser = lambda output: amazon_linux.parse_stream_output(
+                    output,
+                    expected_threads=plan.ocpus,
+                )
+            elif key == 'fio':
+                parser = amazon_linux.parse_fio_output
+            elif key == 'sysbench_fileio':
+                parser = amazon_linux.parse_sysbench_fileio_output
+            execute_benchmark(
+                job,
+                key,
+                name,
+                command,
+                parser=parser,
+                metadata=environment,
+                output_limit=None if key == 'fio' else 20000,
+            )
+
+    network_selected = expanded_iperf3_result_ids(plan)
+    network_commands = network_benchmark_commands(job, network_selected)
+    for key in network_selected:
+        name, command = network_commands[key]
+        protocol = key.removeprefix('iperf_')
+        event(
+            job,
+            'Network',
+            'Targeting the same-AZ AWS peer over its private VPC address '
+            f'{resources["peer_private_ip"]}.',
+        )
+        execute_benchmark(
+            job,
+            key,
+            name,
+            command,
+            parser=lambda output, expected=protocol: parse_iperf3_output(
+                output,
+                expected_protocol=expected,
+            ),
+            metadata={
+                **environment,
+                'protocol': protocol.upper(),
+                'traffic_path': 'AWS private VPC address',
+                'peer_private_ip': resources['peer_private_ip'],
+            },
+            output_limit=None,
+        )
+
+    phoronix_failures = (
+        run_phoronix_profiles(job, plan)
+        if 'phoronix' in selected
+        else ()
+    )
+    if 'llama_bench' in plan.llm_benchmarks:
+        run_llama_benchmark(
+            job,
+            metadata=environment,
+            toolset_enable=None,
+        )
+    if 'apachebench' in plan.benchmarks:
+        apachebench_failures = run_apachebench(job, plan)
+    if 'deathstarbench' in plan.benchmarks:
+        run_deathstarbench(job, plan)
+    deferred_failures = (*phoronix_failures, *apachebench_failures)
+    if deferred_failures:
+        raise RuntimeError(
+            'One or more independently selected benchmark workloads failed '
+            'after the remaining workloads were attempted: '
+            + ' | '.join(deferred_failures)
+        )
+
+
+def run_rocky_linux_benchmarks(
+    job,
+    plan,
+    *,
+    provider_name,
+    environment,
+):
+    """Run the shared strict Rocky Linux 9 benchmark contract."""
+    selected = expanded_benchmark_ids(plan)
+    apachebench_failures = ()
+    iperf3_protocols = selected_iperf3_protocols(plan)
+    phoronix_profiles = (
+        plan.phoronix.profiles if 'phoronix' in plan.benchmarks else ()
+    )
+    guest_provider_options = (
+        {'provider': 'azure'} if provider_name == 'Azure' else {}
+    )
+    rocky_linux.validate_benchmark_selection(
+        plan.benchmarks,
+        sysbench_workloads=selected_sysbench_workloads(plan),
+        iperf3_protocols=iperf3_protocols,
+        phoronix_profiles=phoronix_profiles,
+        llm_benchmarks=plan.llm_benchmarks,
+        **guest_provider_options,
+    )
+
+    resources = job.get('resources', {})
+    network_path = (
+        'GCP private VPC address'
+        if provider_name == 'GCP'
+        else 'Azure private virtual-network address'
+    )
+    architecture = resources.get('architecture')
+    if not architecture:
+        raise RuntimeError(
+            f'The {provider_name} machine architecture is missing from the persisted run '
+            'manifest; refusing to prepare an unverified guest.'
+        )
+    readiness_hosts = rocky_linux.benchmark_readiness_hosts(
+        plan.benchmarks,
+        llm_benchmarks=plan.llm_benchmarks,
+    )
+    wait_for_ssh_transport(job)
+    event(
+        job,
+        'Connect',
+        'Waiting for Rocky Linux 9 DNS, package repositories, and the ' +
+        (
+            'selected machine architecture.'
+            if provider_name == 'GCP'
+            else 'selected Azure machine architecture.'
+        ),
+    )
+    readiness_output = ssh(
+        job,
+        rocky_linux.readiness_command(
+            architecture,
+            readiness_hosts,
+            **guest_provider_options,
+        ),
+        timeout=600,
+        include_stderr=True,
+        transport_attempts=1,
+    )
+    event(
+        job,
+        'Connect',
+        f'Rocky Linux 9 readiness passed: '
+        f'{readiness_output.strip()[-1000:]}',
+    )
+
+    for step in rocky_linux.installation_steps(
+        plan.benchmarks,
+        sysbench_workloads=selected_sysbench_workloads(plan),
+        iperf3_protocols=iperf3_protocols,
+        phoronix_profiles=phoronix_profiles,
+        llm_benchmarks=plan.llm_benchmarks,
+        additional_volume=plan.storage.additional_volume,
+        **guest_provider_options,
+    ):
+        event(job, 'Install', f'Installing {step.name}.')
+        output = ssh(
+            job,
+            step.command,
+            timeout=1800,
+            include_stderr=True,
+            transport_attempts=1,
+        )
+        event(
+            job,
+            'Install',
+            f'{step.name} is ready: {output.strip()[-1000:]}',
+        )
+
+    if iperf3_protocols:
+        wait_for_iperf_peer(
+            job,
+            iperf3_protocols,
+            verify_tcp_udp=True,
+        )
+
+    if plan.storage.additional_volume:
+        mount_data_volume(job)
+
+    commands = rocky_linux.benchmark_commands(plan.ocpus)
+    parser_by_id = {
+        'sysbench_cpu': rocky_linux.parse_sysbench_cpu_output,
+        'sysbench_memory': rocky_linux.parse_sysbench_memory_output,
+        'fio': rocky_linux.parse_fio_output,
+        'sysbench_fileio': rocky_linux.parse_sysbench_fileio_output,
+    }
+    for key in (
+        'sysbench_cpu',
+        'sysbench_memory',
+        'stream',
+        'fio',
+        'sysbench_fileio',
+    ):
+        if key not in selected:
+            continue
+        name, command = commands[key]
+        parser = parser_by_id.get(key)
+        if key == 'stream':
+            parser = lambda output: rocky_linux.parse_stream_output(
+                output,
+                expected_threads=plan.ocpus,
+            )
+        execute_benchmark(
+            job,
+            key,
+            name,
+            command,
+            parser=parser,
+            metadata=environment,
+            output_limit=None if key == 'fio' else 20000,
+        )
+
+    network_selected = expanded_iperf3_result_ids(plan)
+    network_commands = network_benchmark_commands(job, network_selected)
+    for key in network_selected:
+        name, command = network_commands[key]
+        protocol = key.removeprefix('iperf_')
+        event(
+            job,
+            'Network',
+            f'Targeting the same-zone {provider_name} peer over its private '
+            f'{"VPC" if provider_name == "GCP" else "virtual-network"} address '
+            f'{resources["peer_private_ip"]}.',
+        )
+        execute_benchmark(
+            job,
+            key,
+            name,
+            command,
+            parser=lambda output, expected=protocol: parse_iperf3_output(
+                output,
+                expected_protocol=expected,
+            ),
+            metadata={
+                **environment,
+                'protocol': protocol.upper(),
+                'traffic_path': network_path,
+                'peer_private_ip': resources['peer_private_ip'],
+            },
+            output_limit=None,
+        )
+
+    phoronix_failures = (
+        run_phoronix_profiles(job, plan) if 'phoronix' in selected else ()
+    )
+    if 'llama_bench' in plan.llm_benchmarks:
+        run_llama_benchmark(
+            job,
+            metadata=environment,
+            toolset_enable=rocky_linux.LLAMA_TOOLSET_ENABLE,
+        )
+    if 'apachebench' in plan.benchmarks:
+        apachebench_failures = run_apachebench(job, plan)
+    if 'deathstarbench' in plan.benchmarks:
+        run_deathstarbench(job, plan)
+    deferred_failures = (*phoronix_failures, *apachebench_failures)
+    if deferred_failures:
+        raise RuntimeError(
+            'One or more independently selected benchmark workloads failed '
+            'after the remaining workloads were attempted: '
+            + ' | '.join(deferred_failures)
+        )
+
+
+def run_gcp_benchmarks(job, plan):
+    """Run the selected supported benchmarks on Rocky Linux 9 for GCE."""
+    return run_rocky_linux_benchmarks(
+        job,
+        plan,
+        provider_name='GCP',
+        environment=gcp_runtime_environment(
+            job,
+            plan,
+            job.get('resources', {}).get('architecture'),
+        ),
+    )
+
+
+def run_azure_benchmarks(job, plan):
+    """Run the selected supported benchmarks on Rocky Linux 9 for Azure."""
+    return run_rocky_linux_benchmarks(
+        job,
+        plan,
+        provider_name='Azure',
+        environment=azure_runtime_environment(
+            job,
+            plan,
+            job.get('resources', {}).get('architecture'),
+        ),
+    )
+
+
 def run_benchmarks(job, plan):
+    return dispatch_provider_operation(
+        plan,
+        'benchmark',
+        {
+            'oci': lambda: run_oci_benchmarks(job, plan),
+            'aws': lambda: run_aws_benchmarks(job, plan),
+            'gcp': lambda: run_gcp_benchmarks(job, plan),
+            'azure': lambda: run_azure_benchmarks(job, plan),
+        },
+    )
+
+
+def run_oci_benchmarks(job, plan):
     selected = expanded_benchmark_ids(plan)
     apachebench_failures = ()
     readiness_hosts = [f'yum.{plan.region}.oci.oraclecloud.com']
-    if {'stream', 'phoronix', 'deathstarbench'} & selected or plan.llm_benchmarks:
+    core_result_ids = {
+        'sysbench_cpu',
+        'sysbench_memory',
+        'sysbench_fileio',
+        'stream',
+        'fio',
+    }
+    if {
+        'sysbench_cpu',
+        'sysbench_memory',
+        'sysbench_fileio',
+    } & selected:
+        readiness_hosts.extend(('github.com', 'codeload.github.com'))
+    if 'stream' in selected:
+        readiness_hosts.append('raw.githubusercontent.com')
+    if {'phoronix', 'deathstarbench'} & selected or plan.llm_benchmarks:
         readiness_hosts.append('github.com')
     if 'phoronix' in selected:
         readiness_hosts.append('openbenchmarking.org')
@@ -2353,24 +4607,84 @@ def run_benchmarks(job, plan):
         wait_for_iperf_peer(job, iperf3_protocols)
     if plan.storage.additional_volume:
         mount_data_volume(job)
-    commands = {
-      'sysbench_cpu': ('Sysbench — CPU', f'sysbench cpu --threads={int(plan.ocpus)} --time=60 run'),
-      'sysbench_memory': ('Sysbench — Memory', f'sysbench memory --threads={int(plan.ocpus)} --time=60 --memory-block-size=1M run'),
-      'stream': ('STREAM', f'{git_clone_command("https://github.com/jeffhammond/STREAM.git", "/tmp/stream")} && cd /tmp/stream && gcc -O3 -fopenmp stream.c -o stream && OMP_NUM_THREADS=$(nproc) ./stream'),
-      'fio': ('fio storage suite', 'for W in read write randread randwrite; do fio --name=$W --directory=/data --rw=$W --bs=$([ "$W" = "read" -o "$W" = "write" ] && echo 1M || echo 4k) --size=4G --direct=1 --time_based --runtime=60 --group_reporting --output-format=json; done'),
-      'sysbench_fileio': (
-          'Sysbench — File I/O',
-          'cd /data '
-          '&& sysbench fileio --file-total-size=4G prepare '
-          "&& trap 'sysbench fileio --file-total-size=4G cleanup "
-          ">/dev/null 2>&1 || true' EXIT "
-          '&& sysbench fileio --file-total-size=4G --time=60 '
-          '--file-test-mode=rndrw run',
-      ),
+    environment = None
+    logical_cpu_count = None
+    if core_result_ids & selected:
+        event(
+            job,
+            'Connect',
+            'Recording the OCI guest architecture and observed logical CPU '
+            'count for comparable benchmark results.',
+        )
+        architecture_output = ssh(
+            job,
+            llama_cpp.architecture_command(),
+            timeout=60,
+        )
+        architecture = llama_cpp.parse_architecture(architecture_output)
+        logical_cpu_output = ssh(
+            job,
+            llama_cpp.logical_cpu_count_command(),
+            timeout=60,
+        )
+        logical_cpu_count = llama_cpp.parse_logical_cpu_count(
+            logical_cpu_output
+        )
+        expected_architecture = job.get('resources', {}).get('architecture')
+        if expected_architecture is not None:
+            expected_architecture = amazon_linux.normalize_architecture(
+                expected_architecture
+            )
+            if expected_architecture != architecture:
+                raise RuntimeError(
+                    'The observed OCI guest architecture does not match the '
+                    'persisted run manifest.'
+                )
+        environment = oci_runtime_environment(
+            job,
+            plan,
+            architecture,
+            logical_cpu_count,
+        )
+        event(
+            job,
+            'Connect',
+            f'OCI CPU topology recorded: {architecture}, '
+            f'{logical_cpu_count} logical CPUs across {plan.ocpus:g} OCPUs.',
+        )
+
+    commands = amazon_linux.benchmark_commands(logical_cpu_count or 1)
+    parser_by_id = {
+        'sysbench_cpu': amazon_linux.parse_sysbench_cpu_output,
+        'sysbench_memory': amazon_linux.parse_sysbench_memory_output,
+        'fio': amazon_linux.parse_fio_output,
+        'sysbench_fileio': amazon_linux.parse_sysbench_fileio_output,
     }
-    for key, (name, command) in commands.items():
-        if key in selected:
-            execute_benchmark(job, key, name, command)
+    for key in (
+        'sysbench_cpu',
+        'sysbench_memory',
+        'stream',
+        'fio',
+        'sysbench_fileio',
+    ):
+        if key not in selected:
+            continue
+        name, command = commands[key]
+        parser = parser_by_id.get(key)
+        if key == 'stream':
+            parser = lambda output: amazon_linux.parse_stream_output(
+                output,
+                expected_threads=logical_cpu_count,
+            )
+        execute_benchmark(
+            job,
+            key,
+            name,
+            command,
+            parser=parser,
+            metadata=environment,
+            output_limit=None if key == 'fio' else 20000,
+        )
     phoronix_failures = (
         run_phoronix_profiles(job, plan)
         if 'phoronix' in selected
@@ -2380,19 +4694,28 @@ def run_benchmarks(job, plan):
     network_commands = network_benchmark_commands(job, network_selected)
     for key in network_selected:
         name, command = network_commands[key]
+        protocol = key.removeprefix('iperf_')
         event(
             job,
             'Network',
             f'Targeting private peer {job["resources"]["peer_private_ip"]}.',
         )
-        execute_benchmark(job, key, name, command, output_limit=None)
-    if 'llama_bench' in plan.llm_benchmarks:
-        event(job, 'Run', 'Building and running llama.cpp CPU benchmark.')
         execute_benchmark(
             job,
-            'llama_bench',
-            'llama.cpp throughput (CPU)',
-            llama_benchmark_command(),
+            key,
+            name,
+            command,
+            parser=lambda output, expected=protocol: parse_iperf3_output(
+                output,
+                expected_protocol=expected,
+            ),
+            output_limit=None,
+        )
+    if 'llama_bench' in plan.llm_benchmarks:
+        run_llama_benchmark(
+            job,
+            metadata=oci_runtime_environment(job, plan),
+            toolset_enable=LLAMA_TOOLSET_ENABLE,
         )
     if 'apachebench' in plan.benchmarks:
         apachebench_failures = run_apachebench(job, plan)
@@ -2464,11 +4787,39 @@ def report_result_section(result):
     )
 
 
+def embedded_results_json(document):
+    """Serialize report data without allowing an HTML script boundary."""
+    return (
+        json.dumps(
+            document,
+            sort_keys=True,
+            separators=(',', ':'),
+            ensure_ascii=True,
+        )
+        .replace('&', r'\u0026')
+        .replace('<', r'\u003c')
+        .replace('>', r'\u003e')
+    )
+
+
 def make_report(job):
     directory = RUNS / job['id']; directory.mkdir(exist_ok=True)
+    if job.get('_persist_results_artifact', True):
+        artifact_job = results_artifact_job(job)
+        artifact = build_results_artifact(artifact_job)
+        write_results_artifact(directory, artifact_job)
+    else:
+        try:
+            artifact = load_results_document(directory)
+        except (FileNotFoundError, ValueError):
+            # Recovered lifecycle state contains summary rows only. It can be
+            # rendered for diagnostics, but must not replace a rich artifact.
+            artifact = build_results_artifact(results_artifact_job(job))
+    embedded_artifact = embedded_results_json(artifact)
     body = ''.join(report_result_section(result) for result in job['results'])
     plan = html.escape(json.dumps(job['plan'], indent=2))
-    report_html = f'''<!doctype html><html><head><meta charset="utf-8"><title>OCI Benchmark {job['id']}</title><style>body{{font:16px system-ui;max-width:1100px;margin:40px auto;padding:0 20px;color:#172033}}pre{{white-space:pre-wrap;background:#101828;color:#d0d5dd;padding:16px;border-radius:8px;overflow:auto}}code{{font-size:12px;overflow-wrap:anywhere}}section{{border-top:1px solid #ddd;padding:18px 0}}table{{border-collapse:collapse;width:100%;margin:8px 0 20px}}th,td{{border:1px solid #d0d5dd;padding:8px 10px;text-align:left;vertical-align:top;white-space:pre-wrap}}th{{width:34%;background:#f2f4f7}}summary{{cursor:pointer;font-weight:650;margin:16px 0}}</style></head><body><h1>OCI Compute Benchmark Report</h1><p>Run {job['id']} · {job['created_at']}</p><h2>Configuration</h2><pre>{plan}</pre>{body}</body></html>'''
+    provider_name = str(job.get('plan', {}).get('provider', 'oci')).upper()
+    report_html = f'''<!doctype html><html><head><meta charset="utf-8"><title>{provider_name} Benchmark {job['id']}</title><style>body{{font:16px system-ui;max-width:1100px;margin:40px auto;padding:0 20px;color:#172033}}pre{{white-space:pre-wrap;background:#101828;color:#d0d5dd;padding:16px;border-radius:8px;overflow:auto}}code{{font-size:12px;overflow-wrap:anywhere}}section{{border-top:1px solid #ddd;padding:18px 0}}table{{border-collapse:collapse;width:100%;margin:8px 0 20px}}th,td{{border:1px solid #d0d5dd;padding:8px 10px;text-align:left;vertical-align:top;white-space:pre-wrap}}th{{width:34%;background:#f2f4f7}}summary{{cursor:pointer;font-weight:650;margin:16px 0}}</style></head><body><h1>{provider_name} Compute Benchmark Report</h1><p>Run {job['id']} · {job['created_at']}</p><h2>Configuration</h2><pre>{plan}</pre>{body}<script id="benchmark-results" type="application/json">{embedded_artifact}</script></body></html>'''
     (directory / 'plan.json').write_text(json.dumps(job['plan'], indent=2))
     (directory / 'report.html').write_text(report_html)
     event(job, 'Report', 'Report is ready for download.')
@@ -2591,6 +4942,38 @@ def destroy_with_status(job):
 
 
 def destroy_resources(job, preserve_status=False):
+    plan = job.get('plan', {})
+    return dispatch_provider_operation(
+        plan,
+        'destroy',
+        {
+            'oci': lambda: destroy_oci_resources(
+                job,
+                preserve_status=preserve_status,
+            ),
+            'aws': lambda: aws_provider.destroy_resources(
+                job,
+                emit=event,
+                persist=persist_job_state,
+                preserve_status=preserve_status,
+            ),
+            'gcp': lambda: gcp_provider.destroy_resources(
+                job,
+                emit=event,
+                persist=persist_job_state,
+                preserve_status=preserve_status,
+            ),
+            'azure': lambda: azure_provider.destroy_resources(
+                job,
+                emit=event,
+                persist=persist_job_state,
+                preserve_status=preserve_status,
+            ),
+        },
+    )
+
+
+def destroy_oci_resources(job, preserve_status=False):
     if not preserve_status: job['status'] = 'destroying'
     event(job, 'Destroy', 'Removing benchmark infrastructure.')
     plan = job['plan']; cfg, compute, network, storage, _ = clients(plan['region']); r = job['resources']

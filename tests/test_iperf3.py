@@ -74,6 +74,7 @@ class Iperf3PlanTests(unittest.TestCase):
         migrated = plan(
             benchmarks=['iperf3', 'iperf_sctp', 'fio'],
             iperf3={'protocols': ['udp']},
+            storage={'additional_volume': True},
         )
 
         self.assertEqual(migrated.benchmarks, ['iperf3', 'fio'])

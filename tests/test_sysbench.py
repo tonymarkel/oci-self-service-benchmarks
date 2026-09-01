@@ -247,12 +247,17 @@ class SysbenchCompatibilityAndCommandTests(unittest.TestCase):
 
     def test_fileio_command_cleans_up_from_an_exit_trap(self):
         selected_plan = plan(sysbench={'workloads': ['fileio']})
-        job = {'results': [], 'resources': {}}
+        job = {'events': [], 'results': [], 'resources': {}}
 
         with (
             patch.object(main, 'wait_for_guest_readiness'),
             patch.object(main, 'install_benchmark_tools'),
             patch.object(main, 'mount_data_volume'),
+            patch.object(
+                main,
+                'ssh',
+                side_effect=['x86_64\n', '16\n'],
+            ),
             patch.object(main, 'execute_benchmark') as execute,
         ):
             main.run_benchmarks(job, selected_plan)
@@ -266,7 +271,8 @@ class SysbenchCompatibilityAndCommandTests(unittest.TestCase):
             command,
         )
         self.assertIn("|| true' EXIT", command)
-        self.assertTrue(command.endswith('--file-test-mode=rndrw run'))
+        self.assertIn('--file-test-mode=rndrw run', command)
+        self.assertEqual(command, main.amazon_linux.sysbench_fileio_command())
 
 
 if __name__ == '__main__':

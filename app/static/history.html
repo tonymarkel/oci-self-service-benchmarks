@@ -4,8 +4,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Previous Runs · OCI Benchmark Lab</title>
-    <link rel="stylesheet" href="/static/styles.css?v=8">
+    <title>Previous Runs · Cloud Benchmark Lab</title>
+    <link rel="stylesheet" href="/static/styles.css?v=15">
 </head>
 
 <body>
@@ -31,22 +31,82 @@
             </svg>
         </div>
         <div><strong>Compute Benchmark Lab</strong><small>Traditional and LLM Benchmarks</small></div>
-        <span class="local">Saved reports on this computer</span>
+        <span class="local">Saved runs on this computer</span>
         <a class="header-link active" href="/history" aria-current="page">Previous runs</a>
         <a class="header-link" href="/">New run</a>
     </header>
     <main class="history-main">
         <div class="history-toolbar">
             <div class="intro">
-                <p class="eyebrow">LOCAL REPORT ARCHIVE</p>
+                <p class="eyebrow">LOCAL RUN ARCHIVE</p>
                 <h1>Previous benchmark runs.</h1>
-                <p id="historySummary">Loading saved reports…</p>
+                <p id="historySummary" role="status" aria-live="polite">Loading saved runs…</p>
             </div>
             <a class="button" href="/">Create a new benchmark</a>
         </div>
-        <section id="runList" class="run-list" aria-live="polite"></section>
+        <form id="historyFilters" class="history-filters" aria-label="Filter saved runs">
+            <label class="history-search">
+                Search runs
+                <input id="historySearch" type="search" placeholder="Run ID, shape, subscription, region, zone, or architecture">
+            </label>
+            <label>
+                Benchmark
+                <select id="benchmarkFilter">
+                    <option value="">All benchmarks</option>
+                </select>
+            </label>
+            <label>
+                Provider
+                <select id="providerFilter">
+                    <option value="">All providers</option>
+                </select>
+            </label>
+            <label class="history-completed-filter">
+                <input id="completedFilter" type="checkbox">
+                Completed results only
+            </label>
+        </form>
+        <section id="runList" class="run-list"></section>
+
+        <section id="comparisonWorkspace" class="comparison-workspace" aria-labelledby="comparisonHeading" hidden>
+            <div class="comparison-heading-row">
+                <div>
+                    <p class="eyebrow">LIKE-FOR-LIKE COMPARISON</p>
+                    <h2 id="comparisonHeading" tabindex="-1">Compare benchmark results</h2>
+                    <p id="comparisonContext" class="comparison-context"></p>
+                </div>
+                <div class="comparison-selectors">
+                    <label>
+                        Result
+                        <select id="comparisonResult" disabled></select>
+                    </label>
+                    <label>
+                        Metric
+                        <select id="comparisonMetric" disabled></select>
+                    </label>
+                </div>
+            </div>
+            <p id="comparisonStatus" class="comparison-status" role="status" aria-live="polite"></p>
+            <div id="comparisonChart" class="comparison-chart"></div>
+            <div id="comparisonTable" class="comparison-table-wrap" hidden></div>
+            <section id="comparisonExcluded" class="comparison-excluded" aria-labelledby="comparisonExcludedHeading" hidden>
+                <h3 id="comparisonExcludedHeading">Why some results were excluded</h3>
+                <ul id="comparisonExcludedList"></ul>
+            </section>
+        </section>
+
+        <aside id="comparisonTray" class="comparison-tray" aria-labelledby="selectionHeading" hidden>
+            <div>
+                <strong id="selectionHeading">Runs selected for comparison</strong>
+                <span id="selectionStatus" role="status" aria-live="polite">0 selected</span>
+            </div>
+            <div class="comparison-tray-actions">
+                <button id="clearComparison" class="button secondary" type="button">Clear</button>
+                <button id="compareSelected" type="button" disabled>Compare selected</button>
+            </div>
+        </aside>
     </main>
-    <script src="/static/history.js?v=1"></script>
+    <script src="/static/history.js?v=10"></script>
 </body>
 
 </html>

@@ -167,7 +167,7 @@ class PhoronixCommandTests(unittest.TestCase):
                 )
                 self.assertIn(
                     f'timeout --signal=TERM --kill-after=30s '
-                    f'{phoronix.PROFILE_TIMEOUT_SECONDS}',
+                    f'{item.timeout_seconds}',
                     command,
                 )
                 self.assertIn(f'batch-benchmark {item.profile}', command)
@@ -232,6 +232,35 @@ class PhoronixCommandTests(unittest.TestCase):
         self.assertIn(phoronix.SEVEN_ZIP_ASSET.sha256, command)
         self.assertGreaterEqual(command.count('sha256sum -c -'), 2)
 
+    def test_openssl_install_failure_cannot_be_reported_as_a_result(self):
+        command = phoronix.benchmark_command('openssl', 'job-123')
+        stale_result_cleanup = (
+            'rm -rf "$HOME/.phoronix-test-suite/test-results/$RESULT_NAME"'
+        )
+        benchmark = 'batch-benchmark pts/openssl-3.6.0 2>&1 | tee "$RAW_PATH"'
+        completed_result = (
+            'test -s "$HOME/.phoronix-test-suite/test-results/'
+            '$RESULT_NAME/composite.xml"'
+        )
+        exported_result = 'test -s "$EXPORT_PATH"'
+
+        # pipefail preserves a non-zero PTS installer status through tee.  The
+        # stale-result cleanup and both non-empty result checks also prevent a
+        # misleading installer error from becoming a completed benchmark.
+        self.assertTrue(command.startswith('set -euo pipefail; '))
+        self.assertLess(
+            command.index(stale_result_cleanup),
+            command.index(benchmark),
+        )
+        self.assertLess(
+            command.index(benchmark),
+            command.index(completed_result),
+        )
+        self.assertLess(
+            command.index(completed_result),
+            command.index(exported_result),
+        )
+
     def test_run_specs_are_deduplicated_and_independent(self):
         runs = phoronix.profile_runs(
             ['openssl', 'compress_7zip', 'openssl'],
@@ -252,6 +281,27 @@ class PhoronixCommandTests(unittest.TestCase):
             'openssl.algo=SHA256',
         )
         self.assertNotIn('fixed_options', runs[1].metadata)
+
+    def test_kernel_profile_has_a_longer_bounded_timeout(self):
+        kernel = phoronix.profile('build_linux_kernel')
+        run = phoronix.profile_runs(
+            ['build_linux_kernel'],
+            'job-123',
+        )[0]
+
+        self.assertEqual(
+            kernel.timeout_seconds,
+            phoronix.KERNEL_PROFILE_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(
+            run.timeout_seconds,
+            phoronix.KERNEL_PROFILE_TIMEOUT_SECONDS
+            + phoronix.SSH_TIMEOUT_MARGIN_SECONDS,
+        )
+        self.assertEqual(
+            run.metadata['profile_timeout_seconds'],
+            phoronix.KERNEL_PROFILE_TIMEOUT_SECONDS,
+        )
 
     def test_untrusted_run_token_cannot_add_shell_syntax(self):
         command = phoronix.benchmark_command(
@@ -353,6 +403,19 @@ class PhoronixResultParserTests(unittest.TestCase):
             phoronix.parse_result_output(
                 result_output(raw_values=[1220.0, float('nan'), 1240.0])
             )
+
+    def test_rejects_non_positive_scores_and_trials(self):
+        for value in (0, -1.0):
+            with self.subTest(score=value):
+                with self.assertRaisesRegex(ValueError, 'score must be positive'):
+                    phoronix.parse_result_output(result_output(value=value))
+
+        for value in (0, -1.0):
+            with self.subTest(trial=value):
+                with self.assertRaisesRegex(ValueError, 'trial values must be positive'):
+                    phoronix.parse_result_output(
+                        result_output(raw_values=[1220.0, value, 1240.0])
+                    )
 
     def test_rejects_a_result_export_for_the_wrong_profile(self):
         with self.assertRaisesRegex(ValueError, 'unexpected profile'):

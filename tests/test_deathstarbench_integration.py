@@ -299,7 +299,17 @@ class LifecycleAndReportTests(unittest.TestCase):
         ):
             calls.append((host_key, command, timeout, include_stderr))
             if command == 'uname -m':
-                return 'x86_64' if host_key == 'loadgen_public_ip' else 'aarch64'
+                architecture = (
+                    'x86_64'
+                    if host_key == 'loadgen_public_ip'
+                    else 'aarch64'
+                )
+                if include_stderr:
+                    return (
+                        f'{architecture}\n** The server may need to be '
+                        'upgraded. See https://openssh.com/pq.html'
+                    )
+                return architecture
             if '/wrk2/wrk -D exp' in command:
                 return self.METRICS
             if 'podman info' in command:
@@ -326,6 +336,11 @@ class LifecycleAndReportTests(unittest.TestCase):
             result['metadata']['load_generator_architecture'],
             'x86_64',
         )
+        architecture_calls = [
+            call for call in calls if call[1] == 'uname -m'
+        ]
+        self.assertEqual(len(architecture_calls), 2)
+        self.assertTrue(all(not call[3] for call in architecture_calls))
         self.assertEqual(
             result['metadata']['traffic_path'],
             'OCI private VCN address',

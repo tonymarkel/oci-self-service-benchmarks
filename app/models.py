@@ -15,6 +15,16 @@ LEGACY_IPERF3_PROTOCOLS = {
 }
 IPERF3_PROTOCOL_ORDER = ('tcp', 'udp', 'sctp')
 LEGACY_BASELINE_COMPONENTS = ('sysbench', 'stream', 'fio')
+SUPPORTED_BENCHMARKS = frozenset({
+    'deathstarbench',
+    'apachebench',
+    'sysbench',
+    'stream',
+    'fio',
+    'iperf3',
+    'phoronix',
+})
+SUPPORTED_LLM_BENCHMARKS = frozenset({'llama_bench'})
 
 
 def canonicalize_baseline_plan(values):
@@ -122,6 +132,27 @@ def canonicalize_benchmark_plan(values):
     return canonicalize_iperf3_plan(values)
 
 
+def canonicalize_provider_plan(values):
+    """Supply safe provider defaults while keeping legacy OCI plans valid."""
+    if not isinstance(values, dict):
+        return values
+    provider = values.get('provider', 'oci')
+    if provider not in {'aws', 'gcp', 'azure'}:
+        return values
+
+    migrated = dict(values)
+    compatibility_type = {
+        'aws': migrated.get('instance_type'),
+        'gcp': migrated.get('machine_type'),
+        'azure': migrated.get('vm_size'),
+    }[provider]
+    if not migrated.get('shape') and compatibility_type:
+        migrated['shape'] = compatibility_type
+    if 'storage' not in migrated:
+        migrated['storage'] = {'additional_volume': False}
+    return migrated
+
+
 class SecurityOptions(BaseModel):
     mode: Literal['none', 'shielded', 'confidential'] = 'none'
     secure_boot: bool = False
@@ -212,6 +243,12 @@ class PhoronixOptions(BaseModel):
 
 
 class BenchmarkPlan(BaseModel):
+    provider: Literal['oci', 'aws', 'gcp', 'azure'] = 'oci'
+    aws_profile: str = Field('default', min_length=1)
+    gcp_project_id: str | None = None
+    gcp_zone: str | None = None
+    azure_subscription_id: str | None = None
+    azure_zone: str | None = None
     region: str
     compartment_id: str | None = None
     availability_domain: str | None = None
@@ -241,13 +278,31 @@ class BenchmarkPlan(BaseModel):
     @model_validator(mode='before')
     @classmethod
     def migrate_legacy_benchmark_options(cls, values):
-        return canonicalize_benchmark_plan(values)
+        return canonicalize_benchmark_plan(canonicalize_provider_plan(values))
 
     @model_validator(mode='after')
     def validate_plan(self):
         if not self.benchmarks and not self.llm_benchmarks:
             raise ValueError('Select at least one benchmark.')
-        if self.storage.mount_style == 'nvme' and not self.shape.startswith('BM.'):
+        unsupported = sorted(set(self.benchmarks) - SUPPORTED_BENCHMARKS)
+        if unsupported:
+            raise ValueError(
+                f'{self.provider.upper()} does not support the selected '
+                'benchmark: ' + ', '.join(unsupported)
+            )
+        unsupported_llm = sorted(
+            set(self.llm_benchmarks) - SUPPORTED_LLM_BENCHMARKS
+        )
+        if unsupported_llm:
+            raise ValueError(
+                f'{self.provider.upper()} does not support the selected LLM '
+                'benchmark: ' + ', '.join(unsupported_llm)
+            )
+        if (
+            self.provider == 'oci'
+            and self.storage.mount_style == 'nvme'
+            and not self.shape.startswith('BM.')
+        ):
             raise ValueError('NVMe data volume attachment is available only for bare metal shapes.')
         if self.security.mode != 'shielded' and any([self.security.secure_boot, self.security.measured_boot, self.security.trusted_platform_module]):
             raise ValueError('Shielded options require Shielded security mode.')
@@ -268,9 +323,13 @@ class BenchmarkPlan(BaseModel):
                 and 'fileio' in self.sysbench.workloads
             )
         )
-        if sysbench_fileio_selected and not self.storage.additional_volume:
+        storage_benchmark_selected = (
+            sysbench_fileio_selected or 'fio' in self.benchmarks
+        )
+        if storage_benchmark_selected and not self.storage.additional_volume:
             raise ValueError(
-                'Sysbench file I/O requires the additional /data volume.'
+                'fio and Sysbench file I/O require the additional /data '
+                'volume.'
             )
         if 'deathstarbench' in self.benchmarks:
             if self.deathstarbench.connections < self.deathstarbench.threads:
@@ -297,5 +356,53 @@ class BenchmarkPlan(BaseModel):
                 raise ValueError(
                     'DeathStarBench requires at least 16 GB of memory for its '
                     'microservice containers.'
+                )
+        if self.provider == 'aws':
+            if self.security.mode != 'none':
+                raise ValueError(
+                    'OCI security options are not applicable to AWS plans.'
+                )
+            if self.networking != 'paravirtualized':
+                raise ValueError(
+                    'OCI networking options are not applicable to AWS plans.'
+                )
+        if self.provider == 'gcp':
+            if not (self.gcp_project_id or '').strip():
+                raise ValueError(
+                    'A Google Cloud project ID is required for GCP plans.'
+                )
+            if not (self.gcp_zone or '').strip():
+                raise ValueError(
+                    'A Google Cloud zone is required for GCP plans.'
+                )
+            if self.security.mode != 'none':
+                raise ValueError(
+                    'OCI security options are not applicable to GCP plans.'
+                )
+            if self.networking != 'paravirtualized':
+                raise ValueError(
+                    'OCI networking options are not applicable to GCP plans.'
+                )
+        if self.provider == 'azure':
+            if not (self.azure_subscription_id or '').strip():
+                raise ValueError(
+                    'An Azure subscription ID is required for Azure plans.'
+                )
+            if not (self.azure_zone or '').strip():
+                raise ValueError(
+                    'An Azure availability zone is required for Azure plans.'
+                )
+            if self.security.mode != 'none':
+                raise ValueError(
+                    'OCI security options are not applicable to Azure plans.'
+                )
+            if self.networking != 'paravirtualized':
+                raise ValueError(
+                    'OCI networking options are not applicable to Azure plans.'
+                )
+            if 'sctp' in self.iperf3.protocols:
+                raise ValueError(
+                    'Azure Virtual Network does not support the SCTP iperf3 '
+                    'protocol; select TCP or UDP.'
                 )
         return self

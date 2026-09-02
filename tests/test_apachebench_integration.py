@@ -180,7 +180,17 @@ class ApacheBenchOrchestrationTests(unittest.TestCase):
         ):
             calls.append((host_key, command, timeout, include_stderr))
             if command == 'uname -m':
-                return 'x86_64' if host_key == 'loadgen_public_ip' else 'aarch64'
+                architecture = (
+                    'x86_64'
+                    if host_key == 'loadgen_public_ip'
+                    else 'aarch64'
+                )
+                if include_stderr:
+                    return (
+                        f'{architecture}\n** The server may need to be '
+                        'upgraded. See https://openssh.com/pq.html'
+                    )
+                return architecture
             return command
 
         def parsed(output):
@@ -272,8 +282,19 @@ class ApacheBenchOrchestrationTests(unittest.TestCase):
             self.assertEqual(len(result['trial_metrics']), 2)
             self.assertEqual(result['metrics']['mean_requests_per_second'], 1001.5)
             self.assertEqual(result['metadata']['traffic_path'], 'OCI private VCN address')
+            self.assertEqual(result['metadata']['service_architecture'], 'aarch64')
+            self.assertEqual(
+                result['metadata']['load_generator_architecture'],
+                'x86_64',
+            )
             self.assertIn('--- Trial 1 of 2 ---', result['output'])
             self.assertIn('--- Trial 2 of 2 ---', result['output'])
+
+        architecture_calls = [
+            call for call in calls if call[1] == 'uname -m'
+        ]
+        self.assertEqual(len(architecture_calls), 2)
+        self.assertTrue(all(not call[3] for call in architecture_calls))
 
         load_commands = [
             (host, command)

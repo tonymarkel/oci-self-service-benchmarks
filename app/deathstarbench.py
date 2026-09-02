@@ -156,11 +156,24 @@ def pinned_clone_command(destination=REMOTE_ROOT, recursive=False):
     )
 
 
-def podman_runtime_verification_command():
+def _podman_compose_path(value):
+    path = str(value)
+    if path not in {'/usr/bin/podman-compose', '/usr/local/bin/podman-compose'}:
+        raise ValueError('The podman-compose executable path is unsupported.')
+    return path
+
+
+def podman_runtime_verification_command(
+    compose_path='/usr/bin/podman-compose',
+):
+    compose_path = _podman_compose_path(compose_path)
     return (
         'set -euo pipefail; '
         'PODMAN_PATH=$(command -v podman); '
         'PODMAN_COMPOSE_PATH=$(command -v podman-compose); '
+        f'test "$PODMAN_COMPOSE_PATH" = "{compose_path}" || '
+        '{ echo "Unexpected podman-compose executable: '
+        '$PODMAN_COMPOSE_PATH" >&2; exit 1; }; '
         'DOCKER_PATH=$(command -v docker 2>/dev/null || true); '
         'if test -n "$DOCKER_PATH"; then '
         'PODMAN_TARGET=$(readlink -f "$PODMAN_PATH"); '
@@ -172,7 +185,8 @@ def podman_runtime_verification_command():
         'be invoked."; '
         'elif test "$DOCKER_OWNER" = "podman-docker" '
         '&& rpm -V podman-docker >/dev/null 2>&1; then '
-        'echo "Verified the OL9 podman-docker compatibility wrapper; it will '
+        'echo "Verified the Podman-provided Docker compatibility wrapper; it '
+        'will '
         'not be invoked."; '
         'else echo "A non-Podman Docker executable is installed at '
         '$DOCKER_PATH; refusing to run." >&2; exit 1; fi; fi; '
@@ -199,7 +213,7 @@ def podman_runtime_verification_command():
         'echo "Docker Engine unit $unit is active; refusing to run." >&2; '
         'exit 1; fi; done; '
         'printf "architecture: "; uname -m; '
-        '"$PODMAN_PATH" --version; /usr/bin/podman-compose --version; '
+        '"$PODMAN_PATH" --version; "$PODMAN_COMPOSE_PATH" --version; '
         'RUNTIME_INFO=$(sudo podman info --format '
         "'rootless={{.Host.Security.Rootless}} "
         "networkBackend={{.Host.NetworkBackend}} "
@@ -474,6 +488,9 @@ def prefetch_workload_images_command(workload_id):
     workload(workload_id)
     images = WORKLOAD_REGISTRY_IMAGES[workload_id]
     return (
+        'set -euo pipefail; ARCH=$(uname -m); case "$ARCH" in '
+        'x86_64) EXPECTED_ARCH=amd64;; aarch64|arm64) EXPECTED_ARCH=arm64;; '
+        '*) echo "Unsupported service architecture: $ARCH" >&2; exit 1;; esac; '
         f'for IMAGE in {" ".join(images)}; do '
         'echo "Prefetching $IMAGE with registry retries."; '
         'if ! sudo podman pull --retry=10 --retry-delay=10s "$IMAGE"; then '
@@ -485,15 +502,21 @@ def prefetch_workload_images_command(workload_id):
         'echo "--- NetworkManager DNS ---" >&2; '
         'if command -v nmcli >/dev/null 2>&1; then '
         'nmcli -f GENERAL.DEVICE,IP4.DNS,IP4.DOMAIN device show >&2 || true; fi; '
-        'echo "--- route to OCI resolver ---" >&2; '
+        'echo "--- route to cloud metadata endpoint ---" >&2; '
         'ip route get 169.254.169.254 >&2 || true; '
-        'echo "--- OCI resolver lookups ---" >&2; '
+        'echo "--- registry resolver lookups ---" >&2; '
         'for HOST in auth.docker.io registry-1.docker.io; do '
         'echo "[$HOST]" >&2; getent ahostsv4 "$HOST" >&2 || true; done; '
         'exit 1; fi; '
         'sudo podman image exists "$IMAGE" || '
         '{ echo "Prefetched image is not in local storage: $IMAGE" >&2; '
-        'exit 1; }; done'
+        'exit 1; }; '
+        'ACTUAL_ARCH=$(sudo podman image inspect --format '
+        "'{{.Architecture}}' \"$IMAGE\"); "
+        'echo "$IMAGE architecture: $ACTUAL_ARCH"; '
+        'if [ "$ACTUAL_ARCH" != "$EXPECTED_ARCH" ]; then '
+        'echo "External image architecture mismatch for $IMAGE: expected '
+        '$EXPECTED_ARCH, got $ACTUAL_ARCH." >&2; exit 1; fi; done'
     )
 
 
@@ -589,11 +612,15 @@ def build_workload_command(workload_id):
     return 'set -euo pipefail; ' + '; '.join([*commands, validation])
 
 
-def deploy_workload_command(workload_id):
+def deploy_workload_command(
+    workload_id,
+    compose_path='/usr/bin/podman-compose',
+):
     settings = workload(workload_id)
+    compose_path = _podman_compose_path(compose_path)
     directory = f'{REMOTE_ROOT}/{settings["directory"]}'
     compose = (
-        f'sudo /usr/bin/podman-compose -p {settings["project"]} '
+        f'sudo {compose_path} -p {settings["project"]} '
         f'-f {directory}/compose-oci.yml'
     )
     network = settings['network']
@@ -726,13 +753,25 @@ def frontend_readiness_command(workload_id, target_private_ip):
     )
 
 
-def frontend_firewall_command(workload_id):
+def frontend_firewall_command(workload_id, loadgen_private_ip=None):
     port = workload(workload_id)['port']
+    if loadgen_private_ip is None:
+        source = '10.42.1.0/24'
+        route_target = '10.42.1.1'
+    else:
+        parsed_source = ip_address(loadgen_private_ip)
+        if parsed_source.version != 4 or not parsed_source.is_private:
+            raise ValueError(
+                'DeathStarBench guest ingress requires a private IPv4 load '
+                'generator address.'
+            )
+        source = f'{parsed_source}/32'
+        route_target = str(parsed_source)
     return (
         'set -euo pipefail; '
         'if command -v firewall-cmd >/dev/null 2>&1 '
         '&& sudo systemctl is-active --quiet firewalld; then '
-        'INTERFACE=$(ip -o route get 10.42.1.1 | '
+        f'INTERFACE=$(ip -o route get {route_target} | '
         "awk '{for (i=1; i<=NF; i++) if ($i == \"dev\") "
         "{print $(i+1); exit}}'); "
         'test -n "$INTERFACE"; '
@@ -740,14 +779,14 @@ def frontend_firewall_command(workload_id):
         '2>/dev/null || true); '
         'if [ -z "$ZONE" ] || [ "$ZONE" = "no zone" ]; then '
         'ZONE=$(sudo firewall-cmd --get-default-zone); fi; '
-        "RULE='rule family=ipv4 source address=10.42.1.0/24 "
+        f"RULE='rule family=ipv4 source address={source} "
         f"port protocol=tcp port={port} accept'; "
         'sudo firewall-cmd --permanent --zone="$ZONE" '
         '--add-rich-rule="$RULE"; '
         'sudo firewall-cmd --reload; '
         'sudo firewall-cmd --zone="$ZONE" --query-rich-rule="$RULE"; '
         'echo "Opened TCP port '
-        f'{port} for the private subnet in firewalld zone $ZONE."; '
+        f'{port} for {source} in firewalld zone $ZONE."; '
         'else echo "firewalld is not active; no guest rule was required."; fi'
     )
 
@@ -1174,14 +1213,17 @@ def parse_wrk2_output(output, require_marker=True):
     return parsed
 
 
-def metadata(workload_id, options, service_architecture, loadgen_architecture):
+def metadata(
+    workload_id,
+    options,
+    service_architecture=None,
+    loadgen_architecture=None,
+):
     settings = workload(workload_id)
     values = {
         'workload': settings['name'],
         'upstream_revision': REVISION,
         'container_runtime': 'Podman with podman-compose',
-        'service_architecture': service_architecture,
-        'load_generator_architecture': loadgen_architecture,
         'warmup_seconds': int(options.warmup_seconds),
         'duration_seconds': int(options.duration_seconds),
         'threads': int(options.threads),
@@ -1211,4 +1253,8 @@ def metadata(workload_id, options, service_architecture, loadgen_architecture):
             'movie-title registrations use the first mapping because the '
             'upstream MovieId service keys records by title.'
         )
+    if service_architecture:
+        values['service_architecture'] = service_architecture
+    if loadgen_architecture:
+        values['load_generator_architecture'] = loadgen_architecture
     return values

@@ -18,7 +18,9 @@ PTS_EXECUTABLE = f'{PTS_DIRECTORY}/phoronix-test-suite'
 MEASURED_TRIALS = 3
 PREPARE_TIMEOUT_SECONDS = 1200
 PROFILE_TIMEOUT_SECONDS = 1800
-SSH_TIMEOUT_SECONDS = PROFILE_TIMEOUT_SECONDS + 300
+KERNEL_PROFILE_TIMEOUT_SECONDS = 3600
+SSH_TIMEOUT_MARGIN_SECONDS = 300
+SSH_TIMEOUT_SECONDS = PROFILE_TIMEOUT_SECONDS + SSH_TIMEOUT_MARGIN_SECONDS
 EXPORT_START = '--- OCI_PHORONIX_JSON_START ---'
 EXPORT_END = '--- OCI_PHORONIX_JSON_END ---'
 
@@ -36,6 +38,7 @@ class Profile:
     result_id: str
     profile: str
     name: str
+    timeout_seconds: int = PROFILE_TIMEOUT_SECONDS
     preset_options: str | None = None
     assets: tuple[DownloadAsset, ...] = ()
 
@@ -83,6 +86,7 @@ PROFILES = {
             result_id='phoronix_build_linux_kernel',
             profile='pts/build-linux-kernel-1.18.0',
             name='Phoronix — Linux Kernel Compilation',
+            timeout_seconds=KERNEL_PROFILE_TIMEOUT_SECONDS,
             preset_options='build-linux-kernel.build=defconfig',
         ),
         Profile(
@@ -254,12 +258,12 @@ def benchmark_command(profile_id: str, run_token: str) -> str:
         f'{asset_commands}'
         f'export FORCE_TIMES_TO_RUN={MEASURED_TRIALS}; '
         'export TEST_RESULTS_NAME="$RESULT_NAME"; '
-        'export TEST_RESULTS_IDENTIFIER="OCI benchmark runner"; '
-        'export TEST_RESULTS_DESCRIPTION="Curated OCI compute benchmark"; '
+        'export TEST_RESULTS_IDENTIFIER="Cloud benchmark runner"; '
+        'export TEST_RESULTS_DESCRIPTION="Curated cloud compute benchmark"; '
         'unset PRESET_OPTIONS PRESET_OPTIONS_VALUES; '
         f'{preset}'
         f'timeout 120 {executable} info {profile_q}; '
-        f'timeout --signal=TERM --kill-after=30s {PROFILE_TIMEOUT_SECONDS} '
+        f'timeout --signal=TERM --kill-after=30s {selected.timeout_seconds} '
         f'{executable} batch-benchmark {profile_q} '
         '2>&1 | tee "$RAW_PATH"; '
         'test -s "$HOME/.phoronix-test-suite/test-results/'
@@ -286,12 +290,14 @@ def profile_runs(
             name=selected.name,
             profile=selected.profile,
             command=benchmark_command(selected.id, run_token),
-            timeout_seconds=SSH_TIMEOUT_SECONDS,
+            timeout_seconds=(
+                selected.timeout_seconds + SSH_TIMEOUT_MARGIN_SECONDS
+            ),
             metadata={
                 'phoronix_profile': selected.profile,
                 'phoronix_client_revision': PTS_REVISION,
                 'measured_trials': MEASURED_TRIALS,
-                'profile_timeout_seconds': PROFILE_TIMEOUT_SECONDS,
+                'profile_timeout_seconds': selected.timeout_seconds,
                 **(
                     {'fixed_options': selected.preset_options}
                     if selected.preset_options
@@ -360,6 +366,8 @@ def parse_result_output(
                 or not math.isfinite(float(value))
             ):
                 raise ValueError('Phoronix measurement does not contain a score.')
+            if float(value) <= 0:
+                raise ValueError('Phoronix measurement score must be positive.')
             raw_values = measurement.get('raw_values')
             if not isinstance(raw_values, list):
                 raise ValueError('Phoronix measurement is missing trial values.')
@@ -375,6 +383,8 @@ def parse_result_output(
                 for item in raw_values
             ):
                 raise ValueError('Phoronix trial values must be numeric.')
+            if any(float(item) <= 0 for item in raw_values):
+                raise ValueError('Phoronix trial values must be positive.')
             parsed = {
                 'profile': result_profile,
                 'benchmark': result.get('title'),

@@ -1,1 +1,1 @@
-"""OCI benchmark application."""
+"""Local multi-cloud benchmark application."""

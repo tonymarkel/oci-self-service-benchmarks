@@ -3,3 +3,4 @@
 __pycache__/
 *.py[cod]
 app/runs/
+.DS_Store

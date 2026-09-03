@@ -49,7 +49,7 @@ header small {
 
 .local {
     margin-left: auto;
-    color: #b7c2d8;
+    color: #556677;
     font-size: 12px
 }
 
@@ -112,7 +112,7 @@ fieldset {
 
 form {
     padding: 26px;
-    display: grid;
+    display: block;
     gap: 22px
 }
 
@@ -123,7 +123,7 @@ fieldset {
 
 legend {
     font-weight: 750;
-    padding: 0 5px
+    padding: 9px
 }
 
 .grid {
@@ -148,6 +148,7 @@ input,
 select,
 textarea {
     border: 1px solid #c8d0de;
+    width: 100%;
     border-radius: 6px;
     padding: 10px;
     background: #fff;
@@ -183,9 +184,9 @@ small,
 #shielded label,
 .checks label,
 .destroy {
-    display: flex;
-    flex-direction: row;
-    align-items: flex-start;
+    display: block;
+    /* flex-direction: row;
+    align-items: flex-start; */
     font-weight: 500;
     margin: 8px 0
 }
@@ -195,7 +196,8 @@ small,
 .checks input,
 .destroy input {
     width: auto;
-    margin-top: 2px
+    margin-top: 2px;
+    margin: 6px;
 }
 
 .checks {
@@ -261,7 +263,7 @@ button,
     color: #fff;
     border: 0;
     border-radius: 6px;
-    padding: 13px 17px;
+    padding: 9px 17px;
     font-weight: 800;
     font-size: 14px;
     cursor: pointer;
@@ -270,7 +272,7 @@ button,
 }
 
 .button span {
-    margin-left: 20px
+    margin-left: 0px;
 }
 
 .secondary {
@@ -404,7 +406,7 @@ button,
 }
 
 .header-reset {
-    margin-left: 16px;
+    margin-left: 0px;
     background: transparent;
     border: 1px solid #667085;
     color: #fff;
@@ -432,6 +434,11 @@ button,
     background: #344054
 }
 
+.main {
+    max-width: 1180px;
+    padding-bottom: 150px
+}
+
 .history-main {
     max-width: 1180px;
     padding-bottom: 150px
@@ -447,6 +454,89 @@ button,
 
 .history-toolbar .intro {
     margin-bottom: 0
+}
+
+.history-toolbar-actions {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 10px
+}
+
+.history-toolbar-actions .button {
+    margin: 0
+}
+
+.danger-secondary {
+    background: #fff;
+    border: 1px solid #b42318;
+    color: #b42318
+}
+
+.danger-secondary:hover:not(:disabled) {
+    background: #fff4f4
+}
+
+.danger-secondary:disabled {
+    cursor: not-allowed;
+    opacity: .55
+}
+
+.history-action-status {
+    margin: -16px 0 20px;
+    color: #475467;
+    font-weight: 650
+}
+
+.history-action-status:empty {
+    display: none
+}
+
+.history-action-status.is-error {
+    color: #b42318
+}
+
+.confirmation-dialog {
+    width: min(520px, calc(100% - 32px));
+    padding: 0;
+    border: 0;
+    border-radius: 12px;
+    color: var(--ink);
+    box-shadow: 0 20px 60px rgb(17 34 51 / 30%)
+}
+
+.confirmation-dialog::backdrop {
+    background: rgb(17 34 51 / 55%)
+}
+
+.confirmation-dialog-content {
+    padding: 26px
+}
+
+.confirmation-dialog .eyebrow {
+    margin-top: 0
+}
+
+.confirmation-dialog h2 {
+    margin: 8px 0 12px
+}
+
+.confirmation-dialog p:not(.eyebrow) {
+    margin: 0;
+    color: #475467;
+    line-height: 1.55
+}
+
+.confirmation-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 24px
+}
+
+.confirmation-dialog-actions .button,
+.confirmation-dialog-actions .danger-action {
+    margin: 0
 }
 
 .history-filters {
@@ -856,7 +946,7 @@ button,
     color: #7a2e0e
 }
 
-.comparison-excluded li + li {
+.comparison-excluded li+li {
     margin-top: 6px
 }
 
@@ -875,6 +965,8 @@ button,
 .run-comparison-choice input:focus-visible,
 .history-filters input:focus-visible,
 .history-filters select:focus-visible,
+.history-toolbar-actions .button:focus-visible,
+.confirmation-dialog button:focus-visible,
 .comparison-selectors select:focus-visible,
 .comparison-tray button:focus-visible {
     outline: 3px solid rgb(187 34 34 / 28%);
@@ -887,6 +979,25 @@ button,
     .run-card-head {
         align-items: stretch;
         flex-direction: column
+    }
+
+    .history-toolbar-actions {
+        align-items: stretch;
+        flex-direction: column
+    }
+
+    .history-toolbar-actions .button {
+        width: 100%;
+        text-align: center
+    }
+
+    .confirmation-dialog-actions {
+        align-items: stretch;
+        flex-direction: column
+    }
+
+    .confirmation-dialog-actions button {
+        width: 100%
     }
 
     .history-filters {

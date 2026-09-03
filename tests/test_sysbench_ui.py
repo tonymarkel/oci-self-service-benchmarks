@@ -78,7 +78,7 @@ class SysbenchUiTests(unittest.TestCase):
         render = javascript_function('renderCatalog')
 
         self.assertIn(
-            "const sysbenchDefaults = {workloads: ['cpu']};",
+            "const sysbenchDefaults = { workloads: ['cpu'] };",
             JAVASCRIPT,
         )
         self.assertIn('catalog.sysbench_workloads || []', render)

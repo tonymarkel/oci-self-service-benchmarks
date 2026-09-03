@@ -1,6 +1,12 @@
 const hasDocument = typeof document !== 'undefined';
 const runList = hasDocument ? document.querySelector('#runList') : null;
 const historySummary = hasDocument ? document.querySelector('#historySummary') : null;
+const historyActionStatus = hasDocument ? document.querySelector('#historyActionStatus') : null;
+const clearHistory = hasDocument ? document.querySelector('#clearHistory') : null;
+const clearHistoryDialog = hasDocument ? document.querySelector('#clearHistoryDialog') : null;
+const clearHistoryDialogDescription = hasDocument ? document.querySelector('#clearHistoryDialogDescription') : null;
+const cancelClearHistory = hasDocument ? document.querySelector('#cancelClearHistory') : null;
+const confirmClearHistory = hasDocument ? document.querySelector('#confirmClearHistory') : null;
 const historySearch = hasDocument ? document.querySelector('#historySearch') : null;
 const benchmarkFilter = hasDocument ? document.querySelector('#benchmarkFilter') : null;
 const providerFilter = hasDocument ? document.querySelector('#providerFilter') : null;
@@ -45,6 +51,7 @@ let selectedRunIds = new Set();
 let comparisonData = null;
 let comparisonLoading = false;
 let comparisonRequest = 0;
+let historyClearPending = false;
 
 function valueOrDash(value) {
     return value === null || value === undefined || value === '' ? '—' : String(value);
@@ -171,6 +178,99 @@ function currentFilters() {
         provider: providerFilter.value,
         completed: completedFilter.checked,
     };
+}
+
+function savedRunLabel(count) {
+    return `${count} saved run${count === 1 ? '' : 's'}`;
+}
+
+function responseCount(data, names) {
+    for (const name of names) {
+        const value = data?.[name];
+        if (Array.isArray(value)) return value.length;
+        const number = Number(value);
+        if (Number.isInteger(number) && number >= 0) return number;
+    }
+    return null;
+}
+
+function setHistoryActionStatus(message, error = false) {
+    if (!historyActionStatus) return;
+    historyActionStatus.textContent = message;
+    historyActionStatus.classList.toggle('is-error', error);
+}
+
+function updateClearHistoryButton() {
+    if (!clearHistory) return;
+    clearHistory.disabled = historyClearPending || allRuns.length === 0;
+    clearHistory.textContent = historyClearPending ? 'Clearing…' : 'Clear saved runs';
+    if (historyClearPending) clearHistory.setAttribute('aria-busy', 'true');
+    else clearHistory.removeAttribute('aria-busy');
+}
+
+function openClearHistoryDialog() {
+    if (
+        !clearHistoryDialog
+        || !clearHistoryDialogDescription
+        || historyClearPending
+        || allRuns.length === 0
+        || clearHistoryDialog.open
+    ) return;
+    clearHistoryDialogDescription.textContent = (
+        `Eligible safely finalized local run files from ${savedRunLabel(allRuns.length)} in this archive will be permanently deleted. `
+        + 'Runs that are active, cannot be safely classified, or may still be needed for cloud cleanup will be preserved. '
+        + 'This action does not destroy cloud infrastructure. Local deletion cannot be undone.'
+    );
+    clearHistoryDialog.showModal();
+}
+
+async function clearSavedRuns() {
+    if (
+        historyClearPending
+        || allRuns.length === 0
+        || !clearHistoryDialog
+        || !clearHistoryDialog.open
+    ) return;
+    clearHistoryDialog.close();
+    historyClearPending = true;
+    updateClearHistoryButton();
+    setHistoryActionStatus('Clearing eligible saved runs…');
+    try {
+        const response = await fetch('/api/reports', {
+            method: 'DELETE',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({confirmed: true}),
+        });
+        let data = {};
+        try {
+            data = await response.json();
+        } catch {}
+        if (!response.ok) throw Error(data.detail || 'Unable to clear saved runs');
+
+        const deleted = responseCount(data, ['deleted', 'deleted_count', 'deleted_run_ids']) ?? 0;
+        allRuns = [];
+        selectedRunIds.clear();
+        comparisonRequest += 1;
+        comparisonLoading = false;
+        clearComparisonView();
+        populateFilterOptions();
+        renderRuns();
+        updateSelectionTray();
+        syncUrl();
+        await loadRuns();
+
+        const reason = allRuns.length
+            ? ' Protected or unclassified entries were left untouched.'
+            : '';
+        setHistoryActionStatus(
+            `${savedRunLabel(deleted)} deleted. Remaining in archive: ${savedRunLabel(allRuns.length)}.${reason}`,
+        );
+    } catch (error) {
+        setHistoryActionStatus(`Unable to clear saved runs: ${error.message}`, true);
+    } finally {
+        historyClearPending = false;
+        updateClearHistoryButton();
+    }
 }
 
 function initialUrlState() {
@@ -570,7 +670,13 @@ function renderComparisonChart() {
     const deltaMeaning = chart.direction === 'neutral'
         ? 'positive percentages indicate a larger value, not necessarily better performance.'
         : 'positive percentages indicate better performance.';
-    comparisonContext.textContent = `${chart.result_name} · ${chart.label}${subtest} · ${direction}. Run ${baseline.run_id} is the baseline; ${deltaMeaning}`;
+    const provenanceWarnings = Array.isArray(chart.provenance_warnings)
+        ? chart.provenance_warnings.filter(Boolean)
+        : [];
+    const provenanceNote = provenanceWarnings.length
+        ? ` ${provenanceWarnings.join(' ')}`
+        : '';
+    comparisonContext.textContent = `${chart.result_name} · ${chart.label}${subtest} · ${direction}. Run ${baseline.run_id} is the baseline; ${deltaMeaning}${provenanceNote}`;
     const domain = comparisonDomain(values);
     const position = value => ((Number(value) - domain.min) / domain.span) * 100;
     const zero = position(0);
@@ -742,6 +848,7 @@ async function loadRuns() {
         selectedRunIds = new Set(url.runIds.filter(id => available.has(id)));
         renderRuns();
         updateSelectionTray();
+        updateClearHistoryButton();
         syncUrl();
         if (selectedRunIds.size >= 2) {
             await loadComparison({focus: false, resultId: url.resultId, metricId: url.metricId});
@@ -752,6 +859,7 @@ async function loadRuns() {
         failure.className = 'status';
         failure.textContent = error.message;
         runList.replaceChildren(failure);
+        updateClearHistoryButton();
     }
 }
 
@@ -764,6 +872,9 @@ if (hasDocument) {
     benchmarkFilter.addEventListener('change', applyFilterChange);
     providerFilter.addEventListener('change', applyFilterChange);
     completedFilter.addEventListener('change', applyFilterChange);
+    clearHistory?.addEventListener('click', openClearHistoryDialog);
+    cancelClearHistory?.addEventListener('click', () => clearHistoryDialog?.close());
+    confirmClearHistory?.addEventListener('click', clearSavedRuns);
     compareSelected.addEventListener('click', () => loadComparison());
     clearComparison.addEventListener('click', () => {
         selectedRunIds.clear();

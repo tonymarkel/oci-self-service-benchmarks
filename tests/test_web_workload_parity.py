@@ -414,6 +414,7 @@ class SharedLlamaAndSctpRunnerTests(unittest.TestCase):
                     })
                 plan = BenchmarkPlan(**values)
                 job = shared_job(provider)
+                job['resources']['architecture'] = 'x86_64'
                 toolset_enable = (
                     main.rocky_linux.LLAMA_TOOLSET_ENABLE
                     if provider == 'gcp'
@@ -474,13 +475,16 @@ class SharedLlamaAndSctpRunnerTests(unittest.TestCase):
                     ],
                     '15.2.1' if provider == 'gcp' else '11.5.0',
                 )
-                self.assertTrue(
-                    llama_call.kwargs['metadata'][
-                        'llama_native_optimization'
-                    ]
+                self.assertFalse(
+                    llama_call.kwargs['metadata']['llama_native_optimization']
+                )
+                self.assertEqual(
+                    llama_call.kwargs['metadata']['llama_cpu_build_profile'],
+                    main.llama_cpp.X86_64_PORTABLE_CPU_PROFILE,
                 )
                 self.assertIsNone(llama_call.kwargs['output_limit'])
                 self.assertFalse(llama_call.kwargs['include_stderr'])
+                self.assertEqual(llama_call.kwargs['transport_attempts'], 1)
                 with patch.object(
                     main.llama_cpp,
                     'parse_output',
@@ -621,6 +625,30 @@ class SharedLlamaAndSctpRunnerTests(unittest.TestCase):
                 self.assertEqual(
                     llama_call.kwargs['metadata']['llama_toolset_enable'],
                     main.LLAMA_TOOLSET_ENABLE,
+                )
+                if architecture == 'x86_64':
+                    self.assertFalse(
+                        llama_call.kwargs['metadata'][
+                            'llama_native_optimization'
+                        ]
+                    )
+                    self.assertIn('-DGGML_NATIVE=OFF', llama_call.args[3])
+                    self.assertNotIn('-DGGML_NATIVE=ON', llama_call.args[3])
+                    expected_profile = (
+                        main.llama_cpp.X86_64_PORTABLE_CPU_PROFILE
+                    )
+                else:
+                    self.assertTrue(
+                        llama_call.kwargs['metadata'][
+                            'llama_native_optimization'
+                        ]
+                    )
+                    self.assertIn('-DGGML_NATIVE=ON', llama_call.args[3])
+                    self.assertNotIn('-DGGML_NATIVE=OFF', llama_call.args[3])
+                    expected_profile = main.llama_cpp.AARCH64_NATIVE_CPU_PROFILE
+                self.assertEqual(
+                    llama_call.kwargs['metadata']['llama_cpu_build_profile'],
+                    expected_profile,
                 )
                 with patch.object(
                     main.llama_cpp,

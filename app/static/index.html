@@ -5,43 +5,82 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>Cloud Benchmark Lab</title>
-    <link rel="stylesheet" href="/static/styles.css?v=15">
+    <link rel="stylesheet" href="/static/styles.css?v=18">
 </head>
 
 <body>
     <header>
-        <div class="mark"><svg width="90" height="26" viewBox="0 0 90 26" fill="none"
-                xmlns="http://www.w3.org/2000/svg">
-                <path
-                    d="M12.4397 22.9948C6.67402 22.9948 2 18.3027 2 12.5026C2 6.70245 6.67402 2 12.4397 2H24.5757C30.3465 2 35 6.70245 35 12.5026C35 18.3027 30.3465 23 24.5757 23L12.4397 22.9948M24.299 19.2999C28.0402 19.2999 31.0614 16.2542 31.0614 12.5026C31.0614 8.74577 28.0402 5.71043 24.299 5.71043H12.7087C8.97771 5.71043 5.95395 8.74577 5.95395 12.5026C5.95395 16.2542 8.97771 19.2999 12.7087 19.2999H24.299"
-                    fill="white"></path>
-                <path
-                    d="M87.0101 18.404L86.7221 17.108C86.3914 17.5773 85.9861 17.94 85.5061 18.196C85.0368 18.452 84.5301 18.58 83.9861 18.58C82.8768 18.58 82.0074 18.196 81.3781 17.428C80.7487 16.6493 80.4341 15.5667 80.4341 14.18C80.4341 12.7933 80.7434 11.7213 81.3621 10.964C81.9914 10.196 82.8661 9.812 83.9861 9.812C84.9034 9.812 85.6928 10.1267 86.3541 10.756V6.388H88.3061V18.404H87.0101ZM82.4021 14.196C82.4021 15.1027 82.5674 15.8013 82.8981 16.292C83.2394 16.772 83.7248 17.012 84.3541 17.012C84.7594 17.012 85.1381 16.9053 85.4901 16.692C85.8527 16.468 86.1461 16.1747 86.3701 15.812V12.308C85.8367 11.6787 85.1648 11.364 84.3541 11.364C83.7248 11.364 83.2394 11.6093 82.8981 12.1C82.5674 12.58 82.4021 13.2787 82.4021 14.196Z"
-                    fill="white"></path>
-                <path
-                    d="M71.2251 15.172V9.98801H73.1771V15.108C73.1771 16.3453 73.6678 16.964 74.6491 16.964C75.0864 16.964 75.4918 16.8253 75.8651 16.548C76.2491 16.2707 76.5371 15.8973 76.7291 15.428V9.98801H78.6811V18.404H77.3851L77.0811 17.044C76.7291 17.5347 76.2971 17.9133 75.7851 18.18C75.2838 18.4467 74.7344 18.58 74.1371 18.58C73.1984 18.58 72.4784 18.2867 71.9771 17.7C71.4758 17.1133 71.2251 16.2707 71.2251 15.172Z"
-                    fill="white"></path>
-                <path
-                    d="M65.4363 18.58C64.1457 18.58 63.1377 18.196 62.4123 17.428C61.6977 16.66 61.3403 15.5827 61.3403 14.196C61.3403 12.8093 61.6977 11.732 62.4123 10.964C63.1377 10.196 64.1457 9.81201 65.4363 9.81201C66.7377 9.81201 67.7457 10.196 68.4603 10.964C69.175 11.732 69.5323 12.8093 69.5323 14.196C69.5323 15.5827 69.175 16.66 68.4603 17.428C67.7457 18.196 66.7377 18.58 65.4363 18.58ZM65.4363 17.06C66.855 17.06 67.5643 16.1053 67.5643 14.196C67.5643 12.2867 66.855 11.332 65.4363 11.332C64.0177 11.332 63.3083 12.2867 63.3083 14.196C63.3083 16.1053 64.0177 17.06 65.4363 17.06Z"
-                    fill="white"></path>
-                <path d="M57.6327 18.404V7.812L56.7847 7.188V6.388H59.5847V18.404H57.6327Z" fill="white"></path>
-                <path
-                    d="M55.832 16.196V17.892C55.384 18.1267 54.8827 18.3027 54.328 18.42C53.7733 18.548 53.1813 18.612 52.552 18.612C50.76 18.612 49.384 18.084 48.424 17.028C47.4747 15.972 47 14.4467 47 12.452C47 11.2253 47.224 10.1747 47.672 9.3C48.1307 8.42533 48.7813 7.75333 49.624 7.28399C50.4773 6.804 51.4853 6.564 52.648 6.564C53.16 6.564 53.6667 6.62266 54.168 6.74C54.6693 6.85733 55.1013 7.02266 55.464 7.236V8.91599C54.9093 8.69199 54.424 8.532 54.008 8.436C53.592 8.34 53.1813 8.292 52.776 8.292C51.5813 8.292 50.6587 8.66 50.008 9.396C49.3573 10.1213 49.032 11.14 49.032 12.452C49.032 13.8707 49.352 14.964 49.992 15.732C50.6427 16.4893 51.5707 16.868 52.776 16.868C53.2453 16.868 53.72 16.8147 54.2 16.708C54.6907 16.6013 55.2347 16.4307 55.832 16.196Z"
-                    fill="white"></path>
-            </svg></div>
-        <div><strong>Compute Benchmark Lab</strong><small>Traditional and LLM Benchmarks</small></div><span
-            class="local" id="localContext">Runs locally with your default OCI profile</span>
+        <div class="mark">
+            <svg xmlns="http://www.w3.org/2000/svg"
+                style="background: transparent; background-color: transparent; color-scheme: light dark;"
+                xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" width="31px" height="55px"
+                viewBox="0 0 156 223">
+                <defs />
+                <g>
+                    <g data-cell-id="0">
+                        <g data-cell-id="1">
+                            <g data-cell-id="KPlBYZPEpN4-m_W46ik4-6">
+                                <g transform="translate(0.5,0.5)" />
+                                <g data-cell-id="KPlBYZPEpN4-m_W46ik4-1">
+                                    <g transform="translate(0.5,0.5)">
+                                        <path
+                                            d="M 133.86 85.68 C 145.28 84.23 153.43 73.29 152.06 61.24 C 150.69 49.19 140.32 40.59 128.89 42.04 C 128.77 24.04 116.8 8.55 100.11 4.77 C 83.43 1 66.5 9.96 59.39 26.33 C 54.12 19.97 45.75 17.58 38.16 20.24 C 30.56 22.91 25.23 30.13 24.63 38.55 C 12.29 38.07 1.92 48.23 1.46 61.24 C 1.01 74.26 10.64 85.2 22.98 85.68 Z"
+                                            fill="#dae8fc" stroke="#b2d1ff" stroke-width="3" stroke-miterlimit="10"
+                                            pointer-events="all"
+                                            style="fill: rgb(218, 232, 252); stroke: rgb(178, 209, 255);" />
+                                    </g>
+                                </g>
+                                <g data-cell-id="KPlBYZPEpN4-m_W46ik4-2">
+                                    <g transform="translate(0.5,0.5)">
+                                        <rect x="1" y="102.61" width="152.42" height="16.94" rx="2.54" ry="2.54"
+                                            fill="#dae8fc" stroke="#b2d1ff" stroke-width="3" pointer-events="all"
+                                            style="fill: rgb(218, 232, 252); stroke: rgb(178, 209, 255);" />
+                                    </g>
+                                </g>
+                                <g data-cell-id="KPlBYZPEpN4-m_W46ik4-3">
+                                    <g transform="translate(0.5,0.5)">
+                                        <path d="M 1 157.94 L 85.68 166.01 L 1 174.07 Z" fill="#dae8fc" stroke="#b2d1ff"
+                                            stroke-width="3" stroke-miterlimit="10" transform="rotate(-60,43.34,166.01)"
+                                            pointer-events="all"
+                                            style="fill: rgb(218, 232, 252); stroke: rgb(178, 209, 255);" />
+                                    </g>
+                                </g>
+                                <g data-cell-id="KPlBYZPEpN4-m_W46ik4-4">
+                                    <g transform="translate(0.5,0.5)">
+                                        <path d="M 34.87 170.36 L 119.55 178.42 L 34.87 186.48 Z" fill="#dae8fc"
+                                            stroke="#b2d1ff" stroke-width="3" stroke-miterlimit="10"
+                                            transform="rotate(-90,77.21,178.42)" pointer-events="all"
+                                            style="fill: rgb(218, 232, 252); stroke: rgb(178, 209, 255);" />
+                                    </g>
+                                </g>
+                                <g data-cell-id="KPlBYZPEpN4-m_W46ik4-5">
+                                    <g transform="translate(0.5,0.5)">
+                                        <path d="M 68.75 157.95 L 153.42 166.01 L 68.75 174.07 Z" fill="#dae8fc"
+                                            stroke="#b2d1ff" stroke-width="3" stroke-miterlimit="10"
+                                            transform="rotate(-120,111.08,166.01)" pointer-events="all"
+                                            style="fill: rgb(218, 232, 252); stroke: rgb(178, 209, 255);" />
+                                    </g>
+                                </g>
+                            </g>
+                        </g>
+                    </g>
+                </g>
+            </svg>
+        </div>
+        <div><strong>Compute Benchmark Lab</strong><small>Traditional and LLM Benchmarks</small></div>
+        <span class="local"></span>
         <a class="header-link" href="/history">Previous runs</a>
         <button id="resetAll" class="header-reset" type="button"
-            title="Reset only changes the local view; it does not stop an active run.">Reset view (does not stop run)</button>
+            title="Create a new run while the current run is active.">New Run</button>
     </header>
-    <main>
+    <main class="main">
         <div class="steps"><span class="active">1 Plan</span><i></i><span>2 Test</span><i></i><span>3 Report</span>
         </div>
         <aside id="liveRunStop" class="live-run-stop" aria-labelledby="liveRunStopTitle" hidden>
             <div>
                 <strong id="liveRunStopTitle">Need to end this run?</strong>
-                <p id="liveRunStopStatus" aria-live="polite">Stopping discards unfinished benchmark work and destroys the run's recorded
+                <p id="liveRunStopStatus" aria-live="polite">Stopping discards unfinished benchmark work and destroys
+                    the run's recorded
                     cloud infrastructure.</p>
             </div>
             <button id="stopAndDestroy" class="danger-action" type="button">Stop run and destroy infrastructure</button>
@@ -51,9 +90,11 @@
                 <p class="eyebrow">SELF-SERVICE PERFORMANCE TESTING</p>
                 <h1>Build a benchmark plan.</h1>
                 <p>Provision a cloud compute instance, execute reproducible open-source tests, and retain or clean up
-                    the resources automatically. <span id="guestOsText">OCI runs use Oracle Linux.</span></p>
+                    the resources automatically. <span id="guestOsText">OCI runs use Oracle Linux.</span><br />
+                    <span class="local" id="localContext">Runs locally with your default OCI profile</span>
+                </p>
             </div>
-            <form id="planForm">
+            <form id="planForm" autocomplete="off" data-form-type="other">
                 <div class="grid"><label>Cloud provider<select id="provider" required>
                             <option value="oci" selected>Oracle Cloud Infrastructure</option>
                             <option value="aws">Amazon Web Services</option>
@@ -62,35 +103,43 @@
                         </select></label><label id="awsProfileField" hidden>AWS profile<input id="awsProfile"
                             value="default" required></label><label id="gcpProjectField" hidden>Google Cloud project
                         <input id="gcpProject" placeholder="Defaults to ADC project" required></label><label
-                            id="azureSubscriptionField" hidden>Azure subscription ID
+                        id="azureSubscriptionField" hidden>Azure subscription ID
                         <input id="azureSubscription" placeholder="Defaults to active Azure CLI subscription"
-                            required></label><label>Region<select
-                            id="region" required></select></label><label id="gcpZoneField" hidden>Zone<select id="gcpZone"
-                            required></select></label><label id="azureZoneField" hidden>Zone<select id="azureZone"
-                            required></select></label><label
+                            required></label><label>Region<select id="region" required></select></label><label
+                        id="gcpZoneField" hidden>Zone<select id="gcpZone" required></select></label><label
+                        id="azureZoneField" hidden>Zone<select id="azureZone" required></select></label><label
                         id="compartmentField">Compartment OCID
-                        <input id="compartment" placeholder="Defaults to profile tenancy"></label><label id="adField">Availability
+                        <input id="compartment" placeholder="Defaults to profile tenancy"></label><label
+                        id="adField">Availability
                         Domain<select id="ad">
                             <option value="">First available</option>
                         </select></label><label id="fdField">Fault Domain<select id="fd">
                             <option value="">Let OCI choose</option>
-                        </select></label><label class="wide"><span id="shapeLabel">Compute Shape</span> <input id="shape" list="shapeList"
+                        </select></label><label class="wide"><span id="shapeLabel">Compute Shape</span> <input
+                            id="shape" name="benchmark_compute_shape" type="text" list="shapeList"
+                            autocomplete="off" aria-describedby="shapeMeta" data-form-type="other"
+                            autocapitalize="none" autocorrect="off" spellcheck="false" data-1p-ignore
+                            data-lpignore="true" data-bwignore="true"
                             placeholder="Select a region and AD to load shapes" required><datalist
-                            id="shapeList"></datalist><small id="shapeMeta"></small></label><label><span id="cpuLabel">OCPUs</span><input
-                            id="ocpus" type="number" min="1" step="1" value="8"></label><label>Memory (GB)<input
-                            id="memory" type="number" min="1" step="1" value="32"></label></div>
+                            id="shapeList"></datalist><small
+                            id="shapeMeta"></small></label><label><span id="cpuLabel">OCPUs</span><input id="ocpus"
+                            type="number" min="1" step="1" value="8"></label><label>Memory (GB)<input id="memory"
+                            type="number" min="1" step="1" value="32"></label></div>
                 <p id="providerNotice" class="provider-notice" hidden></p>
                 <fieldset>
                     <legend>SSH key pair</legend>
-                    <div class="two"><label>Private key file<input id="keyFile" type="file"><textarea id="key" required
+                    <div class="two"><label>Private key file<input id="keyFile" type="file"><br /><textarea id="key"
+                                required
                                 placeholder="Choose a file or paste the private key used to connect as opc."></textarea></label><label>Public
-                            key file (.pub)<input id="publicKeyFile" type="file"><textarea id="publicKey"
-                                required readonly
+                            key file (.pub)<input id="publicKeyFile" type="file"><br /><textarea id="publicKey" required
+                                readonly
                                 placeholder="Upload the public key matching the private key."></textarea></label></div>
                     <label>Private-key passphrase (only if encrypted)<input id="keyPassphrase" type="password"
-                            autocomplete="off"></label>
+                            autocomplete="off" data-form-type="other" data-1p-ignore data-lpignore="true"
+                            data-bwignore="true"></label>
                     <p class="hint" id="keyPairHint">The key pair is checked before any OCI resources are created.
-                        OpenSSH RSA, ECDSA, and Ed25519 keys are supported and held in memory only while the job runs.</p>
+                        OpenSSH RSA, ECDSA, and Ed25519 keys are supported and held in memory only while the job runs.
+                    </p>
                     <p id="keyDefaultsStatus" class="hint" hidden></p>
                 </fieldset>
                 <div class="two" id="ociComputeOptions">
@@ -134,7 +183,8 @@
                 <fieldset>
                     <legend>Benchmarks</legend>
                     <div id="benchmarks" class="checks"></div>
-                    <p class="hint" id="networkBenchmarkHint">Network tests use a temporary private peer VM so results measure OCI VCN traffic—not
+                    <p class="hint" id="networkBenchmarkHint">Network tests use a temporary private peer VM so results
+                        measure OCI VCN traffic—not
                         the public Internet.</p>
                 </fieldset>
                 <fieldset id="sysbenchSettings" class="benchmark-settings sysbench-settings" hidden>
@@ -157,7 +207,8 @@
                     <p class="hint">Choose one or more curated OpenBenchmarking profiles. Each profile runs with a
                         fixed configuration and appears as a separate result in the final report.</p>
                     <div id="phoronixProfiles" class="checks"></div>
-                    <p class="hint" id="phoronixCompatibilityHint">Profiles are pinned and limited to tests validated for both x86_64 and AArch64
+                    <p class="hint" id="phoronixCompatibilityHint">Profiles are pinned and limited to tests validated
+                        for both x86_64 and AArch64
                         Oracle Linux instances.</p>
                 </fieldset>
                 <fieldset id="deathstarSettings" class="benchmark-settings deathstar-settings" hidden>
@@ -168,8 +219,8 @@
                     <div class="grid">
                         <label class="wide">Workload<select id="deathstarWorkload" required></select>
                             <small id="deathstarWorkloadDescription"></small></label>
-                        <label>Warm-up (seconds)<input id="deathstarWarmup" type="number" min="0" max="600"
-                                step="1" value="30" required></label>
+                        <label>Warm-up (seconds)<input id="deathstarWarmup" type="number" min="0" max="600" step="1"
+                                value="30" required></label>
                         <label>Test duration (seconds)<input id="deathstarDuration" type="number" min="10" max="1800"
                                 step="1" value="60" required></label>
                         <label>Worker threads<input id="deathstarThreads" type="number" min="1" max="64" step="1"
@@ -190,14 +241,14 @@
                     <div class="grid">
                         <label>Requests per trial<input id="apachebenchRequestCount" type="number" min="1"
                                 max="100000000" step="1" value="500000" required></label>
-                        <label>Concurrency<input id="apachebenchConcurrency" type="number" min="1" max="10000"
-                                step="1" value="100" required></label>
-                        <label>Response size (KiB)<input id="apachebenchResponseSize" type="number" min="1"
-                                max="1024" step="1" value="64" required></label>
+                        <label>Concurrency<input id="apachebenchConcurrency" type="number" min="1" max="10000" step="1"
+                                value="100" required></label>
+                        <label>Response size (KiB)<input id="apachebenchResponseSize" type="number" min="1" max="1024"
+                                step="1" value="64" required></label>
                         <label>Warm-up requests<input id="apachebenchWarmupRequests" type="number" min="0"
                                 max="10000000" step="1" value="10000" required></label>
-                        <label>Measured trials<input id="apachebenchTrials" type="number" min="1" max="10"
-                                step="1" value="3" required></label>
+                        <label>Measured trials<input id="apachebenchTrials" type="number" min="1" max="10" step="1"
+                                value="3" required></label>
                     </div>
                     <p class="hint" id="apachebenchDeploymentHint">The benchmark VM serves fixed-size responses while
                         a separate fixed-size x86 load-generator VM runs Apache HTTP Server Benchmarking Tool traffic
@@ -217,7 +268,8 @@
             <div id="status" class="status"></div>
             <div id="resources" class="status resource-status" hidden></div>
             <div id="events" class="events"></div>
-            <button id="destroyInterrupted" class="secondary" type="button" hidden>Destroy recorded infrastructure</button>
+            <button id="destroyInterrupted" class="secondary" type="button" hidden>Destroy recorded
+                infrastructure</button>
         </section>
         <section id="report" hidden>
             <p class="eyebrow">PHASE 3 / FINDINGS</p>
@@ -227,11 +279,12 @@
                 id="destroyNow" class="secondary" hidden>Destroy infrastructure now</button>
             <button id="rerunPlan" class="secondary">Rerun with this plan</button>
             <button id="resetPlan" class="secondary"
-                title="Reset only changes the local view; it does not stop an active run.">Reset view (does not stop run)</button>
+                title="Reset only changes the local view; it does not stop an active run.">Reset view (does not stop
+                run)</button>
             <iframe id="reportFrame" class="report-frame" title="Benchmark results"></iframe>
         </section>
     </main>
-    <script src="/static/app.js?v=30"></script>
+    <script src="/static/app.js?v=32"></script>
 </body>
 
 </html>

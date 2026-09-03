@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StrictBool, model_validator
 from typing import Literal
 
 
@@ -25,6 +25,18 @@ SUPPORTED_BENCHMARKS = frozenset({
     'phoronix',
 })
 SUPPORTED_LLM_BENCHMARKS = frozenset({'llama_bench'})
+
+
+class ClearSavedRunsRequest(BaseModel):
+    """Explicit confirmation required before deleting local run history."""
+
+    confirmed: StrictBool
+
+    @model_validator(mode='after')
+    def require_confirmation(self):
+        if not self.confirmed:
+            raise ValueError('Explicit confirmation is required.')
+        return self
 
 
 def canonicalize_baseline_plan(values):

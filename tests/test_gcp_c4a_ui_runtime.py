@@ -75,7 +75,7 @@ class GcpC4aPlanContractTests(unittest.TestCase):
 
 class GcpC4aUiContractTests(unittest.TestCase):
     def test_form_describes_machine_derived_c4a_storage_and_networking(self):
-        self.assertIn('<script src="/static/app.js?v=30"></script>', INDEX)
+        self.assertIn('<script src="/static/app.js?v=32"></script>', INDEX)
         self.assertIn('C4A uses Hyperdisk Balanced', INDEX)
         self.assertIn('aria-live="polite"', INDEX)
         self.assertIn('function updateGcpStorageHint(shape = null)', JAVASCRIPT)
@@ -88,11 +88,22 @@ class GcpC4aUiContractTests(unittest.TestCase):
         self.assertIn("dataSize.dataset.gcpC4aDefaultApplied = 'true'", JAVASCRIPT)
         self.assertIn('remaining regional C4A vCPU and Hyperdisk', JAVASCRIPT)
 
-    def test_discovery_metadata_is_visible_in_type_choices_and_selection(self):
-        self.assertGreaterEqual(JAVASCRIPT.count('gcpDiskLabel('), 4)
-        self.assertGreaterEqual(JAVASCRIPT.count('gcpNetworkInterfaceLabel('), 4)
-        self.assertIn('item.disk_type', JAVASCRIPT)
-        self.assertIn('item.network_interface_type', JAVASCRIPT)
+    def test_discovery_metadata_is_visible_after_type_selection(self):
+        selected_start = JAVASCRIPT.index('function updateSelectedShape()')
+        selected_end = JAVASCRIPT.index(
+            '// A datalist choice emits',
+            selected_start,
+        )
+        selected_shape = JAVASCRIPT[selected_start:selected_end]
+
+        self.assertIn('shape.ocpus', selected_shape)
+        self.assertIn('shape.memory_gb', selected_shape)
+        self.assertIn('shape.architecture', selected_shape)
+        self.assertIn('gcpDiskLabel(shape.disk_type)', selected_shape)
+        self.assertIn(
+            'gcpNetworkInterfaceLabel(shape.network_interface_type)',
+            selected_shape,
+        )
 
 
 class GcpC4aRuntimeMetadataTests(unittest.TestCase):

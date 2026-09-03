@@ -294,7 +294,7 @@ class WorkloadContractTests(unittest.TestCase):
             x86['contract']['settings']['architecture'], 'x86_64'
         )
 
-    def test_llama_toolchain_is_required_and_changes_the_fingerprint(self):
+    def test_llama_portable_toolchain_is_required_provenance(self):
         metadata = {
             'llama_cpp_revision': 'de699957b92f490efebad149665b0dccf127eaff',
             'model_revision': 'c1d7cb837a660d93ba28f936efb148591bfba3e9',
@@ -306,7 +306,11 @@ class WorkloadContractTests(unittest.TestCase):
             'llama_compiler_version': '15.2.1',
             'llama_cxx_compiler_version': '15.2.1',
             'llama_assembler_version': '2.44',
-            'llama_native_optimization': True,
+            'llama_native_optimization': False,
+            'llama_cpu_build_profile': 'x86_64-avx2-portable-v1',
+            'llama_cpu_cmake_options': ' '.join(
+                comparison.X86_64_PORTABLE_CMAKE_OPTIONS
+            ),
         }
         plan = aws_plan(benchmarks=[], llm_benchmarks=['llama_cpp'])
 
@@ -326,19 +330,212 @@ class WorkloadContractTests(unittest.TestCase):
         )
 
         self.assertFalse(baseline['contract_unknown'])
-        self.assertNotEqual(baseline['fingerprint'], changed['fingerprint'])
+        self.assertEqual(baseline['fingerprint'], changed['fingerprint'])
+        self.assertNotEqual(
+            baseline['provenance'],
+            changed['provenance'],
+        )
         self.assertTrue(missing['contract_unknown'])
+        native = comparison.workload_fingerprint(
+            'llama_bench',
+            plan,
+            {
+                **metadata,
+                'llama_cpu_build_profile': 'native',
+                'llama_native_optimization': True,
+            },
+        )
+        changed_native_toolchain = comparison.workload_fingerprint(
+            'llama_bench',
+            plan,
+            {
+                **metadata,
+                'llama_cpu_build_profile': 'native',
+                'llama_native_optimization': True,
+                'llama_assembler_version': '2.35.2',
+            },
+        )
+        self.assertNotEqual(
+            baseline['fingerprint'],
+            native['fingerprint'],
+        )
+        self.assertNotEqual(
+            native['fingerprint'],
+            changed_native_toolchain['fingerprint'],
+        )
         self.assertEqual(
-            baseline['contract']['settings']['compiler_version'],
+            baseline['contract']['settings']['cpu_build_profile'],
+            'x86_64-avx2-portable-v1',
+        )
+        self.assertFalse(
+            baseline['contract']['settings']['native_cpu_optimization']
+        )
+        legacy_native_metadata = {
+            **metadata,
+            'llama_native_optimization': True,
+        }
+        legacy_native_metadata.pop('llama_cpu_build_profile')
+        legacy_native = comparison.workload_fingerprint(
+            'llama_bench',
+            plan,
+            legacy_native_metadata,
+        )
+        self.assertFalse(legacy_native['contract_unknown'])
+        self.assertEqual(
+            legacy_native['contract']['settings']['cpu_build_profile'],
+            'native',
+        )
+        for inconsistent in (
+            {
+                **metadata,
+                'llama_cpu_build_profile': 'native',
+                'llama_native_optimization': False,
+            },
+            {
+                **metadata,
+                'llama_cpu_build_profile': 'x86_64-avx2-portable-v1',
+                'llama_native_optimization': True,
+            },
+            {
+                **metadata,
+                'llama_cpu_build_profile': 'future-unknown-profile',
+            },
+        ):
+            with self.subTest(inconsistent=inconsistent):
+                rejected = comparison.workload_fingerprint(
+                    'llama_bench',
+                    plan,
+                    inconsistent,
+                )
+                self.assertTrue(rejected['contract_unknown'])
+                self.assertIn(
+                    'metadata are inconsistent',
+                    rejected['issues'][0],
+                )
+        malformed_profile = comparison.workload_fingerprint(
+            'llama_bench',
+            plan,
+            {
+                **metadata,
+                'llama_cpu_build_profile': ['not', 'a', 'profile'],
+            },
+        )
+        self.assertTrue(malformed_profile['contract_unknown'])
+        self.assertIn(
+            'llama_cpu_build_profile',
+            malformed_profile['issues'][0],
+        )
+        malformed_options = comparison.workload_fingerprint(
+            'llama_bench',
+            plan,
+            {
+                **metadata,
+                'llama_cpu_cmake_options': '-DGGML_NATIVE=OFF',
+            },
+        )
+        self.assertTrue(malformed_options['contract_unknown'])
+        self.assertIn(
+            'portable CPU build options',
+            malformed_options['issues'][0],
+        )
+        self.assertNotIn(
+            'compiler_version',
+            baseline['contract']['settings'],
+        )
+        self.assertEqual(
+            baseline['provenance']['build_toolchain']['compiler_version'],
             '15.2.1',
         )
         self.assertEqual(
-            baseline['contract']['settings']['cxx_compiler_version'],
+            baseline['provenance']['build_toolchain'][
+                'cxx_compiler_version'
+            ],
             '15.2.1',
         )
 
 
 class ComparisonPayloadTests(unittest.TestCase):
+    def test_portable_llama_toolchains_are_comparable_with_provenance_warning(self):
+        plan = aws_plan(benchmarks=[], llm_benchmarks=['llama_bench'])
+        base_metadata = {
+            'architecture': 'x86_64',
+            'llama_cpp_revision': 'de699957b92f490efebad149665b0dccf127eaff',
+            'model_revision': 'c1d7cb837a660d93ba28f936efb148591bfba3e9',
+            'model_sha256': (
+                '9fecc3b3cd76bba89d504f29b616eedf7da85b96540e490ca5824d3f7d2776a0'
+            ),
+            'model_quantization': 'Q4_K_M',
+            'execution_backend': 'CPU',
+            'llama_native_optimization': False,
+            'llama_cpu_build_profile': 'x86_64-avx2-portable-v1',
+            'llama_cpu_cmake_options': ' '.join(
+                comparison.X86_64_PORTABLE_CMAKE_OPTIONS
+            ),
+        }
+
+        def document(run_id, compiler_version, assembler_version, value):
+            metadata = {
+                **base_metadata,
+                'llama_compiler_version': compiler_version,
+                'llama_cxx_compiler_version': compiler_version,
+                'llama_assembler_version': assembler_version,
+            }
+            metrics = {}
+            for prefix in (
+                'prompt_512',
+                'prompt_2048',
+                'generation_128',
+                'generation_512',
+            ):
+                metrics[f'{prefix}_tokens_per_second'] = value
+                metrics[f'{prefix}_stddev_tokens_per_second'] = 1.0
+            return comparison.build_results_artifact({
+                'id': run_id,
+                'status': 'destroyed',
+                'benchmark_status': 'complete',
+                'plan': plan,
+                'results': [{
+                    'id': 'llama_bench',
+                    'name': 'llama.cpp throughput (CPU)',
+                    'status': 'completed',
+                    'metadata': metadata,
+                    'metrics': metrics,
+                }],
+            })
+
+        payload = comparison.build_comparison_payload([
+            document('oci-run', '12.2.1', '2.38', 100.0),
+            document('aws-run', '11.5.0', '2.41', 110.0),
+        ])
+
+        self.assertEqual(len(payload['charts']), 4)
+        self.assertEqual(payload['excluded'], [])
+        self.assertEqual(payload['mismatches'], [])
+        for chart in payload['charts']:
+            self.assertIn(
+                'Build toolchains differ',
+                chart['provenance_warnings'][0],
+            )
+            warnings = {
+                value['run_id']: value['warnings'][0]
+                for value in chart['values']
+            }
+            self.assertIn('GCC/G++ 12.2.1', warnings['oci-run'])
+            self.assertIn('GNU as 2.38', warnings['oci-run'])
+            self.assertIn('GCC/G++ 11.5.0', warnings['aws-run'])
+            self.assertIn('GNU as 2.41', warnings['aws-run'])
+
+        same_toolchain = comparison.build_comparison_payload([
+            document('run-a', '12.2.1', '2.38', 100.0),
+            document('run-b', '12.2.1', '2.38', 110.0),
+        ])
+        self.assertTrue(same_toolchain['charts'])
+        self.assertTrue(all(
+            chart['provenance_warnings'] == []
+            and all(not value['warnings'] for value in chart['values'])
+            for chart in same_toolchain['charts']
+        ))
+
     def test_payload_charts_largest_matching_cohort_and_explains_mismatch(self):
         changed = aws_plan()
         changed['apachebench'] = {

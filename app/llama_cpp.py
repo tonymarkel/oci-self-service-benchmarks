@@ -1,8 +1,8 @@
 """Pinned CPU-only llama.cpp benchmark command and strict result parser.
 
-The command returned here is guest-independent.  Distribution adapters only
-need to install :data:`REQUIRED_PACKAGES`; the benchmark itself verifies both
-the llama.cpp Git revision and the GGUF model checksum before it runs.
+Distribution adapters only need to install :data:`REQUIRED_PACKAGES`; the
+benchmark verifies the llama.cpp Git revision, CPU build profile, and GGUF
+model checksum before it runs.
 """
 
 from __future__ import annotations
@@ -47,6 +47,38 @@ REQUIRED_PACKAGES = frozenset({
     'gcc-c++',
     'git',
     'make',
+})
+
+# Keep every x86 cloud on one explicit AVX2-era baseline.  In particular, do
+# not let ``-march=native`` consume newly exposed virtual CPU flags that the
+# guest cannot execute reliably.  ARM remains native because the supported
+# cloud ARM families expose coherent architecture profiles and benefit
+# materially from their generation-specific instructions.
+X86_64_PORTABLE_CPU_PROFILE = 'x86_64-avx2-portable-v1'
+AARCH64_NATIVE_CPU_PROFILE = 'native'
+X86_64_PORTABLE_CMAKE_OPTIONS = (
+    '-DGGML_NATIVE=OFF',
+    '-DGGML_SSE42=ON',
+    '-DGGML_AVX=ON',
+    '-DGGML_AVX_VNNI=OFF',
+    '-DGGML_AVX2=ON',
+    '-DGGML_BMI2=ON',
+    '-DGGML_FMA=ON',
+    '-DGGML_F16C=ON',
+    '-DGGML_AVX512=OFF',
+    '-DGGML_AVX512_VBMI=OFF',
+    '-DGGML_AVX512_VNNI=OFF',
+    '-DGGML_AVX512_BF16=OFF',
+    '-DGGML_AMX_TILE=OFF',
+    '-DGGML_AMX_INT8=OFF',
+    '-DGGML_AMX_BF16=OFF',
+    '-DGGML_BACKEND_DL=OFF',
+    '-DGGML_CPU_ALL_VARIANTS=OFF',
+)
+AARCH64_NATIVE_CMAKE_OPTIONS = ('-DGGML_NATIVE=ON',)
+CPU_BUILD_PROFILE_NATIVE_PAIRS = frozenset({
+    (X86_64_PORTABLE_CPU_PROFILE, False),
+    (AARCH64_NATIVE_CPU_PROFILE, True),
 })
 
 _SOURCE_DIR = f'/tmp/oci-benchmark-llama.cpp-{LLAMA_CPP_RELEASE}'
@@ -108,8 +140,27 @@ def parse_architecture(output: str) -> str:
     return normalized
 
 
+def cpu_build_profile(architecture: str) -> dict[str, str | bool]:
+    """Return the recorded and executable CPU profile for an architecture."""
+
+    normalized = parse_architecture(architecture)
+    if normalized == 'x86_64':
+        profile = X86_64_PORTABLE_CPU_PROFILE
+        native = False
+        options = X86_64_PORTABLE_CMAKE_OPTIONS
+    else:
+        profile = AARCH64_NATIVE_CPU_PROFILE
+        native = True
+        options = AARCH64_NATIVE_CMAKE_OPTIONS
+    return {
+        'llama_cpu_build_profile': profile,
+        'llama_native_optimization': native,
+        'llama_cpu_cmake_options': ' '.join(options),
+    }
+
+
 def toolchain_probe_command(*, toolset_enable: str | None = None) -> str:
-    """Return a stdout-only probe for the exact native-build toolchain."""
+    """Return a stdout-only probe for the selected build toolchain."""
 
     toolset = _toolset_source_command(toolset_enable)
     return (
@@ -137,7 +188,7 @@ def toolchain_probe_command(*, toolset_enable: str | None = None) -> str:
     )
 
 
-def parse_toolchain_probe(output: str) -> dict[str, str | bool]:
+def parse_toolchain_probe(output: str) -> dict[str, str]:
     """Validate and normalize the exact GCC/binutils provenance probe."""
 
     expected_keys = (
@@ -228,12 +279,12 @@ def parse_toolchain_probe(output: str) -> dict[str, str | bool]:
         'llama_assembler_path': assembler_path,
         'llama_assembler_version': assembler_version_match.group(1),
         'llama_assembler_banner': assembler_banner,
-        'llama_native_optimization': True,
     }
 
 
 def benchmark_command(
     *,
+    architecture: str,
     toolset_enable: str | None = None,
     threads: int | None = None,
 ) -> str:
@@ -243,6 +294,9 @@ def benchmark_command(
     final JSON array consumed by :func:`parse_output`.
     """
 
+    normalized_architecture = parse_architecture(architecture)
+    profile = cpu_build_profile(normalized_architecture)
+    cpu_options = profile['llama_cpu_cmake_options']
     toolset = _toolset_source_command(toolset_enable)
     if threads is None:
         thread_assignment = 'THREADS=$(nproc); '
@@ -263,9 +317,14 @@ def benchmark_command(
         'test -x "$CC_PATH"; test -x "$CXX_PATH"; '
         'export CC="$CC_PATH" CXX="$CXX_PATH"; '
         'ARCH=$(uname -m); '
-        'case "$ARCH" in x86_64|aarch64|arm64) ;; '
-        '*) echo "Unsupported llama.cpp CPU architecture: $ARCH" >&2; '
-        'exit 1 ;; esac; '
+        'if [ "$ARCH" = "arm64" ]; then ARCH=aarch64; fi; '
+        f'EXPECTED_ARCH={shlex.quote(normalized_architecture)}; '
+        'if [ "$ARCH" != "$EXPECTED_ARCH" ]; then '
+        'echo "llama.cpp architecture changed after its probe: '
+        'expected $EXPECTED_ARCH, found $ARCH." >&2; exit 1; fi; '
+        'CPU_BUILD_PROFILE='
+        f'{shlex.quote(str(profile["llama_cpu_build_profile"]))}; '
+        f'GGML_CPU_OPTIONS={shlex.quote(str(cpu_options))}; '
         f'{thread_assignment}'
         'case "$THREADS" in ""|*[!0-9]*|0) '
         'echo "Unable to determine a positive llama.cpp thread count." >&2; '
@@ -295,7 +354,7 @@ def benchmark_command(
         '-DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF '
         '-DCMAKE_C_COMPILER="$CC_PATH" '
         '-DCMAKE_CXX_COMPILER="$CXX_PATH" '
-        '-DGGML_NATIVE=ON -DGGML_BLAS=OFF '
+        '$GGML_CPU_OPTIONS -DGGML_BLAS=OFF '
         '-DGGML_CUDA=OFF -DGGML_HIP=OFF -DGGML_VULKAN=OFF '
         '-DGGML_SYCL=OFF -DGGML_METAL=OFF -DGGML_OPENCL=OFF; '
         'cmake --build "$BUILD_DIR" --config Release '
@@ -326,12 +385,17 @@ def benchmark_command(
         'printf "%s  %s\\n" "$EXPECTED_MODEL_SHA256" "$MODEL" '
         '| sha256sum -c -; '
         'echo "llama.cpp revision=$ACTUAL_REVISION architecture=$ARCH '
-        'threads=$THREADS backend=CPU" >&2; '
+        'threads=$THREADS backend=CPU build_profile=$CPU_BUILD_PROFILE" >&2; '
         '} >&2; '
-        f'exec {shlex.quote(_BUILD_DIR + "/bin/llama-bench")} '
+        'set +e; '
+        f'{shlex.quote(_BUILD_DIR + "/bin/llama-bench")} '
         f'--model {shlex.quote(_MODEL_PATH)} '
         '--n-prompt 512,2048 --n-gen 128,512 --repetitions 5 '
-        '--threads "$THREADS" --n-gpu-layers 0 --device none --output json'
+        '--threads "$THREADS" --n-gpu-layers 0 --device none --output json; '
+        'LLAMA_BENCH_STATUS=$?; set -e; '
+        'if [ "$LLAMA_BENCH_STATUS" -ne 0 ]; then '
+        'echo "llama-bench exited with status $LLAMA_BENCH_STATUS." >&2; '
+        'fi; exit "$LLAMA_BENCH_STATUS"'
     )
 
 
@@ -553,6 +617,9 @@ def parse_output(
 
 
 __all__ = [
+    'AARCH64_NATIVE_CPU_PROFILE',
+    'AARCH64_NATIVE_CMAKE_OPTIONS',
+    'CPU_BUILD_PROFILE_NATIVE_PAIRS',
     'GENERATION_TOKEN_COUNTS',
     'LLAMA_CPP_RELEASE',
     'LLAMA_CPP_REPOSITORY',
@@ -568,8 +635,11 @@ __all__ = [
     'READINESS_HOSTS',
     'REPETITIONS',
     'REQUIRED_PACKAGES',
+    'X86_64_PORTABLE_CMAKE_OPTIONS',
+    'X86_64_PORTABLE_CPU_PROFILE',
     'benchmark_command',
     'benchmark_metadata',
+    'cpu_build_profile',
     'architecture_command',
     'logical_cpu_count_command',
     'parse_architecture',

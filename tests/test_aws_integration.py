@@ -339,6 +339,8 @@ class AwsMainDispatchTests(unittest.TestCase):
             'IdentityAgent=none',
             'StrictHostKeyChecking=accept-new',
             'GlobalKnownHostsFile=/dev/null',
+            'ServerAliveInterval=30',
+            'ServerAliveCountMax=6',
         ):
             self.assertIn(option, arguments)
         self.assertIn('-F', arguments)
@@ -480,6 +482,21 @@ class BenchmarkFailureAccountingTests(unittest.TestCase):
         self.assertEqual(job['results'][0]['status'], 'failed')
         self.assertEqual(job['results'][0]['output'], '')
         self.assertEqual(main.benchmark_status(job), 'failed')
+
+    def test_benchmark_transport_retry_policy_is_forwarded_to_ssh(self):
+        job = self.job()
+
+        with patch.object(main, 'ssh', return_value='measured\n') as ssh:
+            main.execute_benchmark(
+                job,
+                'example',
+                'Example',
+                'benchmark',
+                transport_attempts=1,
+            )
+
+        self.assertEqual(ssh.call_count, 1)
+        self.assertEqual(ssh.call_args.kwargs['transport_attempts'], 1)
 
     def test_empty_success_output_is_rejected_and_recorded_once(self):
         job = self.job()

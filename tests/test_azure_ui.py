@@ -43,7 +43,7 @@ class AzureUiTests(unittest.TestCase):
         self.assertIn("query.set('zone', azureZone)", JAVASCRIPT)
 
     def test_azure_mode_uses_cli_rocky_linux_and_fixed_vm_capacity(self):
-        self.assertIn('Runs locally with Azure CLI', JAVASCRIPT)
+        self.assertIn('Accesses Azure through Azure CLI', JAVASCRIPT)
         self.assertIn('Azure runs use a pinned Rocky Linux 9 image.', JAVASCRIPT)
         self.assertIn('Azure VM Size', JAVASCRIPT)
         self.assertIn('Search VM sizes available in this zone', JAVASCRIPT)

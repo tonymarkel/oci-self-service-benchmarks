@@ -1,7 +1,7 @@
 let jobId;
 let poller;
 let shapes = [];
-let sshDefaults = {configured: false};
+let sshDefaults = { configured: false };
 let sysbenchWorkloads = [];
 let iperf3Protocols = [];
 let phoronixProfiles = [];
@@ -24,9 +24,9 @@ const deathstarDefaults = {
     connections: 64,
     request_rate: 100,
 };
-const sysbenchDefaults = {workloads: ['cpu']};
-const iperf3Defaults = {protocols: ['tcp']};
-const phoronixDefaults = {profiles: ['compress_7zip']};
+const sysbenchDefaults = { workloads: ['cpu'] };
+const iperf3Defaults = { protocols: ['tcp'] };
+const phoronixDefaults = { profiles: ['compress_7zip'] };
 const apachebenchDefaults = {
     workloads: ['new_connections', 'keep_alive'],
     request_count: 500000,
@@ -50,7 +50,7 @@ const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const escape = value => String(value).replace(
     /[&<>]/g,
-    character => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[character]),
+    character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[character]),
 );
 
 async function api(url, options) {
@@ -454,14 +454,14 @@ async function loadProvider(preferredRegion = null) {
             const identity = boot.account_id
                 ? ` · account ${boot.account_id}`
                 : '';
-            $('#localContext').textContent = `Runs locally with AWS profile ${profile}${identity}`;
+            $('#localContext').textContent = `Accesses AWS through CLI profile ${profile}${identity}`;
             return await loadShapes(generation);
         }
         if (provider === 'gcp') {
             $('#gcpProject').value = boot.project_id || boot.default_project || gcpProject;
             const principal = boot.principal ? ` · ${boot.principal}` : '';
             $('#localContext').textContent =
-                `Runs locally with Google Cloud ADC · project ${$('#gcpProject').value}${principal}`;
+                `Accesses Google Cloud through ADC · project ${$('#gcpProject').value}${principal}`;
             return await placement(generation);
         }
         if (provider === 'azure') {
@@ -469,15 +469,15 @@ async function loadProvider(preferredRegion = null) {
                 boot.subscription_id || boot.default_subscription_id || azureSubscription;
             const subscriptionName = boot.subscription_name || boot.display_name || '';
             const subscription = subscriptionName
-                ? `${subscriptionName} (${ $('#azureSubscription').value })`
+                ? `${subscriptionName} (${$('#azureSubscription').value})`
                 : $('#azureSubscription').value;
             const tenant = boot.tenant_id ? ` · tenant ${boot.tenant_id}` : '';
             $('#localContext').textContent =
-                `Runs locally with Azure CLI · subscription ${subscription}${tenant}`;
+                `Accesses Azure through Azure CLI`;
             return await placement(generation);
         }
         $('#compartment').placeholder = `Defaults to ${boot.default_compartment}`;
-        $('#localContext').textContent = 'Runs locally with your default OCI profile';
+        $('#localContext').textContent = 'Accesses OCI through your default profile';
         return await placement(generation);
     } catch (error) {
         if (!discoveryIsCurrent(generation)) return false;
@@ -743,8 +743,8 @@ async function placement(parentGeneration = null) {
             ) return false;
             const zones = (data.availability_zones || data.zones || []).map(item => (
                 typeof item === 'string'
-                    ? {name: item}
-                    : {...item, name: item.name || item.zone}
+                    ? { name: item }
+                    : { ...item, name: item.name || item.zone }
             )).filter(item => item.name);
             const defaultZone = providerBootstrap.azure?.default_zone;
             const selectedZone = zones.some(item => item.name === priorZone)
@@ -806,7 +806,7 @@ async function loadShapes(parentGeneration = null) {
     const azureZone = $('#azureZone').value;
     const compartment = $('#compartment').value;
     const availabilityDomain = $('#ad').value;
-    const query = new URLSearchParams({region});
+    const query = new URLSearchParams({ region });
     let endpoint = '/api/oci/shapes';
     if (aws) {
         query.set('profile', profile);
@@ -845,14 +845,10 @@ async function loadShapes(parentGeneration = null) {
             memory_gb: item.memory_gb ?? item.memory_gib,
             flexible: providerFixedCapacity ? false : Boolean(item.flexible),
         })).filter(item => item.shape);
+        // Firefox substitutes an option's text for its value while Chromium
+        // renders both. Value-only options keep shape names consistent.
         $('#shapeList').innerHTML = shapes.map(item =>
-            `<option value="${escape(item.shape)}">${item.flexible ? 'flexible ' : ''}` +
-            `${item.ocpus || ''} ${providerFixedCapacity ? 'vCPU' : 'OCPU'} · ${item.memory_gb || ''} GB` +
-            `${item.architecture ? ` · ${escape(item.architecture)}` : ''}` +
-            `${gcp && item.disk_type ? ` · ${escape(gcpDiskLabel(item.disk_type))}` : ''}` +
-            `${gcp && item.network_interface_type ? ` · ${escape(gcpNetworkInterfaceLabel(item.network_interface_type))}` : ''}` +
-            `${aws && item.burstable ? ' · burstable' : ''}` +
-            `${aws && item.bare_metal ? ' · bare metal' : ''}</option>`,
+            `<option value="${escape(item.shape)}"></option>`,
         ).join('');
         $('#shapeMeta').textContent = shapes.length
             ? ''
@@ -922,13 +918,13 @@ function updateSelectedShape() {
     const providerFixedCapacity = fixedCapacity || azure;
     $('#shapeMeta').textContent = shape
         ? `${shape.flexible ? 'Flexible shape. ' : ''}Listed capacity: ` +
-            `${shape.ocpus || 'varies'} ${providerFixedCapacity ? 'vCPUs' : 'OCPUs'} / ` +
-            `${shape.memory_gb || 'varies'} GB` +
-            `${shape.architecture ? ` / ${shape.architecture}` : ''}` +
-            `${gcp && shape.disk_type ? ` / ${gcpDiskLabel(shape.disk_type)}` : ''}` +
-            `${gcp && shape.network_interface_type ? ` / ${gcpNetworkInterfaceLabel(shape.network_interface_type)}` : ''}` +
-            `${aws && shape.burstable ? ' / burstable performance' : ''}` +
-            `${aws && shape.bare_metal ? ' / bare metal' : ''}`
+        `${shape.ocpus || 'varies'} ${providerFixedCapacity ? 'vCPUs' : 'OCPUs'} / ` +
+        `${shape.memory_gb || 'varies'} GB` +
+        `${shape.architecture ? ` / ${shape.architecture}` : ''}` +
+        `${gcp && shape.disk_type ? ` / ${gcpDiskLabel(shape.disk_type)}` : ''}` +
+        `${gcp && shape.network_interface_type ? ` / ${gcpNetworkInterfaceLabel(shape.network_interface_type)}` : ''}` +
+        `${aws && shape.burstable ? ' / burstable performance' : ''}` +
+        `${aws && shape.bare_metal ? ' / bare metal' : ''}`
         : `Select a valid ${aws ? 'instance type' : (azure ? 'VM size' : (gcp ? 'machine type' : 'shape'))}`;
     if (gcp) updateGcpStorageHint(shape);
     if (shape && (providerFixedCapacity || !shape.flexible)) {
@@ -958,7 +954,7 @@ $('#publicKeyFile').addEventListener('change', async event => {
 });
 
 function deathstarOptions(selected) {
-    if (!selected) return {...deathstarDefaults};
+    if (!selected) return { ...deathstarDefaults };
     return {
         workload: $('#deathstarWorkload').value || deathstarDefaults.workload,
         warmup_seconds: Number($('#deathstarWarmup').value),
@@ -970,7 +966,7 @@ function deathstarOptions(selected) {
 }
 
 function sysbenchOptions(selected) {
-    if (!selected) return {...sysbenchDefaults, workloads: [...sysbenchDefaults.workloads]};
+    if (!selected) return { ...sysbenchDefaults, workloads: [...sysbenchDefaults.workloads] };
     return {
         workloads: $$('input[data-kind="sysbench-workload"]:checked')
             .map(input => input.value),
@@ -984,7 +980,7 @@ function sysbenchOptionsFromPlan(plan) {
         .filter(Boolean);
     const selected = benchmarks.includes('sysbench') || legacyWorkloads.length;
     if (!selected) {
-        return {...sysbenchDefaults, workloads: [...sysbenchDefaults.workloads]};
+        return { ...sysbenchDefaults, workloads: [...sysbenchDefaults.workloads] };
     }
     return {
         workloads: [...new Set([
@@ -995,7 +991,7 @@ function sysbenchOptionsFromPlan(plan) {
 }
 
 function iperf3Options(selected) {
-    if (!selected) return {...iperf3Defaults, protocols: [...iperf3Defaults.protocols]};
+    if (!selected) return { ...iperf3Defaults, protocols: [...iperf3Defaults.protocols] };
     return {
         protocols: $$('input[data-kind="iperf3-protocol"]:checked')
             .map(input => input.value),
@@ -1009,7 +1005,7 @@ function iperf3OptionsFromPlan(plan) {
         .filter(Boolean);
     const selected = benchmarks.includes('iperf3') || legacyProtocols.length;
     if (!selected) {
-        return {...iperf3Defaults, protocols: [...iperf3Defaults.protocols]};
+        return { ...iperf3Defaults, protocols: [...iperf3Defaults.protocols] };
     }
     const savedProtocols = Array.isArray(plan.iperf3?.protocols)
         ? plan.iperf3.protocols
@@ -1021,7 +1017,7 @@ function iperf3OptionsFromPlan(plan) {
 }
 
 function phoronixOptions(selected) {
-    if (!selected) return {...phoronixDefaults, profiles: [...phoronixDefaults.profiles]};
+    if (!selected) return { ...phoronixDefaults, profiles: [...phoronixDefaults.profiles] };
     return {
         profiles: $$('input[data-kind="phoronix-profile"]:checked')
             .map(input => input.value),
@@ -1030,7 +1026,7 @@ function phoronixOptions(selected) {
 
 function phoronixOptionsFromPlan(plan) {
     if (!(plan.benchmarks || []).includes('phoronix')) {
-        return {...phoronixDefaults, profiles: [...phoronixDefaults.profiles]};
+        return { ...phoronixDefaults, profiles: [...phoronixDefaults.profiles] };
     }
     const profiles = Array.isArray(plan.phoronix?.profiles)
         ? plan.phoronix.profiles
@@ -1209,7 +1205,7 @@ $('#planForm').addEventListener('submit', async event => {
     try {
         const result = await api('/api/jobs', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data),
         });
         jobId = result.id;
@@ -1231,11 +1227,18 @@ function activatePhase(index) {
 }
 
 function isPartialReport(job) {
-    if (job.benchmark_status) return job.benchmark_status !== 'complete';
     const statuses = (job.results || []).map(result => result.status).filter(Boolean);
-    if (statuses.includes('failed')) return true;
-    if (statuses.includes('completed')) return false;
-    return job.status === 'failed';
+    const hasCompletedResult = statuses.includes('completed');
+    if (!hasCompletedResult) return false;
+    if (job.benchmark_status) return job.benchmark_status !== 'complete';
+    return statuses.some(status => status !== 'completed');
+}
+
+function isFailedBenchmarkReport(job) {
+    if (isPartialReport(job)) return false;
+    const statuses = (job.results || []).map(result => result.status).filter(Boolean);
+    if (job.benchmark_status) return job.benchmark_status === 'failed';
+    return statuses.includes('failed') || (!statuses.length && job.status === 'failed');
 }
 
 function recordedResourceEntries(job) {
@@ -1316,7 +1319,7 @@ function renderJobProgress(job) {
 
 function retainedConnections(job) {
     const resources = job.resources || {};
-    const sshUsers = {oci: 'opc', aws: 'ec2-user', gcp: 'benchmark', azure: 'benchmark'};
+    const sshUsers = { oci: 'opc', aws: 'ec2-user', gcp: 'benchmark', azure: 'benchmark' };
     const sshUser = sshUsers[job.plan?.provider || 'oci'] || 'opc';
     const hosts = [
         ['Benchmark VM', resources.public_ip],
@@ -1339,7 +1342,10 @@ function showReport(job) {
     $('#report').hidden = false;
     activatePhase(2);
     const partial = isPartialReport(job);
-    $('#reportTitle').textContent = partial ? 'Partial benchmark report' : 'Your benchmark report is ready.';
+    const benchmarkFailed = isFailedBenchmarkReport(job);
+    $('#reportTitle').textContent = benchmarkFailed
+        ? 'Benchmark failed'
+        : (partial ? 'Partial benchmark report' : 'Your benchmark report is ready.');
     $('#download').hidden = false;
     $('#download').href = `/api/jobs/${jobId}/report?download=true`;
     const frameUrl = `/api/jobs/${jobId}/report`;
@@ -1356,23 +1362,31 @@ function showReport(job) {
         explicitlyRetained || job.status === 'cleanup_failed' || job.status === 'interrupted'
     );
     if (job.status === 'destroying') {
-        $('#reportStatus').textContent = 'Results are ready. Infrastructure cleanup is continuing in the background.';
+        $('#reportStatus').textContent = benchmarkFailed
+            ? 'The benchmark failed before producing results. Diagnostic details are saved while infrastructure cleanup continues.'
+            : 'Results are ready. Infrastructure cleanup is continuing in the background.';
     } else if (job.status === 'destroyed') {
-        $('#reportStatus').textContent = partial
-            ? 'The benchmark stopped with partial results. Its infrastructure has been destroyed.'
-            : 'Results are saved. Benchmark infrastructure has been destroyed.';
+        $('#reportStatus').textContent = benchmarkFailed
+            ? 'The benchmark failed before producing results. Diagnostic details are saved, and its infrastructure has been destroyed.'
+            : (partial
+                ? 'The benchmark stopped with partial results. Its infrastructure has been destroyed.'
+                : 'Results are saved. Benchmark infrastructure has been destroyed.');
     } else if (job.status === 'reported') {
-        $('#reportStatus').textContent = partial
-            ? 'The saved report is incomplete. The app was restarted, so the original infrastructure state is unavailable.'
-            : 'Results are saved. The app was restarted, so the original infrastructure state is unavailable.';
+        $('#reportStatus').textContent = benchmarkFailed
+            ? 'The benchmark failed before producing results. Diagnostic details are saved, but the original infrastructure state is unavailable.'
+            : (partial
+                ? 'The saved report is incomplete. The app was restarted, so the original infrastructure state is unavailable.'
+                : 'Results are saved. The app was restarted, so the original infrastructure state is unavailable.');
     } else if (job.status === 'interrupted') {
         $('#reportStatus').textContent = 'This run was interrupted when the app stopped. Saved resource details may still be available for cleanup.';
         $('#destroyNow').hidden = !canDestroy;
     } else if (job.status === 'cleanup_failed') {
         const detail = job.cleanup_error ? ` ${job.cleanup_error}` : '';
-        $('#reportStatus').textContent = partial
-            ? `The benchmark report is incomplete, and infrastructure cleanup did not finish.${detail}`
-            : `Results are saved, but infrastructure cleanup did not finish.${detail}`;
+        $('#reportStatus').textContent = benchmarkFailed
+            ? `The benchmark failed before producing results, and infrastructure cleanup did not finish.${detail}`
+            : (partial
+                ? `The benchmark report is incomplete, and infrastructure cleanup did not finish.${detail}`
+                : `Results are saved, but infrastructure cleanup did not finish.${detail}`);
         $('#destroyNow').hidden = !canDestroy;
     } else if (job.status === 'complete') {
         $('#reportStatus').textContent = withRetainedConnections(
@@ -1388,6 +1402,11 @@ function showReport(job) {
             const message = connections.length
                 ? 'The benchmark stopped after producing partial results. Infrastructure was retained.'
                 : 'The benchmark stopped after producing partial results.';
+            $('#reportStatus').textContent = withRetainedConnections(message, job);
+        } else if (benchmarkFailed) {
+            const message = connections.length
+                ? 'The benchmark failed before producing results. Diagnostic details are saved. Infrastructure was retained.'
+                : 'The benchmark failed before producing results. Diagnostic details are saved.';
             $('#reportStatus').textContent = withRetainedConnections(message, job);
         } else {
             $('#reportStatus').textContent = withRetainedConnections(
@@ -1423,7 +1442,7 @@ async function resumeLastJob() {
     let latest = null;
     try {
         latest = (await api('/api/reports/latest')).id;
-    } catch {}
+    } catch { }
     const candidates = [requested, saved, latest]
         .filter((id, index, list) => id && list.indexOf(id) === index);
     for (const candidate of candidates) {
@@ -1444,7 +1463,7 @@ async function resumeLastJob() {
                 poll();
             }
             return true;
-        } catch {}
+        } catch { }
     }
     localStorage.removeItem('ociBenchmarkJobId');
     jobId = undefined;
@@ -1472,7 +1491,7 @@ function leaveReport() {
     $('#events').innerHTML = '';
     $('#plan').hidden = false;
     activatePhase(0);
-    window.scrollTo({top: 0, behavior: 'smooth'});
+    window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 async function resetToPlan() {
@@ -1481,7 +1500,7 @@ async function resetToPlan() {
         try {
             const job = await api(`/api/jobs/${jobId}`);
             active = !terminalStatuses.includes(job.status);
-        } catch {}
+        } catch { }
     }
     if (active && !window.confirm(
         'A benchmark or cleanup is still active. Reset view does not stop the run ' +
@@ -1613,10 +1632,10 @@ async function stopLiveRunAndDestroy() {
         'Unfinished benchmark work will be lost. This cannot be undone.',
     )) return;
     liveStopPending = true;
-    renderLiveStopAction({status: 'cancelling', live: true, benchmark_interrupted: true});
+    renderLiveStopAction({ status: 'cancelling', live: true, benchmark_interrupted: true });
     $('#status').textContent = 'CANCELLING — Waiting for active benchmark work to stop before cleanup.';
     try {
-        const response = await api(`/api/jobs/${jobId}/destroy`, {method: 'POST'});
+        const response = await api(`/api/jobs/${jobId}/destroy`, { method: 'POST' });
         renderLiveStopAction({
             status: response.status || 'cancelling',
             live: true,
@@ -1634,7 +1653,7 @@ async function stopLiveRunAndDestroy() {
     }
 }
 async function destroyCurrentJob(button) {
-    await api(`/api/jobs/${jobId}/destroy`, {method: 'POST'});
+    await api(`/api/jobs/${jobId}/destroy`, { method: 'POST' });
     button.hidden = true;
     $('#status').textContent = 'DESTROYING — Cleanup has started.';
     if (poller) clearInterval(poller);
@@ -1647,7 +1666,7 @@ $('#destroyInterrupted').addEventListener('click', () => (
 ));
 $('#keyDownload').addEventListener('click', () => {
     const anchor = document.createElement('a');
-    anchor.href = URL.createObjectURL(new Blob([currentJobPrivateKey], {type: 'application/octet-stream'}));
+    anchor.href = URL.createObjectURL(new Blob([currentJobPrivateKey], { type: 'application/octet-stream' }));
     anchor.download = `${currentProvider()}-benchmark-key.pem`;
     anchor.click();
     URL.revokeObjectURL(anchor.href);

@@ -69,7 +69,11 @@ from .deathstarbench import (
     prepare_workload_command,
     workload as deathstarbench_workload,
 )
-from .models import BenchmarkPlan, canonicalize_benchmark_plan
+from .models import (
+    BenchmarkPlan,
+    ClearSavedRunsRequest,
+    canonicalize_benchmark_plan,
+)
 from .guests import amazon_linux, rocky_linux, web as web_guest
 from . import llama_cpp
 from .iperf3 import parse_output as parse_iperf3_output
@@ -120,6 +124,22 @@ IPERF3_RESULT_IDS = {
 }
 IPERF_PEER_READINESS_TIMEOUT_SECONDS = 720
 RUN_ID_PATTERN = re.compile(r'^[0-9a-f]{12}$')
+ACTIVE_RUN_STATUSES = frozenset({
+    'queued',
+    'provisioning',
+    'testing',
+    'reporting',
+    'cancelling',
+    'cleanup_pending',
+    'destroying',
+})
+PRESERVED_RUN_STATUSES = frozenset({
+    'complete',
+    'cleanup_failed',
+    'interrupted',
+})
+DELETABLE_RUN_STATUSES = frozenset({'destroyed', 'reported', 'failed'})
+SAVED_RUN_ARTIFACTS = ('report.html', 'state.json', 'results.json')
 
 
 class SSHCommandError(RuntimeError):
@@ -712,6 +732,27 @@ def has_recoverable_resources(job):
     return False
 
 
+def has_recoverable_resources_for_any_provider(job):
+    """Fail closed when saved provider metadata is missing or inconsistent."""
+    if has_recoverable_resources(job):
+        return True
+    resources = job.get('resources', {})
+    if not isinstance(resources, dict):
+        return True
+    return bool(
+        resources.get('aws_account_id')
+        or (
+            resources.get('gcp_project_id')
+            and resources.get('gcp_resource_prefix')
+        )
+        or (
+            resources.get('azure_subscription_id')
+            and resources.get('azure_resource_group_name')
+            and resources.get('azure_resource_group_tags')
+        )
+    )
+
+
 def saved_report_benchmark_status(report_path):
     """Recover benchmark outcome for reports created before state.json existed."""
     report = report_path.read_text(errors='replace')
@@ -1142,7 +1183,17 @@ def run_summary(directory):
         max(path.stat().st_mtime for path in artifacts),
         tz=timezone.utc,
     ).isoformat()
-    recoverable = has_recoverable_resources(state)
+    # A provider assigns ``destroyed`` only after cleanup has proved that its
+    # run-owned resources are absent. OCI intentionally retains the deleted
+    # resource IDs in the audit trail, so those stale IDs must not make a
+    # successfully destroyed run look recoverable in history.
+    recoverable = (
+        status != 'destroyed'
+        and has_recoverable_resources_for_any_provider({
+            **state,
+            'plan': plan,
+        })
+    )
     provider = plan.get('provider', 'oci')
     return {
         'id': directory.name,
@@ -1182,12 +1233,103 @@ def saved_report_summaries():
     runs = [run_summary(directory) for directory in directories]
     return sorted(runs, key=lambda item: item['created_at'], reverse=True)
 
+
+def saved_run_directories():
+    """Return only direct, app-owned run directories eligible for review."""
+    directories = []
+    for directory in RUNS.iterdir():
+        if (
+            directory.is_symlink()
+            or not directory.is_dir()
+            or not RUN_ID_PATTERN.fullmatch(directory.name)
+        ):
+            continue
+        if not any(
+            (directory / artifact).is_file()
+            for artifact in SAVED_RUN_ARTIFACTS
+        ):
+            continue
+        directories.append(directory)
+    return sorted(directories, key=lambda item: item.name)
+
+
+def saved_run_can_be_deleted(directory):
+    """Fail closed unless a saved run is finalized and locally disposable."""
+    job_id = directory.name
+    task = job_tasks.get(job_id)
+    if task is not None:
+        try:
+            if not task.done():
+                return False
+        except Exception:
+            return False
+    with job_processes_lock:
+        if job_processes.get(job_id):
+            return False
+
+    job = jobs.get(job_id)
+    state_path = directory / 'state.json'
+    if job is None and (state_path.exists() or state_path.is_symlink()):
+        if state_path.is_symlink():
+            return False
+        try:
+            job = load_persisted_job(job_id)
+        except Exception:
+            return False
+        if job is None:
+            # A present state file that cannot prove its own identity or
+            # lifecycle may still be the only cloud-cleanup manifest.
+            return False
+    if job is None:
+        # Reports and structured results created before state persistence do
+        # not contain a resource manifest that this app could later recover.
+        return True
+
+    status = job.get('status')
+    if not isinstance(status, str):
+        return False
+    status = status.strip().lower()
+    if status in ACTIVE_RUN_STATUSES or status in PRESERVED_RUN_STATUSES:
+        return False
+    # Every provider assigns ``destroyed`` only after its cleanup routine has
+    # proved that the run-owned resources are absent. Some providers retain
+    # harmless ownership metadata (for example, the AWS account ID), so the
+    # generic recovery detector is intentionally bypassed for this definitive
+    # terminal state.
+    if status == 'destroyed':
+        return True
+    try:
+        if has_recoverable_resources_for_any_provider(job):
+            return False
+    except Exception:
+        return False
+    return status in DELETABLE_RUN_STATUSES
+
+
+def forget_deleted_run(job_id):
+    """Drop stale terminal registries only after local history is gone."""
+    jobs.pop(job_id, None)
+    job_tasks.pop(job_id, None)
+    job_cancel_events.pop(job_id, None)
+    with job_processes_lock:
+        if not job_processes.get(job_id):
+            job_processes.pop(job_id, None)
+
+
 @app.get('/')
-def home(): return FileResponse(ROOT / 'static' / 'index.html')
+def home():
+    return FileResponse(
+        ROOT / 'static' / 'index.html',
+        headers={'Cache-Control': 'no-store'},
+    )
 
 
 @app.get('/history')
-def history(): return FileResponse(ROOT / 'static' / 'history.html')
+def history():
+    return FileResponse(
+        ROOT / 'static' / 'history.html',
+        headers={'Cache-Control': 'no-store'},
+    )
 
 
 @app.get('/api/config/ssh-defaults')
@@ -1224,6 +1366,42 @@ def providers():
 def reports():
     return JSONResponse(
         {'items': saved_report_summaries()},
+        headers={'Cache-Control': 'no-store'},
+    )
+
+
+@app.delete('/api/reports')
+def clear_saved_runs(confirmation: ClearSavedRunsRequest):
+    """Permanently remove only finalized local history that is safe to lose."""
+    # Keep the destructive precondition explicit here as well as in FastAPI's
+    # strict request validation.
+    if confirmation.confirmed is not True:
+        raise HTTPException(422, 'Explicit confirmation is required.')
+
+    deleted_run_ids = []
+    preserved_run_ids = []
+    for directory in saved_run_directories():
+        job_id = directory.name
+        if not saved_run_can_be_deleted(directory):
+            preserved_run_ids.append(job_id)
+            continue
+        try:
+            shutil.rmtree(directory)
+        except OSError:
+            # A partial filesystem failure must never be reported as a
+            # successful deletion or discard the matching in-memory state.
+            preserved_run_ids.append(job_id)
+            continue
+        forget_deleted_run(job_id)
+        deleted_run_ids.append(job_id)
+
+    preserved_run_ids.sort()
+    return JSONResponse(
+        {
+            'deleted_count': len(deleted_run_ids),
+            'preserved_count': len(preserved_run_ids),
+            'preserved_run_ids': preserved_run_ids,
+        },
         headers={'Cache-Control': 'no-store'},
     )
 
@@ -1984,11 +2162,29 @@ async def run_job(job, plan):
         fail(job, str(exc))
         if plan.destroy_after_completion:
             job['status'] = 'cleanup_pending'
+            outcome = benchmark_status(job)
+            if outcome == 'complete':
+                cleanup_message = (
+                    'The benchmarks completed, but a later step failed; '
+                    'preserving results before automatic infrastructure cleanup.'
+                )
+            elif any(
+                result.get('status') == 'completed'
+                for result in job.get('results', [])
+            ):
+                cleanup_message = (
+                    'The run failed after some benchmarks completed; saving '
+                    'partial results before automatic infrastructure cleanup.'
+                )
+            else:
+                cleanup_message = (
+                    'The run failed before producing benchmark results; saving '
+                    'diagnostics before automatic infrastructure cleanup.'
+                )
             event(
                 job,
                 'Cleanup',
-                'The run failed; saving any partial results before automatic '
-                'infrastructure cleanup.',
+                cleanup_message,
             )
         if job['results']:
             try:
@@ -2365,6 +2561,8 @@ def ssh(
         '-o', f'UserKnownHostsFile={known_hosts_path}',
         '-o', 'GlobalKnownHostsFile=/dev/null',
         '-o', 'ConnectTimeout=15',
+        '-o', 'ServerAliveInterval=30',
+        '-o', 'ServerAliveCountMax=6',
         '-o', 'NumberOfPasswordPrompts=1',
         '-o', 'PasswordAuthentication=no',
         '-o', 'KbdInteractiveAuthentication=no',
@@ -2431,7 +2629,8 @@ def ssh(
             ):
                 output = command_output(stdout, stderr)
                 raise SSHCommandError(
-                    f'SSH command failed: {output[-2000:]}',
+                    f'SSH command failed with exit status '
+                    f'{process.returncode}: {output[-2000:]}',
                     output=output,
                     returncode=process.returncode,
                 )
@@ -3077,6 +3276,7 @@ def execute_benchmark(
     metadata=None,
     output_limit=20000,
     include_stderr=False,
+    transport_attempts=None,
 ):
     started_at = now()
     started = time.monotonic()
@@ -3101,12 +3301,16 @@ def execute_benchmark(
         })
 
     try:
+        ssh_options = {}
+        if transport_attempts is not None:
+            ssh_options['transport_attempts'] = transport_attempts
         output = ssh(
             job,
             command,
             timeout=timeout,
             host_key=host_key,
             include_stderr=include_stderr,
+            **ssh_options,
         )
     except Exception as exc:
         failure_output = (
@@ -3177,6 +3381,7 @@ def run_llama_benchmark(job, *, metadata=None, toolset_enable=None):
         else:
             architecture = llama_cpp.parse_architecture(str(architecture))
         immutable_metadata['architecture'] = architecture
+        immutable_metadata.update(llama_cpp.cpu_build_profile(architecture))
 
         probe_command = llama_cpp.logical_cpu_count_command()
         probe_output = ''
@@ -3215,8 +3420,8 @@ def run_llama_benchmark(job, *, metadata=None, toolset_enable=None):
     event(
         job,
         'Run',
-        'Recording the exact GCC and GNU assembler selected for the native '
-        'llama.cpp build.',
+        'Recording the exact GCC and GNU assembler selected for the '
+        f'{immutable_metadata["llama_cpu_build_profile"]} llama.cpp build.',
     )
     try:
         probe_output = ssh(
@@ -3261,6 +3466,7 @@ def run_llama_benchmark(job, *, metadata=None, toolset_enable=None):
         benchmark_id,
         name,
         llama_cpp.benchmark_command(
+            architecture=architecture,
             toolset_enable=toolset_enable,
             threads=logical_cpu_count,
         ),
@@ -3271,6 +3477,7 @@ def run_llama_benchmark(job, *, metadata=None, toolset_enable=None):
         metadata=result_metadata,
         output_limit=None,
         include_stderr=False,
+        transport_attempts=1,
     )
 
 

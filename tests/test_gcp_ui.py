@@ -48,7 +48,7 @@ class GcpUiTests(unittest.TestCase):
         )
 
     def test_gcp_mode_uses_adc_rocky_linux_and_fixed_capacity_wording(self):
-        self.assertIn('Runs locally with Google Cloud ADC', JAVASCRIPT)
+        self.assertIn('Accesses Google Cloud through ADC', JAVASCRIPT)
         self.assertIn('standard Rocky Linux 9 image', JAVASCRIPT)
         self.assertIn('Compute Engine Machine Type', JAVASCRIPT)
         self.assertIn('connect as benchmark', JAVASCRIPT)

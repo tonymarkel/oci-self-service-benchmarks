@@ -58,7 +58,7 @@ class PhoronixUiTests(unittest.TestCase):
         metadata = javascript_function('phoronixProfileMetadata')
 
         self.assertIn(
-            "const phoronixDefaults = {profiles: ['compress_7zip']};",
+            "const phoronixDefaults = { profiles: ['compress_7zip'] };",
             JAVASCRIPT,
         )
         self.assertIn('catalog.phoronix_profiles || []', render)

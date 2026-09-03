@@ -52,7 +52,7 @@ class LlamaCppCommandTests(unittest.TestCase):
                     llama_cpp.parse_logical_cpu_count(output)
 
     def test_command_pins_and_verifies_source_and_model_before_cpu_run(self):
-        command = llama_cpp.benchmark_command()
+        command = llama_cpp.benchmark_command(architecture='x86_64')
 
         self.assertIn(f'--branch {llama_cpp.LLAMA_CPP_RELEASE}', command)
         self.assertIn(llama_cpp.LLAMA_CPP_REVISION, command)
@@ -72,7 +72,17 @@ class LlamaCppCommandTests(unittest.TestCase):
         self.assertIn('CXX_PATH=$(command -v g++)', command)
         self.assertIn('-DCMAKE_C_COMPILER="$CC_PATH"', command)
         self.assertIn('-DCMAKE_CXX_COMPILER="$CXX_PATH"', command)
-        self.assertIn('-DGGML_NATIVE=ON', command)
+        self.assertIn('-DGGML_NATIVE=OFF', command)
+        self.assertIn('-DGGML_AVX2=ON', command)
+        self.assertIn('-DGGML_AVX512=OFF', command)
+        self.assertIn('-DGGML_AMX_TILE=OFF', command)
+        self.assertIn('-DGGML_BACKEND_DL=OFF', command)
+        self.assertIn('-DGGML_CPU_ALL_VARIANTS=OFF', command)
+        self.assertNotIn('-march=native', command)
+        self.assertIn(
+            f'CPU_BUILD_PROFILE={llama_cpp.X86_64_PORTABLE_CPU_PROFILE}',
+            command,
+        )
         self.assertIn('-DGGML_CUDA=OFF', command)
         self.assertIn('--n-prompt 512,2048', command)
         self.assertIn('--n-gen 128,512', command)
@@ -81,7 +91,13 @@ class LlamaCppCommandTests(unittest.TestCase):
         self.assertIn('--n-gpu-layers 0', command)
         self.assertIn('--device none', command)
         self.assertIn('--output json', command)
-        self.assertIn('} >&2; exec ', command)
+        self.assertNotIn('} >&2; exec ', command)
+        self.assertIn('LLAMA_BENCH_STATUS=$?', command)
+        self.assertIn(
+            'llama-bench exited with status $LLAMA_BENCH_STATUS.',
+            command,
+        )
+        self.assertIn('exit "$LLAMA_BENCH_STATUS"', command)
         subprocess.run(
             ['bash', '-n'],
             input=command,
@@ -91,26 +107,49 @@ class LlamaCppCommandTests(unittest.TestCase):
         )
 
     def test_observed_thread_count_is_reused_by_the_benchmark_command(self):
-        command = llama_cpp.benchmark_command(threads=4)
+        command = llama_cpp.benchmark_command(
+            architecture='x86_64',
+            threads=4,
+        )
 
         self.assertIn('THREADS=4;', command)
         self.assertNotIn('THREADS=$(nproc)', command)
         self.assertIn('--threads "$THREADS"', command)
         with self.assertRaisesRegex(ValueError, 'positive integer'):
-            llama_cpp.benchmark_command(threads=0)
+            llama_cpp.benchmark_command(architecture='x86_64', threads=0)
         with self.assertRaisesRegex(ValueError, 'positive integer'):
-            llama_cpp.benchmark_command(threads=True)
+            llama_cpp.benchmark_command(architecture='x86_64', threads=True)
+
+    def test_arm_command_retains_native_optimization(self):
+        command = llama_cpp.benchmark_command(architecture='aarch64')
+
+        self.assertIn('-DGGML_NATIVE=ON', command)
+        self.assertNotIn('-DGGML_NATIVE=OFF', command)
+        self.assertNotIn('-DGGML_AVX2=ON', command)
+        self.assertIn(
+            f'CPU_BUILD_PROFILE={llama_cpp.AARCH64_NATIVE_CPU_PROFILE}',
+            command,
+        )
+        with self.assertRaisesRegex(ValueError, 'x86_64 or aarch64'):
+            llama_cpp.benchmark_command(architecture='ppc64le')
 
     def test_optional_toolset_is_safely_sourced(self):
         command = llama_cpp.benchmark_command(
+            architecture='x86_64',
             toolset_enable='/opt/rh/gcc toolset/enable'
         )
 
         self.assertIn("source '/opt/rh/gcc toolset/enable'", command)
         with self.assertRaisesRegex(ValueError, 'absolute'):
-            llama_cpp.benchmark_command(toolset_enable='relative/enable')
+            llama_cpp.benchmark_command(
+                architecture='x86_64',
+                toolset_enable='relative/enable',
+            )
         with self.assertRaisesRegex(ValueError, 'absolute'):
-            llama_cpp.benchmark_command(toolset_enable='/tmp/enable\nid')
+            llama_cpp.benchmark_command(
+                architecture='x86_64',
+                toolset_enable='/tmp/enable\nid',
+            )
 
     def test_toolchain_probe_uses_the_selected_toolset_and_is_strict(self):
         command = llama_cpp.toolchain_probe_command(
@@ -159,7 +198,7 @@ class LlamaCppCommandTests(unittest.TestCase):
             metadata['llama_assembler_banner'],
             'GNU assembler version 2.44-5.el9_8',
         )
-        self.assertTrue(metadata['llama_native_optimization'])
+        self.assertNotIn('llama_native_optimization', metadata)
 
         malformed = (
             output.replace('/usr/bin/gcc', '/usr/bin/clang'),
@@ -193,6 +232,28 @@ class LlamaCppCommandTests(unittest.TestCase):
             667_078_656,
         )
         self.assertEqual(metadata['execution_backend'], 'CPU')
+
+    def test_cpu_build_profile_is_architecture_specific_and_reportable(self):
+        x86 = llama_cpp.cpu_build_profile('x86_64')
+        arm = llama_cpp.cpu_build_profile('arm64')
+
+        self.assertFalse(x86['llama_native_optimization'])
+        self.assertEqual(
+            x86['llama_cpu_build_profile'],
+            llama_cpp.X86_64_PORTABLE_CPU_PROFILE,
+        )
+        self.assertIn('-DGGML_NATIVE=OFF', x86['llama_cpu_cmake_options'])
+        self.assertIn('-DGGML_AVX512=OFF', x86['llama_cpu_cmake_options'])
+        self.assertIn(
+            '-DGGML_CPU_ALL_VARIANTS=OFF',
+            x86['llama_cpu_cmake_options'],
+        )
+        self.assertTrue(arm['llama_native_optimization'])
+        self.assertEqual(
+            arm['llama_cpu_build_profile'],
+            llama_cpp.AARCH64_NATIVE_CPU_PROFILE,
+        )
+        self.assertEqual(arm['llama_cpu_cmake_options'], '-DGGML_NATIVE=ON')
 
 
 class LlamaCppResultTests(unittest.TestCase):

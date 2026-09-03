@@ -63,7 +63,7 @@ class Iperf3UiTests(unittest.TestCase):
         render = javascript_function('renderCatalog')
 
         self.assertIn(
-            "const iperf3Defaults = {protocols: ['tcp']};",
+            "const iperf3Defaults = { protocols: ['tcp'] };",
             JAVASCRIPT,
         )
         self.assertIn('catalog.iperf3_protocols || []', render)

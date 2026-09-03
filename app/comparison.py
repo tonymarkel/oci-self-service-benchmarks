@@ -24,6 +24,11 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import PHORONIX_PROFILES
+from .llama_cpp import (
+    CPU_BUILD_PROFILE_NATIVE_PAIRS,
+    X86_64_PORTABLE_CMAKE_OPTIONS,
+    X86_64_PORTABLE_CPU_PROFILE,
+)
 from .models import (
     ApacheBenchOptions,
     DeathStarBenchOptions,
@@ -42,7 +47,7 @@ RESULTS_SCHEMA = 'cloud-self-service-benchmarks/results'
 RESULTS_SCHEMA_VERSION = 1
 COMPARISON_SCHEMA = 'cloud-self-service-benchmarks/comparison'
 COMPARISON_SCHEMA_VERSION = 1
-WORKLOAD_CONTRACT_VERSION = 1
+WORKLOAD_CONTRACT_VERSION = 2
 
 DIRECTION_HIGHER = 'higher_is_better'
 DIRECTION_LOWER = 'lower_is_better'
@@ -610,6 +615,7 @@ def workload_fingerprint(
     provider = str(safe_plan.get('provider') or 'oci').lower()
     issues: list[str] = []
     settings: dict[str, Any] | None = None
+    provenance: dict[str, Any] | None = None
 
     if result_id == 'sysbench_cpu':
         settings = {
@@ -725,12 +731,46 @@ def workload_fingerprint(
             'llama_assembler_version',
         )
         missing = [key for key in required if not safe_metadata.get(key)]
-        if safe_metadata.get('llama_native_optimization') is not True:
+        native_cpu_optimization = safe_metadata.get(
+            'llama_native_optimization'
+        )
+        if not isinstance(native_cpu_optimization, bool):
             missing.append('llama_native_optimization')
+        raw_cpu_build_profile = safe_metadata.get('llama_cpu_build_profile')
+        cpu_build_profile = (
+            raw_cpu_build_profile.strip()
+            if isinstance(raw_cpu_build_profile, str)
+            and raw_cpu_build_profile.strip()
+            else None
+        )
+        if not cpu_build_profile and native_cpu_optimization is True:
+            # Results produced before named CPU profiles were introduced used
+            # the same native-build contract on every supported architecture.
+            cpu_build_profile = 'native'
+        if not cpu_build_profile:
+            missing.append('llama_cpu_build_profile')
         if missing:
             issues.append(
                 'llama.cpp artifact or toolchain metadata is missing: '
                 + ', '.join(missing)
+            )
+        elif (
+            cpu_build_profile,
+            native_cpu_optimization,
+        ) not in CPU_BUILD_PROFILE_NATIVE_PAIRS:
+            issues.append(
+                'llama.cpp CPU build profile and native-optimization '
+                'metadata are inconsistent.'
+            )
+        portable_cpu_options = ' '.join(X86_64_PORTABLE_CMAKE_OPTIONS)
+        if (
+            cpu_build_profile == X86_64_PORTABLE_CPU_PROFILE
+            and safe_metadata.get('llama_cpu_cmake_options')
+            != portable_cpu_options
+        ):
+            issues.append(
+                'llama.cpp portable CPU build options are missing or '
+                'inconsistent.'
             )
         settings = {
             'tool': 'llama-bench',
@@ -740,20 +780,53 @@ def workload_fingerprint(
             'model_quantization': safe_metadata.get('model_quantization'),
             'execution_backend': safe_metadata.get('execution_backend'),
             'compiler': 'GCC',
-            'compiler_version': safe_metadata.get('llama_compiler_version'),
             'cxx_compiler': 'G++',
-            'cxx_compiler_version': safe_metadata.get(
-                'llama_cxx_compiler_version'
-            ),
-            'assembler_version': safe_metadata.get('llama_assembler_version'),
-            'native_cpu_optimization': safe_metadata.get(
-                'llama_native_optimization'
-            ),
+            'assembler': 'GNU as',
+            'cpu_build_profile': cpu_build_profile,
+            'native_cpu_optimization': native_cpu_optimization,
             'prompt_token_counts': [512, 2048],
             'generation_token_counts': [128, 512],
             'repetitions': 5,
             'threads_policy': 'all_observed_guest_logical_cpus',
             'gpu_layers': 0,
+        }
+        if cpu_build_profile == X86_64_PORTABLE_CPU_PROFILE:
+            settings['cpu_cmake_options'] = portable_cpu_options
+        else:
+            # Native builds can generate a different instruction mix for both
+            # the host CPU and the compiler version, so their exact toolchain
+            # remains part of the comparable workload contract.
+            settings.update({
+                'compiler_version': safe_metadata.get(
+                    'llama_compiler_version'
+                ),
+                'cxx_compiler_version': safe_metadata.get(
+                    'llama_cxx_compiler_version'
+                ),
+                'assembler_version': safe_metadata.get(
+                    'llama_assembler_version'
+                ),
+            })
+        # Compiler and binutils versions remain required, auditable build
+        # provenance, but they are not workload parameters.  The named CPU
+        # profile fixes the executable ISA contract across providers while
+        # allowing each supported guest image to use its maintained GCC
+        # stack.  Comparison payloads call out mixed toolchains explicitly.
+        provenance = {
+            'build_toolchain': {
+                'compiler': 'GCC',
+                'compiler_version': safe_metadata.get(
+                    'llama_compiler_version'
+                ),
+                'cxx_compiler': 'G++',
+                'cxx_compiler_version': safe_metadata.get(
+                    'llama_cxx_compiler_version'
+                ),
+                'assembler': 'GNU as',
+                'assembler_version': safe_metadata.get(
+                    'llama_assembler_version'
+                ),
+            },
         }
     elif result_id.startswith('phoronix_'):
         profile = _profile_for_result(result_id)
@@ -834,13 +907,16 @@ def workload_fingerprint(
             ensure_ascii=True,
         ).encode()
         fingerprint = hashlib.sha256(encoded).hexdigest()
-    return {
+    result = {
         'schema_version': WORKLOAD_CONTRACT_VERSION,
         'fingerprint': fingerprint,
         'contract_unknown': fingerprint is None,
         'contract': contract,
         'issues': issues,
     }
+    if provenance is not None:
+        result['provenance'] = provenance
+    return result
 
 
 def _run_record(job: Mapping[str, Any]) -> dict[str, Any]:
@@ -1191,6 +1267,63 @@ def _mismatch_message(differences: list[dict[str, Any]]) -> str:
     return f'Workload settings differ: {fields}{suffix}.'
 
 
+def _llama_toolchain_description(provenance: object) -> str:
+    """Return a concise, display-safe compiler/binutils provenance label."""
+
+    record = _mapping(provenance)
+    toolchain = _mapping(record.get('build_toolchain'))
+    compiler = str(toolchain.get('compiler') or 'GCC')
+    compiler_version = str(toolchain.get('compiler_version') or 'unknown')
+    cxx_compiler = str(toolchain.get('cxx_compiler') or 'G++')
+    cxx_version = str(
+        toolchain.get('cxx_compiler_version') or 'unknown'
+    )
+    assembler = str(toolchain.get('assembler') or 'GNU as')
+    assembler_version = str(
+        toolchain.get('assembler_version') or 'unknown'
+    )
+    if compiler_version == cxx_version:
+        compiler_label = (
+            f'{compiler}/{cxx_compiler} {compiler_version}'
+        )
+    else:
+        compiler_label = (
+            f'{compiler} {compiler_version}, '
+            f'{cxx_compiler} {cxx_version}'
+        )
+    return f'{compiler_label}; {assembler} {assembler_version}'
+
+
+def _add_mixed_toolchain_warnings(
+    result_id: str,
+    cohort_entries: Sequence[dict[str, Any]],
+) -> list[str]:
+    """Keep comparable llama methods transparent when build tools differ."""
+
+    if result_id != 'llama_bench' or len(cohort_entries) < 2:
+        return []
+    signatures = {
+        json.dumps(
+            _mapping(entry.get('provenance')).get('build_toolchain', {}),
+            sort_keys=True,
+            separators=(',', ':'),
+            ensure_ascii=True,
+        )
+        for entry in cohort_entries
+    }
+    if len(signatures) < 2:
+        return []
+    for entry in cohort_entries:
+        description = _llama_toolchain_description(entry.get('provenance'))
+        warning = f'Build toolchain: {description}.'
+        entry.setdefault('warnings', []).append(warning)
+    return [
+        'Build toolchains differ across these runs. The pinned source, model, '
+        'benchmark arguments, and portable AVX2 profile match, but compiler '
+        'code generation may affect performance.'
+    ]
+
+
 def build_comparison_payload(
     documents: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -1262,6 +1395,7 @@ def build_comparison_payload(
                 'run_id': run_id,
                 'name': result.get('name') or result_id,
                 'contract': contract,
+                'provenance': contract.get('provenance', {}),
                 'metrics': metrics,
                 'warnings': list(dict.fromkeys(warnings)),
             })
@@ -1293,6 +1427,10 @@ def build_comparison_payload(
         for cohort_entries in cohorts.values():
             contract = cohort_entries[0]['contract']
             fingerprint = contract.get('fingerprint')
+            provenance_warnings = _add_mixed_toolchain_warnings(
+                result_id,
+                cohort_entries,
+            )
             metric_series: dict[tuple[str, str, str, str], dict[str, Any]] = {}
             for entry in cohort_entries:
                 for metric in entry['metrics']:
@@ -1345,6 +1483,7 @@ def build_comparison_payload(
                 'contract': contract.get('contract'),
                 'contract_unknown': contract.get('contract_unknown', True),
                 'contract_issues': contract.get('issues', []),
+                'provenance_warnings': provenance_warnings,
                 'run_ids': cohort_run_ids,
                 'comparable': comparable,
                 'reason': reason,
@@ -1401,6 +1540,10 @@ def build_comparison_payload(
                     'primary': bool(metric.get('primary')),
                     'subtest': metric.get('subtest'),
                     'fingerprint': selected_group['fingerprint'],
+                    'provenance_warnings': selected_group.get(
+                        'provenance_warnings',
+                        [],
+                    ),
                     'values': values,
                 })
         selected_ids = set(selected_group['run_ids']) if selected_group else set()

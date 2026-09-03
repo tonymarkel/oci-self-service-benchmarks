@@ -34,17 +34,71 @@ class ResultCompletionGuardTests(unittest.IsolatedAsyncioTestCase):
             'updated_at': main.now(),
         }
 
-        with (
-            patch.object(main, 'provision'),
-            patch.object(main, 'run_benchmarks'),
-            patch.object(main, 'make_report') as make_report,
-        ):
-            await main.run_job(job, plan)
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(main, 'RUNS', Path(temporary)),
+                patch.object(main, 'provision'),
+                patch.object(main, 'run_benchmarks'),
+                patch.object(main, 'make_report') as make_report,
+            ):
+                await main.run_job(job, plan)
 
         self.assertEqual(job['status'], 'failed')
         self.assertEqual(main.benchmark_status(job), 'failed')
         self.assertIn('Incomplete result IDs: stream.', job['error'])
         make_report.assert_not_called()
+
+    async def test_failed_only_run_saves_diagnostics_not_partial_results(self):
+        plan = BenchmarkPlan(
+            region='us-ashburn-1',
+            shape='VM.Standard4.Ax.Flex',
+            ssh_private_key='private',
+            ssh_public_key='ssh-ed25519 AAAATEST',
+            storage={'additional_volume': False},
+            benchmarks=[],
+            llm_benchmarks=['llama_bench'],
+            destroy_after_completion=True,
+        )
+        job = {
+            'id': 'failed-llama-run',
+            'plan': plan.model_dump(exclude={
+                'ssh_private_key',
+                'ssh_public_key',
+                'ssh_key_passphrase',
+            }),
+            'status': 'queued',
+            'events': [],
+            'resources': {},
+            'results': [],
+            'created_at': main.now(),
+            'updated_at': main.now(),
+        }
+
+        def fail_llama(active_job, _plan):
+            active_job['results'].append({
+                'id': 'llama_bench',
+                'name': 'llama.cpp',
+                'status': 'failed',
+                'error': 'llama-bench exited with status 132.',
+            })
+            raise RuntimeError('llama.cpp failed')
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(main, 'RUNS', Path(temporary)),
+                patch.object(main, 'provision'),
+                patch.object(main, 'run_benchmarks', side_effect=fail_llama),
+                patch.object(main, 'make_report'),
+                patch.object(main, 'destroy_with_status'),
+            ):
+                await main.run_job(job, plan)
+
+        cleanup = next(
+            item for item in job['events'] if item['stage'] == 'Cleanup'
+        )
+        self.assertEqual(main.benchmark_status(job), 'failed')
+        self.assertIn('saving diagnostics', cleanup['message'])
+        self.assertNotIn('partial results', cleanup['message'])
 
 
 class SavedResultReportingTests(unittest.TestCase):
@@ -144,13 +198,67 @@ class SavedResultReportingTests(unittest.TestCase):
         self.assertEqual(status['benchmark_status'], 'pending')
         self.assertEqual(summary['benchmark_status'], 'pending')
 
+    def test_destroyed_oci_run_with_audit_ids_is_listed_as_not_recoverable(self):
+        plan = {
+            'provider': 'oci',
+            'region': 'us-ashburn-1',
+            'shape': 'VM.Standard.E6.Flex',
+            'benchmarks': ['fio'],
+            'llm_benchmarks': [],
+        }
+        state = {
+            'id': 'e9397026c404',
+            'status': 'destroyed',
+            'benchmark_status': 'complete',
+            'error': None,
+            'created_at': '2026-09-02T17:07:16+00:00',
+            'plan': plan,
+            'events': [],
+            'resources': {
+                'vcn_id': 'ocid1.vcn.example',
+                'volume_id': 'ocid1.volume.example',
+            },
+            'results': [{
+                'id': 'fio',
+                'name': 'fio storage suite',
+                'status': 'completed',
+            }],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            runs = Path(directory)
+            run = runs / state['id']
+            run.mkdir()
+            (run / 'state.json').write_text(json.dumps(state))
+            (run / 'plan.json').write_text(json.dumps(plan))
+            with patch.object(main, 'RUNS', runs):
+                payload = json.loads(main.reports().body)
+
+        self.assertEqual(len(payload['items']), 1)
+        summary = payload['items'][0]
+        self.assertEqual(summary['id'], state['id'])
+        self.assertEqual(summary['status'], 'destroyed')
+        self.assertEqual(summary['benchmark_status'], 'complete')
+        self.assertFalse(summary['recoverable'])
+
     def test_frontend_does_not_present_noncomplete_outcomes_as_success(self):
         root = Path(__file__).resolve().parents[1]
         app_javascript = (root / 'app/static/app.js').read_text()
         history_javascript = (root / 'app/static/history.js').read_text()
 
         self.assertIn(
-            "job.benchmark_status !== 'complete'",
+            "if (!hasCompletedResult) return false;",
+            app_javascript,
+        )
+        self.assertIn(
+            "return job.benchmark_status === 'failed';",
+            app_javascript,
+        )
+        self.assertIn(
+            "? 'Benchmark failed'",
+            app_javascript,
+        )
+        self.assertIn(
+            'The benchmark failed before producing results. Diagnostic details are saved',
             app_javascript,
         )
         self.assertIn(

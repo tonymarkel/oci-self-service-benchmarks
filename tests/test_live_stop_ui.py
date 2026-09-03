@@ -76,7 +76,7 @@ class LiveStopUiTests(unittest.TestCase):
         self.assertIn('This cannot be undone.', JAVASCRIPT)
         self.assertIn('liveStopPending = true;', JAVASCRIPT)
         self.assertIn(
-            "api(`/api/jobs/${jobId}/destroy`, {method: 'POST'})",
+            "api(`/api/jobs/${jobId}/destroy`, { method: 'POST' })",
             JAVASCRIPT,
         )
         self.assertIn(
@@ -120,7 +120,15 @@ class LiveStopUiTests(unittest.TestCase):
         )
 
     def test_reset_copy_explicitly_does_not_stop_a_run(self):
-        self.assertGreaterEqual(INDEX.count('Reset view (does not stop run)'), 2)
+        normalized_index = ' '.join(INDEX.split())
+        self.assertEqual(
+            normalized_index.count('Reset view (does not stop run)'),
+            1,
+        )
+        self.assertIn(
+            'Create a new run while the current run is active.',
+            normalized_index,
+        )
         self.assertIn(
             'Reset view does not stop the run ' +
             "' +\n        'or destroy its infrastructure.",
@@ -128,9 +136,9 @@ class LiveStopUiTests(unittest.TestCase):
         )
 
     def test_changed_assets_are_cache_busted(self):
-        self.assertIn('/static/styles.css?v=15', INDEX)
-        self.assertIn('/static/styles.css?v=15', HISTORY_INDEX)
-        self.assertIn('/static/app.js?v=30', INDEX)
+        self.assertIn('/static/styles.css?v=18', INDEX)
+        self.assertIn('/static/styles.css?v=18', HISTORY_INDEX)
+        self.assertIn('/static/app.js?v=32', INDEX)
 
 
 if __name__ == '__main__':

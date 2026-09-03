@@ -36,6 +36,13 @@ class HistoryComparisonUiTests(unittest.TestCase):
             'benchmarkFilter': 'select',
             'providerFilter': 'select',
             'completedFilter': 'input',
+            'clearHistory': 'button',
+            'historyActionStatus': 'p',
+            'clearHistoryDialog': 'dialog',
+            'clearHistoryDialogTitle': 'h2',
+            'clearHistoryDialogDescription': 'p',
+            'cancelClearHistory': 'button',
+            'confirmClearHistory': 'button',
             'comparisonTray': 'aside',
             'selectionStatus': 'span',
             'compareSelected': 'button',
@@ -58,6 +65,78 @@ class HistoryComparisonUiTests(unittest.TestCase):
         )
         self.assertIn('hidden', parser.elements['comparisonWorkspace'][1])
         self.assertIn('hidden', parser.elements['comparisonTray'][1])
+
+        clear_attrs = parser.elements['clearHistory'][1]
+        self.assertEqual(clear_attrs.get('type'), 'button')
+        self.assertIn('disabled', clear_attrs)
+        self.assertIn('danger-secondary', clear_attrs.get('class', ''))
+        action_status_attrs = parser.elements['historyActionStatus'][1]
+        self.assertEqual(action_status_attrs.get('role'), 'status')
+        self.assertEqual(action_status_attrs.get('aria-live'), 'polite')
+
+        dialog_attrs = parser.elements['clearHistoryDialog'][1]
+        self.assertEqual(
+            dialog_attrs.get('aria-labelledby'),
+            'clearHistoryDialogTitle',
+        )
+        self.assertEqual(
+            dialog_attrs.get('aria-describedby'),
+            'clearHistoryDialogDescription',
+        )
+        cancel_attrs = parser.elements['cancelClearHistory'][1]
+        confirm_attrs = parser.elements['confirmClearHistory'][1]
+        self.assertEqual(cancel_attrs.get('type'), 'button')
+        self.assertIn('autofocus', cancel_attrs)
+        self.assertEqual(confirm_attrs.get('type'), 'button')
+        self.assertIn('Yes, clear saved runs', HISTORY_HTML)
+
+    def test_clear_history_dialog_requires_explicit_confirmation(self):
+        self.assertIn('function openClearHistoryDialog()', HISTORY_JS)
+        self.assertIn('clearHistoryDialog.showModal();', HISTORY_JS)
+        self.assertIn('async function clearSavedRuns()', HISTORY_JS)
+        self.assertNotIn('window.confirm', HISTORY_JS)
+        self.assertIn(
+            'Runs that are active, cannot be safely classified, or may still be needed for cloud cleanup will be preserved.',
+            HISTORY_JS,
+        )
+        self.assertIn('This action does not destroy cloud infrastructure.', HISTORY_JS)
+        self.assertIn('Local deletion cannot be undone.', HISTORY_JS)
+        self.assertIn("method: 'DELETE'", HISTORY_JS)
+        self.assertIn('body: JSON.stringify({confirmed: true})', HISTORY_JS)
+        self.assertIn(
+            "clearHistory?.addEventListener('click', openClearHistoryDialog)",
+            HISTORY_JS,
+        )
+        self.assertNotIn(
+            "clearHistory.addEventListener('click', clearSavedRuns)",
+            HISTORY_JS,
+        )
+        self.assertIn(
+            "cancelClearHistory?.addEventListener('click', () => clearHistoryDialog?.close())",
+            HISTORY_JS,
+        )
+        self.assertIn(
+            "confirmClearHistory?.addEventListener('click', clearSavedRuns)",
+            HISTORY_JS,
+        )
+        self.assertIn('if (!historyActionStatus) return;', HISTORY_JS)
+        self.assertIn('if (!clearHistory) return;', HISTORY_JS)
+        self.assertIn('|| !clearHistoryDialog', HISTORY_JS)
+        self.assertIn('|| !clearHistoryDialog.open', HISTORY_JS)
+        self.assertIn('historyClearPending = true;', HISTORY_JS)
+        self.assertIn("clearHistory.setAttribute('aria-busy', 'true')", HISTORY_JS)
+        self.assertIn('allRuns = [];', HISTORY_JS)
+        self.assertIn('selectedRunIds.clear();', HISTORY_JS)
+        self.assertIn('await loadRuns();', HISTORY_JS)
+        self.assertIn('saved run${count === 1', HISTORY_JS)
+        self.assertIn('Remaining in archive: ${savedRunLabel(allRuns.length)}.', HISTORY_JS)
+        self.assertIn('Unable to clear saved runs:', HISTORY_JS)
+        self.assertIn('.history-toolbar-actions {', STYLES)
+        self.assertIn('.danger-secondary {', STYLES)
+        self.assertIn('.danger-secondary:disabled {', STYLES)
+        self.assertIn('.confirmation-dialog {', STYLES)
+        self.assertIn('.confirmation-dialog::backdrop {', STYLES)
+        self.assertIn('.confirmation-dialog button:focus-visible', STYLES)
 
     def test_selection_is_limited_to_structured_completed_runs_and_eight(self):
         self.assertIn('comparison_result_ids', HISTORY_JS)
@@ -84,6 +163,8 @@ class HistoryComparisonUiTests(unittest.TestCase):
         self.assertIn("caption.textContent = `${chart.result_name}: ${chart.label}.", HISTORY_JS)
         self.assertIn('Performance vs baseline', HISTORY_JS)
         self.assertIn('positive percentages indicate better performance', HISTORY_JS)
+        self.assertIn('chart.provenance_warnings', HISTORY_JS)
+        self.assertIn("provenanceWarnings.join(' ')", HISTORY_JS)
         self.assertIn("action('View', `/?report=", HISTORY_JS)
         self.assertIn('.comparison-bar-track::after', STYLES)
         self.assertIn('.comparison-error-bar', STYLES)
@@ -118,9 +199,9 @@ process.stdout.write(JSON.stringify({
         self.assertIn('@media(max-width:720px)', STYLES)
 
     def test_changed_assets_are_cache_busted_everywhere(self):
-        self.assertIn('/static/history.js?v=10', HISTORY_HTML)
-        self.assertIn('/static/styles.css?v=15', HISTORY_HTML)
-        self.assertIn('/static/styles.css?v=15', INDEX_HTML)
+        self.assertIn('/static/history.js?v=14', HISTORY_HTML)
+        self.assertIn('/static/styles.css?v=18', HISTORY_HTML)
+        self.assertIn('/static/styles.css?v=18', INDEX_HTML)
 
 
 if __name__ == '__main__':

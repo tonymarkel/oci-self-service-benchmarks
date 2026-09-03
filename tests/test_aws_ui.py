@@ -32,6 +32,37 @@ class AwsUiTests(unittest.TestCase):
         self.assertEqual(parser.elements['awsProfile'][1].get('value'), 'default')
         self.assertIn('hidden', parser.elements['awsProfileField'][1])
 
+    def test_shape_datalist_declares_password_manager_autofill_hints(self):
+        parser = ElementIndex()
+        parser.feed(INDEX)
+
+        form = parser.elements['planForm']
+        shape = parser.elements['shape']
+        passphrase = parser.elements['keyPassphrase']
+
+        self.assertEqual(form[0], 'form')
+        self.assertEqual(form[1].get('autocomplete'), 'off')
+        self.assertEqual(form[1].get('data-form-type'), 'other')
+        self.assertEqual(shape[0], 'input')
+        self.assertEqual(shape[1].get('name'), 'benchmark_compute_shape')
+        self.assertEqual(shape[1].get('type'), 'text')
+        self.assertEqual(shape[1].get('list'), 'shapeList')
+        self.assertEqual(shape[1].get('autocomplete'), 'off')
+        self.assertEqual(shape[1].get('aria-describedby'), 'shapeMeta')
+        self.assertEqual(shape[1].get('data-form-type'), 'other')
+        self.assertEqual(shape[1].get('autocapitalize'), 'none')
+        self.assertEqual(shape[1].get('autocorrect'), 'off')
+        self.assertEqual(shape[1].get('spellcheck'), 'false')
+        self.assertEqual(shape[1].get('data-lpignore'), 'true')
+        self.assertEqual(shape[1].get('data-bwignore'), 'true')
+        self.assertIn('data-1p-ignore', shape[1])
+        self.assertIn('required', shape[1])
+        self.assertEqual(passphrase[1].get('autocomplete'), 'off')
+        self.assertEqual(passphrase[1].get('data-form-type'), 'other')
+        self.assertEqual(passphrase[1].get('data-lpignore'), 'true')
+        self.assertEqual(passphrase[1].get('data-bwignore'), 'true')
+        self.assertIn('data-1p-ignore', passphrase[1])
+
     def test_frontend_uses_provider_scoped_aws_discovery_routes(self):
         self.assertIn('/api/providers/aws/bootstrap?profile=', JAVASCRIPT)
         self.assertIn('/api/providers/aws/instance-types', JAVASCRIPT)
@@ -130,6 +161,34 @@ class AwsUiTests(unittest.TestCase):
             JAVASCRIPT,
         )
 
+    def test_shape_datalist_uses_value_only_for_cross_browser_rendering(self):
+        load_shapes_start = JAVASCRIPT.index('async function loadShapes')
+        choices_start = JAVASCRIPT.index(
+            "$('#shapeList').innerHTML",
+            load_shapes_start,
+        )
+        choices_end = JAVASCRIPT.index(
+            "$('#shapeMeta').textContent",
+            choices_start,
+        )
+        choices = JAVASCRIPT[choices_start:choices_end]
+
+        self.assertIn(
+            '`<option value="${escape(item.shape)}"></option>`',
+            choices,
+        )
+        for supplemental_label_part in (
+            'label=',
+            'item.ocpus',
+            'item.memory_gb',
+            'item.architecture',
+            'item.disk_type',
+            'item.network_interface_type',
+            'item.burstable',
+            'item.bare_metal',
+        ):
+            self.assertNotIn(supplemental_label_part, choices)
+
     def test_history_displays_provider_with_legacy_oci_fallback(self):
         self.assertIn("runField(run, 'provider') || 'oci'", HISTORY)
         self.assertIn("addMeta(meta, 'Provider'", HISTORY)
@@ -174,8 +233,8 @@ class AwsUiTests(unittest.TestCase):
         styles = re.findall(r'/static/styles\.css\?v=(\d+)', INDEX)
         scripts = re.findall(r'/static/app\.js\?v=(\d+)', INDEX)
 
-        self.assertEqual(styles, ['15'])
-        self.assertEqual(scripts, ['30'])
+        self.assertEqual(styles, ['18'])
+        self.assertEqual(scripts, ['32'])
 
     def test_hidden_provider_controls_cannot_be_overridden_by_label_layout(self):
         styles = (ROOT / 'app/static/styles.css').read_text()

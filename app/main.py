@@ -1332,6 +1332,14 @@ def history():
     )
 
 
+@app.get('/comparison')
+def comparison_page():
+    return FileResponse(
+        ROOT / 'static' / 'comparison.html',
+        headers={'Cache-Control': 'no-store'},
+    )
+
+
 @app.get('/api/config/ssh-defaults')
 def ssh_defaults(request: Request):
     if not is_loopback_request(request):

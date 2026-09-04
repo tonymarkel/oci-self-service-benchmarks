@@ -65,10 +65,13 @@ class GcpUiTests(unittest.TestCase):
         self.assertIn("$('#gcpProject').value = plan.gcp_project_id || ''", JAVASCRIPT)
         self.assertIn("$('#gcpZone').value = plan.gcp_zone || ''", JAVASCRIPT)
 
-    def test_history_labels_gcp_fields_and_capacity(self):
+    def test_history_labels_gcp_capacity_without_project_or_zone(self):
         self.assertIn("gcp: 'GCP'", HISTORY)
-        self.assertIn("addMeta(meta, 'Project', run.gcp_project_id)", HISTORY)
-        self.assertIn("addMeta(meta, 'Zone', run.gcp_zone)", HISTORY)
+        self.assertNotIn(
+            "addMeta(meta, 'Project', run.gcp_project_id)",
+            HISTORY,
+        )
+        self.assertNotIn("addMeta(meta, 'Zone', run.gcp_zone)", HISTORY)
         self.assertIn("provider === 'gcp' ? 'Machine type' : 'Shape'", HISTORY)
 
     def test_project_and_image_metadata_are_not_treated_as_resources(self):

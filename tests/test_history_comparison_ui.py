@@ -9,6 +9,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 HISTORY_HTML = (ROOT / 'app/static/history.html').read_text()
 HISTORY_JS = (ROOT / 'app/static/history.js').read_text()
+COMPARISON_VIEW_JS = (
+    ROOT / 'app/static/comparison-view.js'
+).read_text()
 INDEX_HTML = (ROOT / 'app/static/index.html').read_text()
 STYLES = (ROOT / 'app/static/styles.css').read_text()
 
@@ -50,6 +53,7 @@ class HistoryComparisonUiTests(unittest.TestCase):
             'comparisonWorkspace': 'section',
             'comparisonResult': 'select',
             'comparisonMetric': 'select',
+            'viewAllMetrics': 'a',
             'comparisonStatus': 'p',
             'comparisonChart': 'div',
             'comparisonTable': 'div',
@@ -65,6 +69,8 @@ class HistoryComparisonUiTests(unittest.TestCase):
         )
         self.assertIn('hidden', parser.elements['comparisonWorkspace'][1])
         self.assertIn('hidden', parser.elements['comparisonTray'][1])
+        self.assertIn('hidden', parser.elements['viewAllMetrics'][1])
+        self.assertIn('View all metrics', HISTORY_HTML)
 
         clear_attrs = parser.elements['clearHistory'][1]
         self.assertEqual(clear_attrs.get('type'), 'button')
@@ -154,18 +160,53 @@ class HistoryComparisonUiTests(unittest.TestCase):
         self.assertIn('/api/comparisons?', HISTORY_JS)
         self.assertIn("{cache: 'no-store'}", HISTORY_JS)
         self.assertIn('window.history.replaceState', HISTORY_JS)
+        self.assertIn(
+            'comparisonData && comparisonResult.value && !comparisonWorkspace.hidden',
+            HISTORY_JS,
+        )
+        self.assertIn('function updateAllMetricsLink()', HISTORY_JS)
+        self.assertIn(
+            'comparisonView.allChartsForResult(comparisonData, resultId)',
+            HISTORY_JS,
+        )
+        self.assertIn(
+            'groups: Array.isArray(data.groups) ? data.groups : []',
+            HISTORY_JS,
+        )
+        self.assertIn('baseline: String(baselineId)', HISTORY_JS)
+        self.assertIn(
+            'viewAllMetrics.href = `/comparison?${params}${anchor}`',
+            HISTORY_JS,
+        )
 
     def test_chart_has_zero_baseline_uncertainty_and_exact_table(self):
-        self.assertIn('const points = [0];', HISTORY_JS)
-        self.assertIn('error_low', HISTORY_JS)
-        self.assertIn('error_high', HISTORY_JS)
-        self.assertIn("table.className = 'comparison-table'", HISTORY_JS)
-        self.assertIn("caption.textContent = `${chart.result_name}: ${chart.label}.", HISTORY_JS)
-        self.assertIn('Performance vs baseline', HISTORY_JS)
+        self.assertIn('const points = [0];', COMPARISON_VIEW_JS)
+        self.assertIn('error_low', COMPARISON_VIEW_JS)
+        self.assertIn('error_high', COMPARISON_VIEW_JS)
+        self.assertIn(
+            "table.className = 'comparison-table'",
+            COMPARISON_VIEW_JS,
+        )
+        self.assertIn(
+            "caption.textContent = `${chart.result_name}: ${chart.label}.",
+            COMPARISON_VIEW_JS,
+        )
+        self.assertIn('Performance vs baseline', COMPARISON_VIEW_JS)
         self.assertIn('positive percentages indicate better performance', HISTORY_JS)
         self.assertIn('chart.provenance_warnings', HISTORY_JS)
         self.assertIn("provenanceWarnings.join(' ')", HISTORY_JS)
-        self.assertIn("action('View', `/?report=", HISTORY_JS)
+        self.assertIn(
+            "reportHref = id => `/?report=",
+            COMPARISON_VIEW_JS,
+        )
+        self.assertIn(
+            'comparisonView.renderComparisonFigure(document, {',
+            HISTORY_JS,
+        )
+        self.assertIn(
+            'comparisonView.renderComparisonTable(document, {',
+            HISTORY_JS,
+        )
         self.assertIn('.comparison-bar-track::after', STYLES)
         self.assertIn('.comparison-error-bar', STYLES)
 
@@ -191,17 +232,24 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(values['domain'], {'min': 0, 'max': 13, 'span': 13})
 
     def test_mismatch_explanations_and_mobile_layout_are_present(self):
-        self.assertIn('function exclusionText(item)', HISTORY_JS)
-        self.assertIn('item?.result_name || item?.result_id', HISTORY_JS)
-        self.assertIn('No matching methodology and workload contract.', HISTORY_JS)
+        self.assertIn('function exclusionText(item)', COMPARISON_VIEW_JS)
+        self.assertIn(
+            'item?.result_name || item?.result_id',
+            COMPARISON_VIEW_JS,
+        )
+        self.assertIn(
+            'No matching methodology and workload contract.',
+            COMPARISON_VIEW_JS,
+        )
         self.assertIn('.comparison-excluded', STYLES)
         self.assertIn('.comparison-bar-row', STYLES)
         self.assertIn('@media(max-width:720px)', STYLES)
 
     def test_changed_assets_are_cache_busted_everywhere(self):
-        self.assertIn('/static/history.js?v=14', HISTORY_HTML)
-        self.assertIn('/static/styles.css?v=18', HISTORY_HTML)
-        self.assertIn('/static/styles.css?v=18', INDEX_HTML)
+        self.assertIn('/static/comparison-view.js?v=1', HISTORY_HTML)
+        self.assertIn('/static/history.js?v=17', HISTORY_HTML)
+        self.assertIn('/static/styles.css?v=19', HISTORY_HTML)
+        self.assertIn('/static/styles.css?v=19', INDEX_HTML)
 
 
 if __name__ == '__main__':

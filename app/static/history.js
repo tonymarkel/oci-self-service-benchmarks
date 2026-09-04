@@ -1,3 +1,6 @@
+const comparisonView = typeof module !== 'undefined' && module.exports
+    ? require('./comparison-view.js')
+    : window.ComparisonView;
 const hasDocument = typeof document !== 'undefined';
 const runList = hasDocument ? document.querySelector('#runList') : null;
 const historySummary = hasDocument ? document.querySelector('#historySummary') : null;
@@ -21,6 +24,7 @@ const comparisonStatus = hasDocument ? document.querySelector('#comparisonStatus
 const comparisonContext = hasDocument ? document.querySelector('#comparisonContext') : null;
 const comparisonResult = hasDocument ? document.querySelector('#comparisonResult') : null;
 const comparisonMetric = hasDocument ? document.querySelector('#comparisonMetric') : null;
+const viewAllMetrics = hasDocument ? document.querySelector('#viewAllMetrics') : null;
 const comparisonChart = hasDocument ? document.querySelector('#comparisonChart') : null;
 const comparisonTable = hasDocument ? document.querySelector('#comparisonTable') : null;
 const comparisonExcluded = hasDocument ? document.querySelector('#comparisonExcluded') : null;
@@ -40,12 +44,6 @@ const providerNames = {
     gcp: 'GCP',
     azure: 'Azure',
 };
-const directionLabels = {
-    higher: 'Higher is better',
-    lower: 'Lower is better',
-    neutral: 'Informational',
-};
-
 let allRuns = [];
 let selectedRunIds = new Set();
 let comparisonData = null;
@@ -117,40 +115,12 @@ function matchesFilters(run, filters) {
     return true;
 }
 
-function isFiniteMetric(value) {
-    return value !== null
-        && value !== undefined
-        && value !== ''
-        && Number.isFinite(Number(value));
-}
-
 function comparisonDomain(values) {
-    const points = [0];
-    values.forEach(item => {
-        for (const candidate of [item?.value, item?.error_low, item?.error_high]) {
-            if (isFiniteMetric(candidate)) points.push(Number(candidate));
-        }
-    });
-    let min = Math.min(...points);
-    let max = Math.max(...points);
-    if (min === max) {
-        if (min === 0) max = 1;
-        else if (min > 0) min = 0;
-        else max = 0;
-    }
-    return {min, max, span: max - min};
+    return comparisonView.comparisonDomain(values);
 }
 
 function percentFromBaseline(value, baseline, direction = 'higher') {
-    const numeric = Number(value);
-    const base = Number(baseline);
-    if (!Number.isFinite(numeric) || !Number.isFinite(base)) return null;
-    if (direction === 'lower') {
-        if (numeric === 0) return null;
-        return ((base / numeric) - 1) * 100;
-    }
-    if (base === 0) return null;
-    return ((numeric - base) / Math.abs(base)) * 100;
+    return comparisonView.percentFromBaseline(value, baseline, direction);
 }
 
 function addMeta(list, label, value) {
@@ -302,9 +272,10 @@ function syncUrl() {
         else params.delete(name);
     });
     const chart = activeChart();
-    if (comparisonData && chart && !comparisonWorkspace.hidden) {
-        params.set('result', String(chart.result_id));
-        params.set('metric', chartKey(chart));
+    if (comparisonData && comparisonResult.value && !comparisonWorkspace.hidden) {
+        params.set('result', comparisonResult.value);
+        if (chart) params.set('metric', chartKey(chart));
+        else params.delete('metric');
     } else {
         params.delete('result');
         params.delete('metric');
@@ -318,10 +289,6 @@ function comparisonRun(id) {
     return comparisonRuns.find(run => runId(run) === id)
         || allRuns.find(run => runId(run) === id)
         || {id};
-}
-
-function runDisplayName(run) {
-    return `${providerNames[providerFor(run)] || providerFor(run).toUpperCase()} ${valueOrDash(runField(run, 'shape'))}`;
 }
 
 function renderRun(run) {
@@ -395,13 +362,7 @@ function renderRun(run) {
     const meta = document.createElement('dl');
     meta.className = 'run-meta';
     addMeta(meta, 'Provider', providerNames[provider] || provider.toUpperCase());
-    if (provider === 'gcp') addMeta(meta, 'Project', run.gcp_project_id);
-    if (provider === 'azure') {
-        addMeta(meta, 'Subscription', runField(run, 'azure_subscription_id'));
-    }
     addMeta(meta, 'Region', run.region);
-    if (provider === 'gcp') addMeta(meta, 'Zone', run.gcp_zone);
-    if (provider === 'azure') addMeta(meta, 'Zone', runField(run, 'azure_zone'));
     const shapeLabel = provider === 'aws'
         ? 'Instance type'
         : (provider === 'azure'
@@ -454,6 +415,10 @@ function clearComparisonView() {
     comparisonExcluded.hidden = true;
     comparisonContext.textContent = '';
     comparisonStatus.textContent = '';
+    if (viewAllMetrics) {
+        viewAllMetrics.hidden = true;
+        viewAllMetrics.removeAttribute('href');
+    }
 }
 
 function refreshRunSelectionControls() {
@@ -513,35 +478,58 @@ function populateFilterOptions() {
 }
 
 function chartKey(chart) {
-    const base = String(chart?.id || `${chart?.result_id || ''}:${chart?.metric_id || ''}`);
-    return chart?.subtest ? `${base}:${chart.subtest}` : base;
+    return comparisonView.chartKey(chart);
 }
 
 function resultCharts() {
-    if (!comparisonData || !Array.isArray(comparisonData.charts)) return [];
-    return comparisonData.charts.filter(chart => String(chart.result_id) === comparisonResult.value);
+    return comparisonView.chartsForResult(comparisonData, comparisonResult.value);
 }
 
 function activeChart() {
     return resultCharts().find(chart => chartKey(chart) === comparisonMetric.value) || null;
 }
 
+function updateAllMetricsLink() {
+    if (!viewAllMetrics) return;
+    const resultId = comparisonResult.value;
+    const runIds = [...selectedRunIds];
+    const allMetrics = comparisonView.allChartsForResult(comparisonData, resultId);
+    const available = resultId && allMetrics.length > 0 && runIds.length >= 2;
+    viewAllMetrics.hidden = !available;
+    if (!available) {
+        viewAllMetrics.removeAttribute('href');
+        return;
+    }
+    const chart = activeChart();
+    const baselineId = (chart ? orderedChartValues(chart)[0]?.run_id : null) || runIds[0];
+    const params = new URLSearchParams({
+        compare: runIds.join(','),
+        result: resultId,
+        baseline: String(baselineId),
+    });
+    const anchor = chart ? `#${comparisonView.metricAnchorId(chart)}` : '';
+    const returnParams = new URLSearchParams(window.location.search);
+    returnParams.set('compare', runIds.join(','));
+    returnParams.set('result', resultId);
+    if (chart) returnParams.set('metric', chartKey(chart));
+    const returnQuery = returnParams.toString();
+    params.set('return', `/history${returnQuery ? `?${returnQuery}` : ''}`);
+    viewAllMetrics.href = `/comparison?${params}${anchor}`;
+}
+
 function populateComparisonSelectors(preferredResult = '', preferredMetric = '') {
     const charts = Array.isArray(comparisonData?.charts) ? comparisonData.charts : [];
-    const results = new Map();
-    charts.forEach(chart => {
-        const id = String(chart.result_id);
-        if (!results.has(id)) results.set(id, chart.result_name || id);
-    });
+    const results = comparisonView.resultOptions(comparisonData);
     comparisonResult.replaceChildren();
-    for (const [id, label] of results) comparisonResult.add(new Option(label, id));
+    results.forEach(result => comparisonResult.add(new Option(result.label, result.id)));
     const primary = charts.find(chart => chart.primary) || charts[0];
-    const requestedResult = [...results.keys()].includes(String(preferredResult)) ? String(preferredResult) : String(primary?.result_id || '');
+    const requestedResult = results.some(result => result.id === String(preferredResult))
+        ? String(preferredResult)
+        : String(primary?.result_id || results[0]?.id || '');
     comparisonResult.value = requestedResult;
     populateMetricOptions(preferredMetric || String(primary?.metric_id || ''));
-    const disabled = charts.length === 0;
-    comparisonResult.disabled = disabled;
-    comparisonMetric.disabled = disabled;
+    comparisonResult.disabled = results.length === 0;
+    comparisonMetric.disabled = resultCharts().length === 0;
 }
 
 function populateMetricOptions(preferredMetric = '') {
@@ -555,90 +543,22 @@ function populateMetricOptions(preferredMetric = '') {
     const preferred = charts.find(chart => chartKey(chart) === String(preferredMetric) || String(chart.metric_id) === String(preferredMetric));
     const selected = preferred || charts.find(chart => chart.primary) || charts[0];
     if (selected) comparisonMetric.value = chartKey(selected);
+    comparisonMetric.disabled = charts.length === 0;
 }
 
 function orderedChartValues(chart) {
-    const positions = new Map([...selectedRunIds].map((id, index) => [id, index]));
-    return (Array.isArray(chart?.values) ? chart.values : [])
-        .filter(item => isFiniteMetric(item?.value))
-        .slice()
-        .sort((a, b) => (
-            (positions.get(String(a.run_id)) ?? Number.MAX_SAFE_INTEGER)
-            - (positions.get(String(b.run_id)) ?? Number.MAX_SAFE_INTEGER)
-        ));
-}
-
-function exactMetric(value, unit) {
-    if (value === null || value === undefined || value === '') return '—';
-    return `${String(value)}${unit ? ` ${unit}` : ''}`;
-}
-
-function deltaText(value, baseline, direction) {
-    const delta = percentFromBaseline(value, baseline, direction);
-    if (delta === null) return Number(value) === Number(baseline) ? 'Baseline' : '—';
-    if (Math.abs(delta) < 0.05) return '0.0%';
-    return `${delta > 0 ? '+' : ''}${delta.toFixed(1)}%`;
-}
-
-function environmentText(run) {
-    const provider = providerFor(run);
-    const cpu = runField(run, 'ocpus');
-    const cpuLabel = provider === 'oci' ? 'OCPUs' : 'vCPUs';
-    const memory = runField(run, 'memory_gb');
-    return [`${valueOrDash(cpu)} ${cpuLabel}`, `${valueOrDash(memory)} GB memory`, architectureFor(run)].join(' · ');
-}
-
-function warningText(warnings) {
-    if (Array.isArray(warnings)) return warnings.filter(Boolean).join('; ') || '—';
-    return valueOrDash(warnings);
-}
-
-function addCell(row, text, header = false, scope = 'row') {
-    const cell = document.createElement(header ? 'th' : 'td');
-    if (header) cell.scope = scope;
-    cell.textContent = text;
-    row.append(cell);
-    return cell;
+    return comparisonView.orderedChartValues(chart, [...selectedRunIds]);
 }
 
 function renderComparisonTable(chart, values, baseline) {
     comparisonTable.replaceChildren();
     comparisonTable.hidden = false;
-    const table = document.createElement('table');
-    table.className = 'comparison-table';
-    const caption = document.createElement('caption');
-    caption.textContent = `${chart.result_name}: ${chart.label}. Exact measurements and comparison metadata.`;
-    const head = document.createElement('thead');
-    const headRow = document.createElement('tr');
-    const deltaHeading = chart.direction === 'neutral'
-        ? 'Value vs baseline'
-        : 'Performance vs baseline';
-    ['Run', 'Environment', 'Value', deltaHeading, 'Uncertainty', 'Warnings', 'Report'].forEach(label => addCell(headRow, label, true, 'col'));
-    head.append(headRow);
-    const body = document.createElement('tbody');
-    values.forEach(item => {
-        const id = String(item.run_id);
-        const run = comparisonRun(id);
-        const row = document.createElement('tr');
-        const runCell = addCell(row, `${runDisplayName(run)} · ${id}`, true);
-        const runMeta = document.createElement('small');
-        runMeta.textContent = valueOrDash(runField(run, 'region'));
-        runCell.append(document.createElement('br'), runMeta);
-        addCell(row, environmentText(run));
-        addCell(row, exactMetric(item.value, chart.unit));
-        addCell(row, id === String(baseline.run_id) ? 'Baseline' : deltaText(item.value, baseline.value, chart.direction));
-        const uncertainty = item.error_low !== undefined || item.error_high !== undefined
-            ? `${exactMetric(item.error_low, chart.unit)} – ${exactMetric(item.error_high, chart.unit)}`
-            : '—';
-        addCell(row, uncertainty);
-        addCell(row, warningText(item.warnings));
-        const reportCell = document.createElement('td');
-        reportCell.append(action('View', `/?report=${encodeURIComponent(id)}`, true));
-        row.append(reportCell);
-        body.append(row);
-    });
-    table.append(caption, head, body);
-    comparisonTable.append(table);
+    comparisonTable.append(comparisonView.renderComparisonTable(document, {
+        chart,
+        values,
+        baseline,
+        resolveRun: comparisonRun,
+    }));
 }
 
 function renderComparisonChart() {
@@ -652,6 +572,7 @@ function renderComparisonChart() {
         empty.textContent = 'No safely comparable metrics are available for this selection.';
         comparisonChart.append(empty);
         comparisonContext.textContent = '';
+        updateAllMetricsLink();
         syncUrl();
         return;
     }
@@ -665,7 +586,7 @@ function renderComparisonChart() {
         return;
     }
     const baseline = values[0];
-    const direction = directionLabels[chart.direction] || valueOrDash(chart.direction);
+    const direction = comparisonView.directionLabel(chart.direction);
     const subtest = chart.subtest ? ` · ${chart.subtest}` : '';
     const deltaMeaning = chart.direction === 'neutral'
         ? 'positive percentages indicate a larger value, not necessarily better performance.'
@@ -677,88 +598,19 @@ function renderComparisonChart() {
         ? ` ${provenanceWarnings.join(' ')}`
         : '';
     comparisonContext.textContent = `${chart.result_name} · ${chart.label}${subtest} · ${direction}. Run ${baseline.run_id} is the baseline; ${deltaMeaning}${provenanceNote}`;
-    const domain = comparisonDomain(values);
-    const position = value => ((Number(value) - domain.min) / domain.span) * 100;
-    const zero = position(0);
-    const figure = document.createElement('figure');
-    figure.className = 'comparison-figure';
-    const caption = document.createElement('figcaption');
-    caption.className = 'sr-only';
-    caption.textContent = `Horizontal bar chart for ${chart.label}, with a zero baseline. Exact values are in the table that follows.`;
-    const plot = document.createElement('div');
-    plot.className = 'comparison-plot';
-    plot.setAttribute('aria-hidden', 'true');
-    values.forEach(item => {
-        const id = String(item.run_id);
-        const run = comparisonRun(id);
-        const row = document.createElement('div');
-        row.className = 'comparison-bar-row';
-        const label = document.createElement('div');
-        label.className = 'comparison-bar-label';
-        const labelName = document.createElement('strong');
-        labelName.textContent = runDisplayName(run);
-        const labelMeta = document.createElement('small');
-        labelMeta.textContent = `${id} · ${environmentText(run)}`;
-        label.append(labelName, labelMeta);
-        const measure = document.createElement('div');
-        measure.className = 'comparison-bar-measure';
-        const track = document.createElement('div');
-        track.className = 'comparison-bar-track';
-        track.style.setProperty('--zero-position', `${zero}%`);
-        const valuePosition = position(item.value);
-        const bar = document.createElement('span');
-        bar.className = 'comparison-bar';
-        bar.style.left = `${Math.min(zero, valuePosition)}%`;
-        bar.style.width = `${Math.abs(valuePosition - zero)}%`;
-        if (Number(item.value) < 0) bar.classList.add('comparison-bar-negative');
-        track.append(bar);
-        const low = Number(item.error_low);
-        const high = Number(item.error_high);
-        if (isFiniteMetric(item.error_low) && isFiniteMetric(item.error_high)) {
-            const error = document.createElement('span');
-            error.className = 'comparison-error-bar';
-            error.style.left = `${Math.min(position(low), position(high))}%`;
-            error.style.width = `${Math.abs(position(high) - position(low))}%`;
-            track.append(error);
-        }
-        const exact = document.createElement('div');
-        exact.className = 'comparison-bar-value';
-        exact.textContent = `${exactMetric(item.value, chart.unit)} · ${id === String(baseline.run_id) ? 'baseline' : deltaText(item.value, baseline.value, chart.direction)}`;
-        measure.append(track, exact);
-        row.append(label, measure);
-        plot.append(row);
-    });
-    figure.append(caption, plot);
-    comparisonChart.append(figure);
+    comparisonChart.append(comparisonView.renderComparisonFigure(document, {
+        chart,
+        values,
+        baseline,
+        resolveRun: comparisonRun,
+    }));
     renderComparisonTable(chart, values, baseline);
+    updateAllMetricsLink();
     syncUrl();
 }
 
-function mismatchText(mismatch) {
-    if (typeof mismatch === 'string') return mismatch;
-    if (!mismatch || typeof mismatch !== 'object') return String(mismatch || 'Not comparable');
-    const field = mismatch.field || mismatch.name || mismatch.key || 'Setting';
-    if ('expected' in mismatch || 'actual' in mismatch) {
-        return `${field}: expected ${valueOrDash(mismatch.expected)}, got ${valueOrDash(mismatch.actual)}`;
-    }
-    return mismatch.reason || mismatch.message || JSON.stringify(mismatch);
-}
-
 function exclusionText(item) {
-    if (typeof item === 'string') return item;
-    const id = item?.run_id || item?.id;
-    const resultName = item?.result_name || item?.result_id;
-    const subject = [id ? `Run ${id}` : '', resultName].filter(Boolean).join(' · ');
-    const prefix = subject ? `${subject}: ` : '';
-    const reasons = item?.reasons || item?.mismatches;
-    if (Array.isArray(reasons) && reasons.length) return `${prefix}${reasons.map(mismatchText).join('; ')}`;
-    if (reasons && typeof reasons === 'object') {
-        const details = Object.entries(reasons).map(([field, detail]) => mismatchText(
-            detail && typeof detail === 'object' ? {field, ...detail} : `${field}: ${detail}`,
-        ));
-        return `${prefix}${details.join('; ')}`;
-    }
-    return `${prefix}${item?.reason || item?.message || 'No matching methodology and workload contract.'}`;
+    return comparisonView.exclusionText(item);
 }
 
 function renderExcludedResults() {
@@ -798,6 +650,7 @@ async function loadComparison({focus = true, resultId = '', metricId = ''} = {})
             runs: Array.isArray(data.runs) ? data.runs : [],
             charts: Array.isArray(data.charts) ? data.charts : [],
             excluded: Array.isArray(data.excluded) ? data.excluded : [],
+            groups: Array.isArray(data.groups) ? data.groups : [],
         };
         populateComparisonSelectors(resultId, metricId);
         renderExcludedResults();

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>All Comparison Metrics · Cloud Benchmark Lab</title>
+    <link rel="stylesheet" href="/static/styles.css?v=19">
+</head>
+
+<body>
+    <header>
+        <div class="mark" aria-hidden="true">
+            <img src="/static/images/VSM-Page-2.svg" width="31" height="55" alt="">
+        </div>
+        <div><strong>Compute Benchmark Lab</strong><small>Traditional and LLM Benchmarks</small></div>
+        <span class="local"></span>
+        <a class="header-link" href="/history">Previous runs</a>
+        <a class="header-link" href="/">New run</a>
+    </header>
+
+    <main class="comparison-page-main">
+        <a class="comparison-page-back" href="/history">← Back to previous runs</a>
+
+        <section class="comparison-page-hero" aria-labelledby="comparisonPageHeading">
+            <div class="comparison-page-heading-row">
+                <div class="comparison-page-intro">
+                    <p class="eyebrow">LIKE-FOR-LIKE COMPARISON</p>
+                    <h1 id="comparisonPageHeading" tabindex="-1">All benchmark metrics.</h1>
+                    <p id="comparisonPageContext" class="comparison-page-context">Preparing the selected benchmark
+                        runs…</p>
+                </div>
+                <div class="comparison-page-controls">
+                    <label>
+                        Result
+                        <select id="comparisonPageResult" disabled>
+                            <option>Loading results…</option>
+                        </select>
+                    </label>
+                    <label>
+                        Baseline
+                        <select id="comparisonBaseline" disabled>
+                            <option>Loading runs…</option>
+                        </select>
+                    </label>
+                </div>
+            </div>
+
+            <p id="comparisonPageStatus" class="comparison-page-status" role="status" aria-live="polite">
+                Loading comparison data…
+            </p>
+
+            <section id="comparisonPageWarnings" class="comparison-page-warnings"
+                aria-labelledby="comparisonPageWarningsHeading" hidden>
+                <h2 id="comparisonPageWarningsHeading">Comparison notes</h2>
+                <ul id="comparisonPageWarningsList"></ul>
+            </section>
+
+            <section id="comparisonRunLegend" class="comparison-run-legend" aria-label="Compared runs" hidden>
+            </section>
+
+            <nav id="comparisonMetricIndex" class="comparison-metric-index" aria-label="Metric index" hidden>
+            </nav>
+        </section>
+
+        <section id="comparisonCharts" class="comparison-page-charts" aria-label="Benchmark metric charts"></section>
+
+        <section id="comparisonExcluded" class="comparison-excluded comparison-page-excluded"
+            aria-labelledby="comparisonExcludedHeading" hidden>
+            <h2 id="comparisonExcludedHeading">Why some results were excluded</h2>
+            <ul id="comparisonExcludedList"></ul>
+        </section>
+    </main>
+
+    <script src="/static/comparison-view.js?v=1"></script>
+    <script src="/static/comparison-page.js?v=1"></script>
+</body>
+
+</html>

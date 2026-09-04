@@ -25,6 +25,8 @@ from typing import Any
 
 from .catalog import PHORONIX_PROFILES
 from .llama_cpp import (
+    AARCH64_NATIVE_CMAKE_OPTIONS,
+    AARCH64_NATIVE_CPU_PROFILE,
     CPU_BUILD_PROFILE_NATIVE_PAIRS,
     X86_64_PORTABLE_CMAKE_OPTIONS,
     X86_64_PORTABLE_CPU_PROFILE,
@@ -47,7 +49,9 @@ RESULTS_SCHEMA = 'cloud-self-service-benchmarks/results'
 RESULTS_SCHEMA_VERSION = 1
 COMPARISON_SCHEMA = 'cloud-self-service-benchmarks/comparison'
 COMPARISON_SCHEMA_VERSION = 1
-WORKLOAD_CONTRACT_VERSION = 2
+WORKLOAD_CONTRACT_VERSION = 3
+
+LLAMA_ARCHITECTURE_PROFILE_METHOD = 'validated-cloud-cpu-profile-v1'
 
 DIRECTION_HIGHER = 'higher_is_better'
 DIRECTION_LOWER = 'lower_is_better'
@@ -762,16 +766,72 @@ def workload_fingerprint(
                 'llama.cpp CPU build profile and native-optimization '
                 'metadata are inconsistent.'
             )
-        portable_cpu_options = ' '.join(X86_64_PORTABLE_CMAKE_OPTIONS)
+        raw_architecture = str(
+            safe_metadata.get('architecture') or ''
+        ).strip().lower()
+        architecture = {
+            'amd64': 'x86_64',
+            'x64': 'x86_64',
+            'arm64': 'aarch64',
+        }.get(raw_architecture, raw_architecture)
         if (
-            cpu_build_profile == X86_64_PORTABLE_CPU_PROFILE
-            and safe_metadata.get('llama_cpu_cmake_options')
-            != portable_cpu_options
+            not architecture
+            and cpu_build_profile == X86_64_PORTABLE_CPU_PROFILE
+        ):
+            # The versioned profile is unambiguously x86_64 and was recorded
+            # before architecture became part of build provenance in a small
+            # number of otherwise current artifacts.
+            architecture = 'x86_64'
+        if architecture and architecture not in {'x86_64', 'aarch64'}:
+            issues.append(
+                'llama.cpp architecture metadata is unsupported.'
+            )
+        raw_cpu_cmake_options = safe_metadata.get(
+            'llama_cpu_cmake_options'
+        )
+        cpu_cmake_options = (
+            raw_cpu_cmake_options.strip()
+            if isinstance(raw_cpu_cmake_options, str)
+            and raw_cpu_cmake_options.strip()
+            else None
+        )
+        expected_cpu_cmake_options = None
+        if (
+            architecture == 'x86_64'
+            and cpu_build_profile == X86_64_PORTABLE_CPU_PROFILE
+            and native_cpu_optimization is False
+        ):
+            expected_cpu_cmake_options = ' '.join(
+                X86_64_PORTABLE_CMAKE_OPTIONS
+            )
+        elif (
+            architecture == 'aarch64'
+            and cpu_build_profile == AARCH64_NATIVE_CPU_PROFILE
+            and native_cpu_optimization is True
+        ):
+            expected_cpu_cmake_options = ' '.join(
+                AARCH64_NATIVE_CMAKE_OPTIONS
+            )
+        elif architecture == 'aarch64' or (
+            architecture == 'x86_64'
+            and cpu_build_profile != AARCH64_NATIVE_CPU_PROFILE
         ):
             issues.append(
-                'llama.cpp portable CPU build options are missing or '
-                'inconsistent.'
+                'llama.cpp CPU build profile is not valid for the recorded '
+                'architecture.'
             )
+        if (
+            expected_cpu_cmake_options is not None
+            and cpu_cmake_options != expected_cpu_cmake_options
+        ):
+            issues.append(
+                'llama.cpp architecture-specific CPU build options are '
+                'missing or inconsistent.'
+            )
+        architecture_profile_method = (
+            expected_cpu_cmake_options is not None
+            and cpu_cmake_options == expected_cpu_cmake_options
+        )
         settings = {
             'tool': 'llama-bench',
             'llama_cpp_revision': safe_metadata.get('llama_cpp_revision'),
@@ -782,21 +842,28 @@ def workload_fingerprint(
             'compiler': 'GCC',
             'cxx_compiler': 'G++',
             'assembler': 'GNU as',
-            'cpu_build_profile': cpu_build_profile,
-            'native_cpu_optimization': native_cpu_optimization,
             'prompt_token_counts': [512, 2048],
             'generation_token_counts': [128, 512],
             'repetitions': 5,
             'threads_policy': 'all_observed_guest_logical_cpus',
             'gpu_layers': 0,
         }
-        if cpu_build_profile == X86_64_PORTABLE_CPU_PROFILE:
-            settings['cpu_cmake_options'] = portable_cpu_options
+        if architecture_profile_method:
+            # The supported x86_64 and Arm64 builds deliberately use
+            # different compiler flags, but they implement the same CPU-only
+            # benchmark method for their respective architectures.  The
+            # concrete build remains visible as non-hashed provenance.
+            settings['cpu_build_method'] = LLAMA_ARCHITECTURE_PROFILE_METHOD
         else:
-            # Native builds can generate a different instruction mix for both
-            # the host CPU and the compiler version, so their exact toolchain
-            # remains part of the comparable workload contract.
+            # Preserve conservative compatibility for historical builds that
+            # predate the validated architecture profiles.  Their exact
+            # architecture, build profile, options, and toolchain remain part
+            # of the workload contract and cannot join the current cohort.
             settings.update({
+                'architecture': architecture or None,
+                'cpu_build_profile': cpu_build_profile,
+                'native_cpu_optimization': native_cpu_optimization,
+                'cpu_cmake_options': cpu_cmake_options,
                 'compiler_version': safe_metadata.get(
                     'llama_compiler_version'
                 ),
@@ -807,12 +874,17 @@ def workload_fingerprint(
                     'llama_assembler_version'
                 ),
             })
-        # Compiler and binutils versions remain required, auditable build
-        # provenance, but they are not workload parameters.  The named CPU
-        # profile fixes the executable ISA contract across providers while
-        # allowing each supported guest image to use its maintained GCC
-        # stack.  Comparison payloads call out mixed toolchains explicitly.
+        # Compiler, binutils, and architecture-specific build details remain
+        # required, auditable provenance rather than workload parameters for
+        # the validated cloud CPU method.  Comparison payloads call out mixed
+        # architectures and toolchains explicitly.
         provenance = {
+            'cpu_build': {
+                'architecture': architecture or None,
+                'profile': cpu_build_profile,
+                'native_cpu_optimization': native_cpu_optimization,
+                'cmake_options': cpu_cmake_options,
+            },
             'build_toolchain': {
                 'compiler': 'GCC',
                 'compiler_version': safe_metadata.get(
@@ -1294,15 +1366,25 @@ def _llama_toolchain_description(provenance: object) -> str:
     return f'{compiler_label}; {assembler} {assembler_version}'
 
 
-def _add_mixed_toolchain_warnings(
+def _llama_cpu_build_description(provenance: object) -> str:
+    """Return a concise architecture/profile provenance label."""
+
+    record = _mapping(provenance)
+    cpu_build = _mapping(record.get('cpu_build'))
+    architecture = str(cpu_build.get('architecture') or 'unknown')
+    profile = str(cpu_build.get('profile') or 'unknown')
+    return f'{architecture} · {profile}'
+
+
+def _add_llama_provenance_warnings(
     result_id: str,
     cohort_entries: Sequence[dict[str, Any]],
 ) -> list[str]:
-    """Keep comparable llama methods transparent when build tools differ."""
+    """Expose architecture and toolchain differences without hiding results."""
 
     if result_id != 'llama_bench' or len(cohort_entries) < 2:
         return []
-    signatures = {
+    toolchain_signatures = {
         json.dumps(
             _mapping(entry.get('provenance')).get('build_toolchain', {}),
             sort_keys=True,
@@ -1311,17 +1393,47 @@ def _add_mixed_toolchain_warnings(
         )
         for entry in cohort_entries
     }
-    if len(signatures) < 2:
+    cpu_build_signatures = {
+        json.dumps(
+            _mapping(entry.get('provenance')).get('cpu_build', {}),
+            sort_keys=True,
+            separators=(',', ':'),
+            ensure_ascii=True,
+        )
+        for entry in cohort_entries
+    }
+    mixed_toolchains = len(toolchain_signatures) > 1
+    mixed_cpu_builds = len(cpu_build_signatures) > 1
+    if not mixed_toolchains and not mixed_cpu_builds:
         return []
     for entry in cohort_entries:
-        description = _llama_toolchain_description(entry.get('provenance'))
-        warning = f'Build toolchain: {description}.'
-        entry.setdefault('warnings', []).append(warning)
-    return [
-        'Build toolchains differ across these runs. The pinned source, model, '
-        'benchmark arguments, and portable AVX2 profile match, but compiler '
-        'code generation may affect performance.'
-    ]
+        details = []
+        if mixed_cpu_builds:
+            details.append(
+                'CPU build: '
+                + _llama_cpu_build_description(entry.get('provenance'))
+            )
+        if mixed_toolchains:
+            details.append(
+                'Build toolchain: '
+                + _llama_toolchain_description(entry.get('provenance'))
+            )
+        entry.setdefault('warnings', []).append('; '.join(details) + '.')
+    warnings = []
+    if mixed_cpu_builds:
+        warnings.append(
+            'These runs use the same pinned workload with validated '
+            'architecture-appropriate CPU builds. The x86_64 portable AVX2 '
+            'and Arm64 native binaries are architecture-specific, so treat '
+            'this as a platform-level comparison rather than a bit-identical '
+            'binary comparison.'
+        )
+    if mixed_toolchains:
+        warnings.append(
+            'Build toolchains differ across these runs; compiler code '
+            'generation may affect performance.'
+        )
+    return warnings
 
 
 def build_comparison_payload(
@@ -1427,7 +1539,7 @@ def build_comparison_payload(
         for cohort_entries in cohorts.values():
             contract = cohort_entries[0]['contract']
             fingerprint = contract.get('fingerprint')
-            provenance_warnings = _add_mixed_toolchain_warnings(
+            provenance_warnings = _add_llama_provenance_warnings(
                 result_id,
                 cohort_entries,
             )
@@ -1881,6 +1993,7 @@ __all__ = [
     'COMPARISON_SCHEMA_VERSION',
     'DIRECTION_HIGHER',
     'DIRECTION_LOWER',
+    'LLAMA_ARCHITECTURE_PROFILE_METHOD',
     'METRIC_REGISTRY',
     'MetricSpec',
     'RESULTS_ARTIFACT_NAME',

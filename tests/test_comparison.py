@@ -294,8 +294,9 @@ class WorkloadContractTests(unittest.TestCase):
             x86['contract']['settings']['architecture'], 'x86_64'
         )
 
-    def test_llama_portable_toolchain_is_required_provenance(self):
+    def test_llama_architecture_profiles_are_required_provenance(self):
         metadata = {
+            'architecture': 'x86_64',
             'llama_cpp_revision': 'de699957b92f490efebad149665b0dccf127eaff',
             'model_revision': 'c1d7cb837a660d93ba28f936efb148591bfba3e9',
             'model_sha256': (
@@ -336,53 +337,68 @@ class WorkloadContractTests(unittest.TestCase):
             changed['provenance'],
         )
         self.assertTrue(missing['contract_unknown'])
-        native = comparison.workload_fingerprint(
+        arm = comparison.workload_fingerprint(
             'llama_bench',
             plan,
             {
                 **metadata,
-                'llama_cpu_build_profile': 'native',
+                'architecture': 'arm64',
+                'llama_cpu_build_profile': (
+                    comparison.AARCH64_NATIVE_CPU_PROFILE
+                ),
                 'llama_native_optimization': True,
+                'llama_cpu_cmake_options': ' '.join(
+                    comparison.AARCH64_NATIVE_CMAKE_OPTIONS
+                ),
             },
         )
-        changed_native_toolchain = comparison.workload_fingerprint(
-            'llama_bench',
-            plan,
-            {
-                **metadata,
-                'llama_cpu_build_profile': 'native',
-                'llama_native_optimization': True,
-                'llama_assembler_version': '2.35.2',
-            },
-        )
-        self.assertNotEqual(
-            baseline['fingerprint'],
-            native['fingerprint'],
-        )
-        self.assertNotEqual(
-            native['fingerprint'],
-            changed_native_toolchain['fingerprint'],
-        )
+        self.assertEqual(baseline['fingerprint'], arm['fingerprint'])
         self.assertEqual(
-            baseline['contract']['settings']['cpu_build_profile'],
-            'x86_64-avx2-portable-v1',
+            arm['provenance']['cpu_build']['architecture'],
+            'aarch64',
         )
-        self.assertFalse(
-            baseline['contract']['settings']['native_cpu_optimization']
-        )
+
         legacy_native_metadata = {
             **metadata,
+            'llama_cpu_build_profile': 'native',
             'llama_native_optimization': True,
+            'llama_cpu_cmake_options': '-DGGML_NATIVE=ON',
         }
-        legacy_native_metadata.pop('llama_cpu_build_profile')
         legacy_native = comparison.workload_fingerprint(
             'llama_bench',
             plan,
             legacy_native_metadata,
         )
-        self.assertFalse(legacy_native['contract_unknown'])
+        changed_legacy_toolchain = comparison.workload_fingerprint(
+            'llama_bench',
+            plan,
+            {
+                **legacy_native_metadata,
+                'llama_assembler_version': '2.35.2',
+            },
+        )
+        self.assertNotEqual(
+            baseline['fingerprint'],
+            legacy_native['fingerprint'],
+        )
+        self.assertNotEqual(
+            legacy_native['fingerprint'],
+            changed_legacy_toolchain['fingerprint'],
+        )
         self.assertEqual(
-            legacy_native['contract']['settings']['cpu_build_profile'],
+            baseline['contract']['settings']['cpu_build_method'],
+            comparison.LLAMA_ARCHITECTURE_PROFILE_METHOD,
+        )
+        historical_native_metadata = dict(legacy_native_metadata)
+        historical_native_metadata.pop('llama_cpu_build_profile')
+        historical_native = comparison.workload_fingerprint(
+            'llama_bench',
+            plan,
+            historical_native_metadata,
+        )
+        self.assertFalse(historical_native['contract_unknown'])
+        self.assertEqual(
+            historical_native['contract']['settings']['cpu_build_profile'],
             'native',
         )
         for inconsistent in (
@@ -400,6 +416,13 @@ class WorkloadContractTests(unittest.TestCase):
                 **metadata,
                 'llama_cpu_build_profile': 'future-unknown-profile',
             },
+            {
+                **metadata,
+                'architecture': 'aarch64',
+                'llama_cpu_build_profile': (
+                    comparison.X86_64_PORTABLE_CPU_PROFILE
+                ),
+            },
         ):
             with self.subTest(inconsistent=inconsistent):
                 rejected = comparison.workload_fingerprint(
@@ -408,10 +431,10 @@ class WorkloadContractTests(unittest.TestCase):
                     inconsistent,
                 )
                 self.assertTrue(rejected['contract_unknown'])
-                self.assertIn(
-                    'metadata are inconsistent',
-                    rejected['issues'][0],
-                )
+                self.assertTrue(any(
+                    'inconsistent' in issue or 'not valid' in issue
+                    for issue in rejected['issues']
+                ))
         malformed_profile = comparison.workload_fingerprint(
             'llama_bench',
             plan,
@@ -434,13 +457,45 @@ class WorkloadContractTests(unittest.TestCase):
             },
         )
         self.assertTrue(malformed_options['contract_unknown'])
-        self.assertIn(
-            'portable CPU build options',
-            malformed_options['issues'][0],
+        self.assertTrue(any(
+            'architecture-specific CPU build options' in issue
+            for issue in malformed_options['issues']
+        ))
+        malformed_arm_options = comparison.workload_fingerprint(
+            'llama_bench',
+            plan,
+            {
+                **metadata,
+                'architecture': 'aarch64',
+                'llama_cpu_build_profile': 'native',
+                'llama_native_optimization': True,
+                'llama_cpu_cmake_options': '-DGGML_NATIVE=OFF',
+            },
         )
-        self.assertNotIn(
+        self.assertTrue(malformed_arm_options['contract_unknown'])
+        unsupported_architecture = comparison.workload_fingerprint(
+            'llama_bench',
+            plan,
+            {**metadata, 'architecture': 'riscv64'},
+        )
+        self.assertTrue(unsupported_architecture['contract_unknown'])
+        self.assertTrue(any(
+            'architecture metadata is unsupported' in issue
+            for issue in unsupported_architecture['issues']
+        ))
+        for provenance_key in (
+            'cpu_build_profile',
+            'native_cpu_optimization',
+            'cpu_cmake_options',
             'compiler_version',
-            baseline['contract']['settings'],
+        ):
+            self.assertNotIn(
+                provenance_key,
+                baseline['contract']['settings'],
+            )
+        self.assertEqual(
+            baseline['provenance']['cpu_build']['profile'],
+            'x86_64-avx2-portable-v1',
         )
         self.assertEqual(
             baseline['provenance']['build_toolchain']['compiler_version'],
@@ -473,12 +528,19 @@ class ComparisonPayloadTests(unittest.TestCase):
             ),
         }
 
-        def document(run_id, compiler_version, assembler_version, value):
+        def document(
+            run_id,
+            compiler_version,
+            assembler_version,
+            value,
+            metadata_overrides=None,
+        ):
             metadata = {
                 **base_metadata,
                 'llama_compiler_version': compiler_version,
                 'llama_cxx_compiler_version': compiler_version,
                 'llama_assembler_version': assembler_version,
+                **(metadata_overrides or {}),
             }
             metrics = {}
             for prefix in (
@@ -535,6 +597,43 @@ class ComparisonPayloadTests(unittest.TestCase):
             and all(not value['warnings'] for value in chart['values'])
             for chart in same_toolchain['charts']
         ))
+
+        cross_architecture = comparison.build_comparison_payload([
+            document('oci-run', '12.2.1', '2.38', 100.0),
+            document('aws-run', '11.5.0', '2.41', 110.0),
+            document(
+                'gcp-arm-run',
+                '15.2.1',
+                '2.44',
+                70.0,
+                {
+                    'architecture': 'aarch64',
+                    'llama_cpu_build_profile': 'native',
+                    'llama_native_optimization': True,
+                    'llama_cpu_cmake_options': '-DGGML_NATIVE=ON',
+                },
+            ),
+        ])
+        self.assertEqual(len(cross_architecture['charts']), 4)
+        self.assertEqual(cross_architecture['excluded'], [])
+        self.assertEqual(cross_architecture['mismatches'], [])
+        for chart in cross_architecture['charts']:
+            self.assertEqual(len(chart['values']), 3)
+            notes = ' '.join(chart['provenance_warnings'])
+            self.assertIn('architecture-appropriate CPU builds', notes)
+            self.assertIn('Build toolchains differ', notes)
+            warnings = {
+                value['run_id']: value['warnings'][0]
+                for value in chart['values']
+            }
+            self.assertIn(
+                'CPU build: aarch64 · native',
+                warnings['gcp-arm-run'],
+            )
+            self.assertIn(
+                'CPU build: x86_64 · x86_64-avx2-portable-v1',
+                warnings['aws-run'],
+            )
 
     def test_payload_charts_largest_matching_cohort_and_explains_mismatch(self):
         changed = aws_plan()

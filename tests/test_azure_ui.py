@@ -99,10 +99,19 @@ class AzureUiTests(unittest.TestCase):
         self.assertNotIn('azureSupportedBenchmarks', JAVASCRIPT)
         self.assertNotIn('azureSupportedIperf3Protocols', JAVASCRIPT)
 
-    def test_history_labels_azure_fields_and_capacity(self):
+    def test_history_labels_azure_capacity_without_subscription_or_zone(self):
         self.assertIn("azure: 'Azure'", HISTORY)
         self.assertIn("runField(run, 'azure_subscription_id')", HISTORY)
+        self.assertNotIn(
+            "addMeta(meta, 'Subscription', "
+            "runField(run, 'azure_subscription_id'))",
+            HISTORY,
+        )
         self.assertIn("runField(run, 'azure_zone')", HISTORY)
+        self.assertNotIn(
+            "addMeta(meta, 'Zone', runField(run, 'azure_zone'))",
+            HISTORY,
+        )
         self.assertIn("provider === 'azure'", HISTORY)
         self.assertIn("? 'VM size'", HISTORY)
         self.assertIn("provider === 'aws' || provider === 'gcp' || provider === 'azure'", HISTORY)

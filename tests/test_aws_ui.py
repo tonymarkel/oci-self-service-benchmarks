@@ -233,7 +233,7 @@ class AwsUiTests(unittest.TestCase):
         styles = re.findall(r'/static/styles\.css\?v=(\d+)', INDEX)
         scripts = re.findall(r'/static/app\.js\?v=(\d+)', INDEX)
 
-        self.assertEqual(styles, ['18'])
+        self.assertEqual(styles, ['19'])
         self.assertEqual(scripts, ['32'])
 
     def test_hidden_provider_controls_cannot_be_overridden_by_label_layout(self):

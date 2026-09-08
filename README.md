@@ -1,5 +1,7 @@
 # Cloud Self-Service Benchmarks
 
+[![CI](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/workflows/ci.yml/badge.svg)](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/workflows/ci.yml)
+
 A local web application that provisions benchmark VMs in Oracle Cloud
 Infrastructure, Amazon Web Services, Google Cloud, or Microsoft Azure, runs
 selected open-source benchmarks, produces HTML reports, and can destroy all
@@ -18,6 +20,20 @@ worker restart interrupts the local benchmark supervisor; the saved resource
 manifest remains recoverable, but the benchmark itself cannot resume.
 
 Open `http://127.0.0.1:8000` and choose a cloud provider.
+
+## Development and contributions
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the pull
+request process and run the complete local check suite with:
+
+```bash
+PYTHON_BIN=.venv/bin/python scripts/check.sh
+```
+
+Every pull request runs the same credential-free checks on the supported
+Python runtime endpoints. Pull-request CI never authenticates to OCI, AWS,
+GCP, or Azure and never provisions cloud resources; live cloud validation
+remains a separate, maintainer-controlled step.
 
 The Previous runs page can compare two to eight completed runs with matching
 workload contracts. Its single-metric explorer links to a dedicated,

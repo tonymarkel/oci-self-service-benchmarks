@@ -1,0 +1,75 @@
+{
+  "application_tracing": {
+    "destination": "jaeger-agent",
+    "port": 6831,
+    "protocol": "UDP",
+    "sources": [
+      "compose-post-service",
+      "home-timeline-service",
+      "media-frontend",
+      "media-service",
+      "nginx-thrift",
+      "post-storage-service",
+      "social-graph-service",
+      "text-service",
+      "unique-id-service",
+      "url-shorten-service",
+      "user-mention-service",
+      "user-service",
+      "user-timeline-service"
+    ]
+  },
+  "component_edges": [
+    {"destination": "home-timeline-service", "port": 9090, "protocol": "TCP", "source": "compose-post-service"},
+    {"destination": "media-service", "port": 9090, "protocol": "TCP", "source": "compose-post-service"},
+    {"destination": "post-storage-service", "port": 9090, "protocol": "TCP", "source": "compose-post-service"},
+    {"destination": "text-service", "port": 9090, "protocol": "TCP", "source": "compose-post-service"},
+    {"destination": "unique-id-service", "port": 9090, "protocol": "TCP", "source": "compose-post-service"},
+    {"destination": "user-service", "port": 9090, "protocol": "TCP", "source": "compose-post-service"},
+    {"destination": "user-timeline-service", "port": 9090, "protocol": "TCP", "source": "compose-post-service"},
+    {"destination": "home-timeline-redis", "port": 6379, "protocol": "TCP", "source": "home-timeline-service"},
+    {"destination": "post-storage-service", "port": 9090, "protocol": "TCP", "source": "home-timeline-service"},
+    {"destination": "social-graph-service", "port": 9090, "protocol": "TCP", "source": "home-timeline-service"},
+    {"destination": "media-mongodb", "port": 27017, "protocol": "TCP", "source": "media-frontend"},
+    {"destination": "compose-post-service", "port": 9090, "protocol": "TCP", "source": "nginx-thrift"},
+    {"destination": "home-timeline-service", "port": 9090, "protocol": "TCP", "source": "nginx-thrift"},
+    {"destination": "social-graph-service", "port": 9090, "protocol": "TCP", "source": "nginx-thrift"},
+    {"destination": "user-service", "port": 9090, "protocol": "TCP", "source": "nginx-thrift"},
+    {"destination": "user-timeline-service", "port": 9090, "protocol": "TCP", "source": "nginx-thrift"},
+    {"destination": "post-storage-memcached", "port": 11211, "protocol": "TCP", "source": "post-storage-service"},
+    {"destination": "post-storage-mongodb", "port": 27017, "protocol": "TCP", "source": "post-storage-service"},
+    {"destination": "social-graph-mongodb", "port": 27017, "protocol": "TCP", "source": "social-graph-service"},
+    {"destination": "social-graph-redis", "port": 6379, "protocol": "TCP", "source": "social-graph-service"},
+    {"destination": "user-service", "port": 9090, "protocol": "TCP", "source": "social-graph-service"},
+    {"destination": "url-shorten-service", "port": 9090, "protocol": "TCP", "source": "text-service"},
+    {"destination": "user-mention-service", "port": 9090, "protocol": "TCP", "source": "text-service"},
+    {"destination": "url-shorten-memcached", "port": 11211, "protocol": "TCP", "source": "url-shorten-service"},
+    {"destination": "url-shorten-mongodb", "port": 27017, "protocol": "TCP", "source": "url-shorten-service"},
+    {"destination": "user-memcached", "port": 11211, "protocol": "TCP", "source": "user-mention-service"},
+    {"destination": "user-mongodb", "port": 27017, "protocol": "TCP", "source": "user-mention-service"},
+    {"destination": "social-graph-service", "port": 9090, "protocol": "TCP", "source": "user-service"},
+    {"destination": "user-memcached", "port": 11211, "protocol": "TCP", "source": "user-service"},
+    {"destination": "user-mongodb", "port": 27017, "protocol": "TCP", "source": "user-service"},
+    {"destination": "post-storage-service", "port": 9090, "protocol": "TCP", "source": "user-timeline-service"},
+    {"destination": "user-timeline-mongodb", "port": 27017, "protocol": "TCP", "source": "user-timeline-service"},
+    {"destination": "user-timeline-redis", "port": 6379, "protocol": "TCP", "source": "user-timeline-service"}
+  ],
+  "dns": {
+    "namespace": "kube-system",
+    "pod_labels": {"k8s-app": "kube-dns"},
+    "ports": [
+      {"port": 53, "protocol": "TCP"},
+      {"port": 53, "protocol": "UDP"}
+    ]
+  },
+  "load_generator_ingress": {
+    "destination": "nginx-thrift",
+    "port": 8080,
+    "protocol": "TCP"
+  },
+  "namespace": "deathstarbench-social",
+  "released": false,
+  "schema_version": 1,
+  "upstream_revision": "6ecb09706140f8730b5385c08f1386c654c3c526",
+  "workload_revision": "social-network-6ecb097-workload-v1"
+}

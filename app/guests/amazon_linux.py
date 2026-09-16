@@ -8,6 +8,7 @@ check every generated shell command locally.
 from dataclasses import dataclass
 import json
 import math
+from pathlib import PurePosixPath
 import re
 import shlex
 from typing import Iterable
@@ -483,10 +484,34 @@ def sysbench_memory_command(ocpus: int | float) -> str:
     )
 
 
-def sysbench_fileio_command() -> str:
-    """Run the existing 4 GiB random read/write workload on ``/data``."""
+def _storage_directory(value: str) -> str:
+    """Validate one absolute benchmark directory before shell quoting it."""
+
+    raw = str(value or '')
+    directory = raw.strip()
+    path = PurePosixPath(directory)
+    if (
+        raw != directory
+        or not directory.startswith('/')
+        or directory.startswith('//')
+        or '//' in directory
+        or directory == '/'
+        or path.as_posix() != directory
+        or '..' in path.parts
+        or not re.fullmatch(r'/[A-Za-z0-9._/-]+', directory)
+    ):
+        raise ValueError(
+            'Benchmark storage directory must be a normalized absolute path.'
+        )
+    return directory
+
+
+def sysbench_fileio_command(storage_directory: str = '/data') -> str:
+    """Run the existing 4 GiB random read/write workload on one directory."""
+
+    directory = shlex.quote(_storage_directory(storage_directory))
     return (
-        'cd /data '
+        f'cd {directory} '
         '&& sysbench fileio --file-total-size=4G prepare '
         "&& trap 'sysbench fileio --file-total-size=4G cleanup "
         ">/dev/null 2>&1 || true' EXIT "
@@ -496,12 +521,14 @@ def sysbench_fileio_command() -> str:
     )
 
 
-def fio_benchmark_command() -> str:
-    """Run the established sequential/random fio suite on ``/data``."""
+def fio_benchmark_command(storage_directory: str = '/data') -> str:
+    """Run the established sequential/random fio suite on one directory."""
+
+    directory = shlex.quote(_storage_directory(storage_directory))
     return (
         'set -euo pipefail; '
         'for W in read write randread randwrite; do '
-        'fio --name=$W --directory=/data --rw=$W '
+        f'fio --name=$W --directory={directory} --rw=$W '
         '--bs=$([ "$W" = "read" -o "$W" = "write" ] '
         '&& echo 1M || echo 4k) --size=4G --direct=1 --time_based '
         '--runtime=60 --group_reporting --output-format=json; done'
@@ -939,8 +966,12 @@ def parse_stream_output(
     }
 
 
-def benchmark_commands(ocpus: int | float) -> dict[str, tuple[str, str]]:
+def benchmark_commands(
+    ocpus: int | float,
+    storage_directory: str = '/data',
+) -> dict[str, tuple[str, str]]:
     """Return commands compatible with the existing benchmark executor."""
+    storage_directory = _storage_directory(storage_directory)
     return {
         'sysbench_cpu': ('Sysbench — CPU', sysbench_cpu_command(ocpus)),
         'sysbench_memory': (
@@ -949,9 +980,12 @@ def benchmark_commands(ocpus: int | float) -> dict[str, tuple[str, str]]:
         ),
         'sysbench_fileio': (
             'Sysbench — File I/O',
-            sysbench_fileio_command(),
+            sysbench_fileio_command(storage_directory),
         ),
-        'fio': ('fio storage suite', fio_benchmark_command()),
+        'fio': (
+            'fio storage suite',
+            fio_benchmark_command(storage_directory),
+        ),
         'stream': ('STREAM', stream_benchmark_command(ocpus)),
     }
 

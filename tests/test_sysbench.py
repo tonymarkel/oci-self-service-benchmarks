@@ -248,11 +248,21 @@ class SysbenchCompatibilityAndCommandTests(unittest.TestCase):
     def test_fileio_command_cleans_up_from_an_exit_trap(self):
         selected_plan = plan(sysbench={'workloads': ['fileio']})
         job = {'events': [], 'results': [], 'resources': {}}
+        target_metadata = {
+            'storage_target_contract': 'v1',
+            'storage_target_kind': 'provisioned_data_volume',
+            'storage_target_mount_point': '/data',
+        }
 
         with (
             patch.object(main, 'wait_for_guest_readiness'),
             patch.object(main, 'install_benchmark_tools'),
             patch.object(main, 'mount_data_volume'),
+            patch.object(
+                main,
+                'prepare_storage_benchmark_target',
+                return_value=('/data', target_metadata),
+            ) as prepare_target,
             patch.object(
                 main,
                 'ssh',
@@ -262,6 +272,7 @@ class SysbenchCompatibilityAndCommandTests(unittest.TestCase):
         ):
             main.run_benchmarks(job, selected_plan)
 
+        prepare_target.assert_called_once()
         execute.assert_called_once()
         benchmark_id, name, command = execute.call_args.args[1:4]
         self.assertEqual(benchmark_id, 'sysbench_fileio')

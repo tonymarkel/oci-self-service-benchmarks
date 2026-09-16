@@ -406,6 +406,60 @@ class AwsMainDispatchTests(unittest.TestCase):
         self.assertIn(expected, calls[0])
         self.assertIn(expected, calls[1])
 
+    def test_ssh_secret_stdin_uses_only_a_bounded_process_pipe(self):
+        job = {
+            'id': 'ssh-secret-stdin',
+            '_key': 'private-key',
+            '_passphrase': None,
+            'resources': {
+                'public_ip': '198.51.100.10',
+                'ssh_user': 'ec2-user',
+            },
+        }
+        secret = 'K10example::agent:fixed-secret-value'
+        captured = {}
+
+        class SecretPipe:
+            def write(self, value):
+                captured['secret'] = value
+
+            def close(self):
+                captured['closed'] = True
+
+        class Process:
+            pid = 12345
+            returncode = 0
+            stdin = SecretPipe()
+
+            def poll(self):
+                return self.returncode
+
+            def communicate(self, timeout=None):
+                return 'ok\n', ''
+
+        def popen(args, **kwargs):
+            captured['args'] = args
+            captured['kwargs'] = kwargs
+            return Process()
+
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.object(main, 'RUNS', Path(directory)),
+                patch.object(main.subprocess, 'Popen', side_effect=popen),
+            ):
+                self.assertEqual(
+                    main.ssh(job, 'read-secret', secret_stdin=secret),
+                    'ok\n',
+                )
+
+        self.assertIs(captured['kwargs']['stdin'], main.subprocess.PIPE)
+        self.assertEqual(captured['secret'], secret)
+        self.assertTrue(captured['closed'])
+        self.assertNotIn(secret, captured['args'])
+        self.assertNotIn(secret, captured['kwargs']['env'].values())
+        with self.assertRaisesRegex(ValueError, 'at most 4096 bytes'):
+            main.ssh(job, 'read-secret', secret_stdin='x' * 4097)
+
 
 class AwsDiscoveryRouteTests(unittest.TestCase):
     def test_all_aws_discovery_responses_disable_http_caching(self):

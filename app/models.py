@@ -1,6 +1,14 @@
 from pydantic import BaseModel, Field, StrictBool, model_validator
 from typing import Literal
 
+from .deathstarbench_contract import (
+    DISTRIBUTED_TIERED_TOPOLOGY_ID,
+    K3S_RUNTIME_ID,
+    PODMAN_COMPOSE_RUNTIME_ID,
+    RUNTIME_PROFILES,
+    SINGLE_HOST_TOPOLOGY_ID,
+)
+
 
 LEGACY_SYSBENCH_WORKLOADS = {
     'sysbench_cpu': 'cpu',
@@ -25,6 +33,16 @@ SUPPORTED_BENCHMARKS = frozenset({
     'phoronix',
 })
 SUPPORTED_LLM_BENCHMARKS = frozenset({'llama_bench'})
+
+DEATHSTARBENCH_SINGLE_HOST_TOPOLOGY_ID = SINGLE_HOST_TOPOLOGY_ID
+DEATHSTARBENCH_DISTRIBUTED_TIERED_TOPOLOGY_ID = (
+    DISTRIBUTED_TIERED_TOPOLOGY_ID
+)
+DEATHSTARBENCH_PODMAN_COMPOSE_RUNTIME_ID = PODMAN_COMPOSE_RUNTIME_ID
+DEATHSTARBENCH_K3S_RUNTIME_ID = K3S_RUNTIME_ID
+DEATHSTARBENCH_DEFAULT_TOPOLOGY_ID = DEATHSTARBENCH_SINGLE_HOST_TOPOLOGY_ID
+DEATHSTARBENCH_DEFAULT_RUNTIME_ID = DEATHSTARBENCH_PODMAN_COMPOSE_RUNTIME_ID
+DEATHSTARBENCH_TOPOLOGY_RUNTIME_PAIRS = frozenset(RUNTIME_PROFILES)
 
 
 class ClearSavedRunsRequest(BaseModel):
@@ -177,10 +195,29 @@ class StorageOptions(BaseModel):
     additional_volume: bool = True
     additional_size_gb: int = Field(1024, ge=50, le=32768)
     additional_performance: int = Field(10, ge=10, le=120)
-    mount_style: Literal['paravirtualized', 'iscsi', 'nvme'] = 'paravirtualized'
+    mount_style: Literal['paravirtualized', 'iscsi'] = 'paravirtualized'
+
+    @model_validator(mode='before')
+    @classmethod
+    def migrate_legacy_nvme_attachment(cls, values):
+        """Normalize the former, non-functional NVMe Block Volume option."""
+
+        if isinstance(values, dict) and values.get('mount_style') == 'nvme':
+            migrated = dict(values)
+            migrated['mount_style'] = 'paravirtualized'
+            return migrated
+        return values
 
 
 class DeathStarBenchOptions(BaseModel):
+    topology_id: Literal[
+        'single_host_v1',
+        'distributed_tiered_v1',
+    ] = Field(DEATHSTARBENCH_DEFAULT_TOPOLOGY_ID, frozen=True)
+    runtime_id: Literal[
+        'podman_compose_v1',
+        'k3s_v1',
+    ] = Field(DEATHSTARBENCH_DEFAULT_RUNTIME_ID, frozen=True)
     workload: Literal[
         'media_microservices',
         'hotel_reservation',
@@ -191,6 +228,16 @@ class DeathStarBenchOptions(BaseModel):
     threads: int = Field(4, ge=1, le=64)
     connections: int = Field(64, ge=1, le=4096)
     request_rate: int = Field(100, ge=1, le=100000)
+
+    @model_validator(mode='after')
+    def validate_topology_runtime_pair(self):
+        pair = (self.topology_id, self.runtime_id)
+        if pair not in DEATHSTARBENCH_TOPOLOGY_RUNTIME_PAIRS:
+            raise ValueError(
+                'DeathStarBench topology and runtime must be a supported '
+                'versioned pair.'
+            )
+        return self
 
 
 class ApacheBenchOptions(BaseModel):
@@ -310,12 +357,6 @@ class BenchmarkPlan(BaseModel):
                 f'{self.provider.upper()} does not support the selected LLM '
                 'benchmark: ' + ', '.join(unsupported_llm)
             )
-        if (
-            self.provider == 'oci'
-            and self.storage.mount_style == 'nvme'
-            and not self.shape.startswith('BM.')
-        ):
-            raise ValueError('NVMe data volume attachment is available only for bare metal shapes.')
         if self.security.mode != 'shielded' and any([self.security.secure_boot, self.security.measured_boot, self.security.trusted_platform_module]):
             raise ValueError('Shielded options require Shielded security mode.')
         if 'sysbench' in self.benchmarks and not self.sysbench.workloads:

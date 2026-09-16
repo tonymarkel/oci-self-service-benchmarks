@@ -75,7 +75,7 @@ class GcpC4aPlanContractTests(unittest.TestCase):
 
 class GcpC4aUiContractTests(unittest.TestCase):
     def test_form_describes_machine_derived_c4a_storage_and_networking(self):
-        self.assertIn('<script src="/static/app.js?v=32"></script>', INDEX)
+        self.assertIn('<script src="/static/app.js?v=33"></script>', INDEX)
         self.assertIn('C4A uses Hyperdisk Balanced', INDEX)
         self.assertIn('aria-live="polite"', INDEX)
         self.assertIn('function updateGcpStorageHint(shape = null)', JAVASCRIPT)
@@ -122,15 +122,26 @@ class GcpC4aRuntimeMetadataTests(unittest.TestCase):
             gcp_data_disk_provisioned_iops=3000,
             gcp_data_disk_provisioned_throughput_mibps=140,
         )
+        target_metadata = {
+            'storage_target_contract': 'v1',
+            'storage_target_kind': 'provisioned_data_volume',
+            'storage_target_mount_point': '/data',
+        }
 
         with (
             patch.object(main, 'ssh', return_value='ready'),
             patch.object(main, 'mount_data_volume') as mount,
+            patch.object(
+                main,
+                'prepare_storage_benchmark_target',
+                return_value=('/data', target_metadata),
+            ) as prepare_target,
             patch.object(main, 'execute_benchmark') as execute,
         ):
             main.run_gcp_benchmarks(job, plan)
 
-        mount.assert_called_once_with(job)
+        mount.assert_not_called()
+        prepare_target.assert_called_once()
         execute.assert_called_once()
         metadata = execute.call_args.kwargs['metadata']
         self.assertEqual(metadata['network_interface_type'], 'GVNIC')
@@ -146,6 +157,11 @@ class GcpC4aRuntimeMetadataTests(unittest.TestCase):
         self.assertEqual(
             metadata['data_volume_provisioned_throughput_mibps'],
             140,
+        )
+        self.assertEqual(metadata['storage_target_contract'], 'v1')
+        self.assertEqual(
+            metadata['storage_target_kind'],
+            'provisioned_data_volume',
         )
 
     def test_pd_balanced_runtime_keeps_optional_hyperdisk_fields_absent(self):

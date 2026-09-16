@@ -1575,7 +1575,9 @@ async function restorePlan(plan) {
     $('#dataSize').value = plan.storage?.additional_size_gb ?? 1024;
     $('#dataSize').dataset.userEdited = 'true';
     $('#dataPerf').value = plan.storage?.additional_performance ?? 10;
-    $('#mount').value = plan.storage?.mount_style || 'paravirtualized';
+    $('#mount').value = plan.storage?.mount_style === 'iscsi'
+        ? 'iscsi'
+        : 'paravirtualized';
     $('#destroy').checked = plan.destroy_after_completion ?? true;
     const planBenchmarks = plan.benchmarks || [];
     const hasLegacySysbench = planBenchmarks.some(

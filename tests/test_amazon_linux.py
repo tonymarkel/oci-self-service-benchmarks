@@ -137,6 +137,32 @@ class AmazonLinuxCommandTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'positive integer'):
             amazon_linux.benchmark_commands(1.5)
 
+    def test_storage_commands_accept_only_a_safe_absolute_directory(self):
+        commands = amazon_linux.benchmark_commands(
+            8,
+            storage_directory='/benchmark-local',
+        )
+
+        self.assertIn('cd /benchmark-local', commands['sysbench_fileio'][1])
+        self.assertIn(
+            '--directory=/benchmark-local',
+            commands['fio'][1],
+        )
+        self.assert_valid_bash(commands['sysbench_fileio'][1])
+        self.assert_valid_bash(commands['fio'][1])
+        for directory in (
+            'data', '/', '//data', '/data//nested', '/data/../tmp',
+            '/data;id', ' /data',
+        ):
+            with self.subTest(directory=directory), self.assertRaisesRegex(
+                ValueError,
+                'normalized absolute path',
+            ):
+                amazon_linux.benchmark_commands(
+                    8,
+                    storage_directory=directory,
+                )
+
 
 class AmazonLinuxResultParserTests(unittest.TestCase):
     SYSBENCH_CPU_OUTPUT = """\

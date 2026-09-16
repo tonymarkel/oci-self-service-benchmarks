@@ -169,15 +169,21 @@
                                 id="dataPerf"></select></label><label id="mountField">Mount style<select id="mount">
                                 <option value="paravirtualized">Paravirtualized</option>
                                 <option value="iscsi">iSCSI</option>
-                                <option value="nvme">NVMe (bare metal only)</option>
                             </select></label></div>
-                    <p class="hint" id="awsStorageHint" hidden>AWS /data volumes use gp3 with the included baseline of
-                        3,000 IOPS and 125 MiB/s throughput.</p>
+                    <p class="hint">fio and Sysbench File I/O always require and provision the additional /data
+                        volume as a safe fallback. When the selected instance also exposes one blank,
+                        provider-verified instance-local NVMe device, they use that device at /benchmark-local
+                        instead. Instance-local NVMe is ephemeral; its contents disappear with the instance. The
+                        current GCP catalog excludes Local SSD and -lssd machine types, so GCP uses /data.</p>
+                    <p class="hint" id="awsStorageHint" hidden>AWS fallback /data volumes use gp3 with the included
+                        baseline of 3,000 IOPS and 125 MiB/s throughput.</p>
                     <p class="hint" id="gcpStorageHint" aria-live="polite" hidden>GCP /data volumes use pd-balanced
                         by default; C4A uses Hyperdisk Balanced. Select a machine type to see the exact
-                        disk and network profile. These provider-required settings are recorded in the report.</p>
-                    <p class="hint" id="azureStorageHint" hidden>Azure /data volumes use Premium SSD v2 at the
-                        benchmark baseline of 3,000 IOPS and 125 MiB/s throughput. Availability depends on the
+                        disk and network profile. Local SSD and -lssd machine types are not in the current catalog,
+                        so storage benchmarks use /data. These provider-required settings are recorded in the
+                        report.</p>
+                    <p class="hint" id="azureStorageHint" hidden>Azure fallback /data volumes use Premium SSD v2 at
+                        the benchmark baseline of 3,000 IOPS and 125 MiB/s throughput. Availability depends on the
                         selected region, zone, and VM size; the provisioned settings are recorded in the report.</p>
                 </fieldset>
                 <fieldset>
@@ -192,7 +198,8 @@
                     <p class="hint">Choose one or more Sysbench workloads. Each selection appears as a separate result
                         in the final report.</p>
                     <div id="sysbenchWorkloads" class="checks"></div>
-                    <p class="hint">File I/O runs on /data and requires the additional data volume.</p>
+                    <p class="hint">File I/O follows the storage-target policy above and still requires the
+                        additional /data fallback volume.</p>
                 </fieldset>
                 <fieldset id="iperf3Settings" class="benchmark-settings iperf3-settings" hidden>
                     <legend>iperf3 settings</legend>
@@ -284,7 +291,7 @@
             <iframe id="reportFrame" class="report-frame" title="Benchmark results"></iframe>
         </section>
     </main>
-    <script src="/static/app.js?v=32"></script>
+    <script src="/static/app.js?v=33"></script>
 </body>
 
 </html>

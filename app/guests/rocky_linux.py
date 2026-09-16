@@ -792,6 +792,328 @@ def azure_data_volume_mount_command(
     )
 
 
+def azure_deathstarbench_database_volume_mount_command() -> str:
+    """Mount the manifest-bound Azure database disk at its fixed K3s path.
+
+    This is intentionally a separate, non-parameterized contract from the
+    general benchmark ``/data`` mount.  Distributed DeathStarBench always owns
+    LUN 0 and mounts it at ``/var/lib/deathstarbench/database``.  Keeping those
+    values literal prevents orchestration state or user input from redirecting
+    a format operation to another device or path.
+    """
+
+    return (
+        'set -euo pipefail; '
+        'LUN=0; '
+        'MOUNT_POINT=/var/lib/deathstarbench/database; '
+        'NVME_LINK="/dev/disk/azure/data/by-lun/$LUN"; '
+        'SCSI_LINK="/dev/disk/azure/scsi1/lun$LUN"; '
+        'DEVICE_LINK=""; DEVICE_READY=false; '
+        'for attempt in $(seq 1 60); do '
+        'for candidate in "$NVME_LINK" "$SCSI_LINK"; do '
+        'if [ -b "$candidate" ]; then DEVICE_LINK="$candidate"; '
+        'DEVICE_READY=true; break; fi; done; '
+        'if [ "$DEVICE_READY" = true ]; then break; fi; '
+        'echo "Waiting for exact Azure DeathStarBench database LUN 0 '
+        '($attempt/60)."; '
+        'if [ "$attempt" -lt 60 ]; then sleep 2; fi; done; '
+        'if [ "$DEVICE_READY" != true ]; then '
+        'echo "Azure DeathStarBench database LUN 0 did not appear at either '
+        'expected stable link: $NVME_LINK or $SCSI_LINK" >&2; exit 1; fi; '
+        'NVME_DEVICE=""; SCSI_DEVICE=""; '
+        'if [ -b "$NVME_LINK" ]; then '
+        'NVME_DEVICE=$(readlink -f "$NVME_LINK"); fi; '
+        'if [ -b "$SCSI_LINK" ]; then '
+        'SCSI_DEVICE=$(readlink -f "$SCSI_LINK"); fi; '
+        'if [ -n "$NVME_DEVICE" ] && [ -n "$SCSI_DEVICE" ] '
+        '&& [ "$NVME_DEVICE" != "$SCSI_DEVICE" ]; then '
+        'echo "Azure LUN 0 links resolve to different block devices; refusing '
+        'to select either one." >&2; exit 1; fi; '
+        'DEVICE=$(readlink -f "$DEVICE_LINK"); '
+        'if [ ! -b "$DEVICE" ]; then '
+        'echo "The Azure DeathStarBench database-disk link does not resolve '
+        'to a block device." >&2; exit 1; fi; '
+        'if [ "$(lsblk -dnro TYPE "$DEVICE")" != disk ]; then '
+        'echo "Azure DeathStarBench database LUN 0 is not a whole disk." '
+        '>&2; exit 1; fi; '
+        'ROOT_SOURCE=$(sudo findmnt -rn -o SOURCE --mountpoint /); '
+        'ROOT_DEVICE=$(readlink -f "$ROOT_SOURCE"); '
+        'if [ ! -b "$ROOT_DEVICE" ]; then '
+        'echo "The Azure guest root filesystem did not resolve to a block '
+        'device." >&2; exit 1; fi; '
+        'ROOT_ANCESTRY=$(lsblk -srnpo NAME "$ROOT_DEVICE"); '
+        'test -n "$ROOT_ANCESTRY"; '
+        'if printf "%s\\n" "$ROOT_ANCESTRY" | grep -Fxq "$DEVICE"; then '
+        'echo "Refusing to format or mount the Azure boot disk as the '
+        'DeathStarBench database volume." >&2; exit 1; fi; '
+        'DEVICE_TREE=$(lsblk -nrpo NAME "$DEVICE"); '
+        'test -n "$DEVICE_TREE"; '
+        'CHILD_COUNT=$(printf "%s\\n" "$DEVICE_TREE" | tail -n +2 '
+        '| awk \'NF { count++ } END { print count + 0 }\'); '
+        'if [ "$CHILD_COUNT" -ne 0 ]; then '
+        'echo "Azure DeathStarBench database LUN 0 already has partitions or '
+        'child devices; refusing to format it." >&2; exit 1; fi; '
+        'if [ -L "$MOUNT_POINT" ] '
+        '|| { [ -e "$MOUNT_POINT" ] && [ ! -d "$MOUNT_POINT" ]; }; then '
+        'echo "The DeathStarBench database mount point is not a trusted '
+        'directory." >&2; exit 1; fi; '
+        'sudo install -d -o root -g root -m 0755 "$MOUNT_POINT"; '
+        'if [ "$(readlink -f "$MOUNT_POINT")" != "$MOUNT_POINT" ]; then '
+        'echo "The DeathStarBench database mount point resolves outside its '
+        'fixed path." >&2; exit 1; fi; '
+        'DEVICE_MOUNTS=$(lsblk -dnro MOUNTPOINTS "$DEVICE" '
+        '| sed \'/^[[:space:]]*$/d\'); '
+        'if [ -n "$DEVICE_MOUNTS" ] '
+        '&& [ "$DEVICE_MOUNTS" != "$MOUNT_POINT" ]; then '
+        'echo "Azure DeathStarBench database LUN 0 is already mounted at an '
+        'unexpected path." >&2; exit 1; fi; '
+        'FSTYPE=$(sudo blkid -s TYPE -o value "$DEVICE" 2>/dev/null || true); '
+        'if [ -z "$FSTYPE" ]; then sudo mkfs.xfs "$DEVICE"; '
+        'elif [ "$FSTYPE" != xfs ]; then '
+        'echo "Refusing to replace unexpected $FSTYPE filesystem on Azure '
+        'DeathStarBench database LUN 0." >&2; exit 1; fi; '
+        'UUID=$(sudo blkid -s UUID -o value "$DEVICE"); '
+        'if [ -z "$UUID" ]; then '
+        'echo "Azure DeathStarBench database LUN 0 has no filesystem UUID." '
+        '>&2; exit 1; fi; '
+        'MOUNTED_SOURCE=$(sudo findmnt -rn -o SOURCE '
+        '--mountpoint "$MOUNT_POINT" 2>/dev/null || true); '
+        'MOUNTED_UUID=$(sudo findmnt -rn -o UUID '
+        '--mountpoint "$MOUNT_POINT" 2>/dev/null || true); '
+        'if [ -n "$MOUNTED_SOURCE" ] '
+        '&& { [ -z "$MOUNTED_UUID" ] '
+        '|| [ "$MOUNTED_UUID" != "$UUID" ]; }; then '
+        'echo "A different filesystem is already mounted at '
+        '/var/lib/deathstarbench/database." >&2; exit 1; fi; '
+        'if sudo awk -v mount="$MOUNT_POINT" '
+        "'$0 !~ /^[[:space:]]*#/ && NF >= 2 && $2 == mount "
+        "&& $0 !~ /# cloud-benchmark-dsb-database$/ { found=1 } "
+        "END { exit found ? 0 : 1 }' /etc/fstab; then "
+        'echo "Refusing to replace a non-benchmark DeathStarBench database '
+        'fstab entry." >&2; exit 1; fi; '
+        'FSTAB_TMP=$(mktemp); '
+        "sudo awk '$0 !~ /# cloud-benchmark-dsb-database$/' /etc/fstab "
+        '>"$FSTAB_TMP"; '
+        'printf "UUID=%s /var/lib/deathstarbench/database xfs '
+        'discard,nofail 0 2 # cloud-benchmark-dsb-database\\n" '
+        '"$UUID" >>"$FSTAB_TMP"; '
+        'sudo install -m 0644 "$FSTAB_TMP" /etc/fstab; '
+        'rm -f "$FSTAB_TMP"; '
+        'if [ -z "$MOUNTED_UUID" ]; then sudo mount "$MOUNT_POINT"; fi; '
+        'VERIFY_UUID=$(sudo findmnt -rn -o UUID --mountpoint "$MOUNT_POINT"); '
+        'if [ "$VERIFY_UUID" != "$UUID" ]; then '
+        'echo "Azure DeathStarBench database LUN 0 did not mount by its '
+        'expected UUID." >&2; exit 1; fi; '
+        'sudo chown root:root "$MOUNT_POINT"; '
+        'sudo chmod 0755 "$MOUNT_POINT"; '
+        'if command -v restorecon >/dev/null 2>&1; then '
+        'sudo restorecon -F "$MOUNT_POINT"; fi; '
+        'printf "AZURE_DSB_DATABASE_VOLUME lun=0 device_link=%s uuid=%s '
+        'mount_point=/var/lib/deathstarbench/database filesystem=xfs\\n" '
+        '"$DEVICE_LINK" "$UUID"'
+    )
+
+
+def azure_deathstarbench_database_workload_storage_command(
+    filesystem_uuid: str,
+) -> str:
+    """Prepare the six owned MongoDB roots on the attested Azure disk.
+
+    The command never formats, remounts, or clears storage.  It accepts only
+    the filesystem identity recorded by the preceding mount attestation,
+    refuses unmarked pre-existing workload state, and installs a persistent
+    SELinux ``container_file_t`` mapping before Kubernetes can bind a local
+    volume to any directory.
+    """
+
+    normalized_uuid = str(filesystem_uuid).strip().lower()
+    if not re.fullmatch(
+        r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+        normalized_uuid,
+    ):
+        raise ValueError(
+            'DeathStarBench database storage requires an exact filesystem UUID.'
+        )
+    from app.deathstarbench_contract import DISTRIBUTED_WORKLOAD_REVISION
+
+    database_names = (
+        'media-mongodb',
+        'post-storage-mongodb',
+        'social-graph-mongodb',
+        'url-shorten-mongodb',
+        'user-mongodb',
+        'user-timeline-mongodb',
+    )
+    directories = ' '.join(shlex.quote(name) for name in database_names)
+    marker_payload = (
+        f'workload_revision={DISTRIBUTED_WORKLOAD_REVISION}\n'
+        f'filesystem_uuid={normalized_uuid}\n'
+    )
+    encoded_marker = base64.b64encode(marker_payload.encode()).decode()
+    return (
+        'set -euo pipefail; '
+        'MOUNT_POINT=/var/lib/deathstarbench/database; '
+        'DATA_ROOT="$MOUNT_POINT/mongodb"; '
+        'MARKER="$MOUNT_POINT/.deathstarbench-workload-storage-v1"; '
+        f'EXPECTED_UUID={shlex.quote(normalized_uuid)}; '
+        'test -d "$MOUNT_POINT"; test ! -L "$MOUNT_POINT"; '
+        'test "$(readlink -f "$MOUNT_POINT")" = "$MOUNT_POINT"; '
+        'test "$(sudo findmnt -rn -o FSTYPE --mountpoint "$MOUNT_POINT")" = xfs; '
+        'ACTUAL_UUID=$(sudo findmnt -rn -o UUID --mountpoint "$MOUNT_POINT" '
+        '| tr "[:upper:]" "[:lower:]"); '
+        'if [ "$ACTUAL_UUID" != "$EXPECTED_UUID" ]; then '
+        'echo "The database workload disk no longer matches its attested UUID." '
+        '>&2; exit 1; fi; '
+        'if sudo findmnt -rn -o TARGET | awk -v root="$MOUNT_POINT/" '
+        '\'index($0, root) == 1 { found=1 } '
+        'END { exit found ? 0 : 1 }\'; then '
+        'echo "Refusing to relabel database storage containing a nested '
+        'mount." >&2; exit 1; fi; '
+        f'EXPECTED_MARKER=$(printf "%s" {shlex.quote(encoded_marker)} '
+        '| base64 --decode); '
+        'if sudo test -e "$MARKER"; then '
+        'test ! -L "$MARKER"; '
+        'test "$(sudo stat -c %U:%G:%a "$MARKER")" = root:root:600; '
+        'ACTUAL_MARKER=$(sudo cat "$MARKER"); '
+        'if [ "$ACTUAL_MARKER" != "$EXPECTED_MARKER" ]; then '
+        'echo "The database workload-storage ownership marker changed." >&2; '
+        'exit 1; fi; '
+        'elif sudo test -e "$DATA_ROOT"; then '
+        'echo "Unowned database workload directories already exist." >&2; '
+        'exit 1; '
+        'else '
+        'TEMP_MARKER=$(mktemp /tmp/deathstarbench-storage-marker.XXXXXX); '
+        'trap \'rm -f -- "$TEMP_MARKER"\' EXIT; '
+        f'printf "%s" {shlex.quote(encoded_marker)} | base64 --decode '
+        '>"$TEMP_MARKER"; '
+        'sudo install -o root -g root -m 0600 "$TEMP_MARKER" "$MARKER"; '
+        'fi; '
+        'if sudo test -L "$DATA_ROOT"; then '
+        'echo "The database workload root must not be a symbolic link." >&2; '
+        'exit 1; fi; '
+        'sudo install -d -o root -g root -m 0755 "$DATA_ROOT"; '
+        'test "$(readlink -f "$DATA_ROOT")" = "$DATA_ROOT"; '
+        f'for NAME in {directories}; do '
+        'DIRECTORY="$DATA_ROOT/$NAME"; '
+        'if sudo test -e "$DIRECTORY"; then '
+        'test ! -L "$DIRECTORY"; sudo test -d "$DIRECTORY"; '
+        'else sudo install -d -o root -g root -m 0755 "$DIRECTORY"; fi; '
+        'done; '
+        f'EXPECTED_DATABASES=$(printf "%s\\n" {directories} '
+        '| LC_ALL=C sort); '
+        'ACTUAL_DATABASES=$(sudo find "$DATA_ROOT" -mindepth 1 -maxdepth 1 '
+        '-printf "%f\\n" | LC_ALL=C sort); '
+        'if [ "$ACTUAL_DATABASES" != "$EXPECTED_DATABASES" ]; then '
+        'echo "The database workload root contains an unexpected directory '
+        'inventory." >&2; exit 1; fi; '
+        'DATABASE_COUNT=$(printf "%s\\n" "$ACTUAL_DATABASES" '
+        '| awk \'NF { count++ } END { print count + 0 }\'); '
+        'test "$DATABASE_COUNT" -eq 6; '
+        'command -v semanage >/dev/null; command -v restorecon >/dev/null; '
+        "SELINUX_PATTERN='/var/lib/deathstarbench/database(/.*)?'; "
+        'sudo semanage fcontext -a -t container_file_t "$SELINUX_PATTERN" '
+        '2>/dev/null || sudo semanage fcontext -m -t container_file_t '
+        '"$SELINUX_PATTERN"; '
+        'sudo restorecon -R -x "$MOUNT_POINT"; '
+        'for DIRECTORY in "$DATA_ROOT" "$DATA_ROOT"/*; do '
+        'CONTEXT=$(sudo stat -c %C "$DIRECTORY"); '
+        'case "$CONTEXT" in *:container_file_t:*) ;; *) '
+        'echo "Database workload directory has an unsafe SELinux label: '
+        '$DIRECTORY ($CONTEXT)" >&2; exit 1;; esac; done; '
+        'printf "AZURE_DSB_WORKLOAD_STORAGE uuid=%s root=%s databases=%s\\n" '
+        '"$ACTUAL_UUID" "$DATA_ROOT" "$DATABASE_COUNT"'
+    )
+
+
+def azure_deathstarbench_database_volume_attestation_command(
+    filesystem_uuid: str,
+) -> str:
+    """Re-attest the mounted database LUN without mutating any disk state.
+
+    The initial cluster bootstrap owns the one format/mount transition.  Every
+    later workload retry is bound to that recorded filesystem UUID and must
+    fail before ``mkfs``, mounting, or an fstab rewrite could touch a replaced
+    or damaged LUN.
+    """
+
+    normalized_uuid = str(filesystem_uuid).strip().lower()
+    if not re.fullmatch(
+        r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+        normalized_uuid,
+    ):
+        raise ValueError(
+            'DeathStarBench database attestation requires an exact filesystem UUID.'
+        )
+    return (
+        'set -euo pipefail; '
+        'LUN=0; '
+        'MOUNT_POINT=/var/lib/deathstarbench/database; '
+        'NVME_LINK="/dev/disk/azure/data/by-lun/$LUN"; '
+        'SCSI_LINK="/dev/disk/azure/scsi1/lun$LUN"; '
+        f'EXPECTED_UUID={shlex.quote(normalized_uuid)}; '
+        'DEVICE_LINK=""; '
+        'for attempt in $(seq 1 60); do '
+        'if [ -b "$NVME_LINK" ]; then DEVICE_LINK="$NVME_LINK"; '
+        'elif [ -b "$SCSI_LINK" ]; then DEVICE_LINK="$SCSI_LINK"; fi; '
+        'if [ -n "$DEVICE_LINK" ]; then break; fi; '
+        'if [ "$attempt" -lt 60 ]; then sleep 2; fi; done; '
+        'if [ -z "$DEVICE_LINK" ]; then '
+        'echo "Azure DeathStarBench database LUN 0 is unavailable for '
+        'read-only attestation." >&2; exit 1; fi; '
+        'NVME_DEVICE=""; SCSI_DEVICE=""; '
+        'if [ -b "$NVME_LINK" ]; then '
+        'NVME_DEVICE=$(readlink -f "$NVME_LINK"); fi; '
+        'if [ -b "$SCSI_LINK" ]; then '
+        'SCSI_DEVICE=$(readlink -f "$SCSI_LINK"); fi; '
+        'if [ -n "$NVME_DEVICE" ] && [ -n "$SCSI_DEVICE" ] '
+        '&& [ "$NVME_DEVICE" != "$SCSI_DEVICE" ]; then '
+        'echo "Azure LUN 0 links resolve to different block devices; refusing '
+        'to attest either one." >&2; exit 1; fi; '
+        'DEVICE=$(readlink -f "$DEVICE_LINK"); '
+        'test -b "$DEVICE"; '
+        'test "$(lsblk -dnro TYPE "$DEVICE")" = disk; '
+        'DEVICE_TREE=$(lsblk -nrpo NAME "$DEVICE"); test -n "$DEVICE_TREE"; '
+        'test "$(printf "%s\\n" "$DEVICE_TREE" | tail -n +2 '
+        '| awk \'NF { count++ } END { print count + 0 }\')" -eq 0; '
+        'ROOT_SOURCE=$(sudo findmnt -rn -o SOURCE --mountpoint /); '
+        'ROOT_DEVICE=$(readlink -f "$ROOT_SOURCE"); test -b "$ROOT_DEVICE"; '
+        'ROOT_ANCESTRY=$(lsblk -srnpo NAME "$ROOT_DEVICE"); '
+        'test -n "$ROOT_ANCESTRY"; '
+        'if printf "%s\\n" "$ROOT_ANCESTRY" | grep -Fxq "$DEVICE"; then '
+        'echo "Azure DeathStarBench database LUN 0 resolves into the root '
+        'device ancestry." >&2; exit 1; fi; '
+        'test -d "$MOUNT_POINT"; test ! -L "$MOUNT_POINT"; '
+        'test "$(readlink -f "$MOUNT_POINT")" = "$MOUNT_POINT"; '
+        'DEVICE_TYPE=$(sudo blkid -s TYPE -o value "$DEVICE" 2>/dev/null); '
+        'test "$DEVICE_TYPE" = xfs; '
+        'DEVICE_UUID=$(sudo blkid -s UUID -o value "$DEVICE" '
+        '| tr "[:upper:]" "[:lower:]"); '
+        'if [ "$DEVICE_UUID" != "$EXPECTED_UUID" ]; then '
+        'echo "Azure DeathStarBench database LUN 0 UUID changed." >&2; '
+        'exit 1; fi; '
+        'MOUNTED_SOURCE=$(sudo findmnt -rn -o SOURCE '
+        '--mountpoint "$MOUNT_POINT"); '
+        'MOUNTED_DEVICE=$(readlink -f "$MOUNTED_SOURCE"); '
+        'test -b "$MOUNTED_DEVICE"; test "$MOUNTED_DEVICE" = "$DEVICE"; '
+        'MOUNTED_UUID=$(sudo findmnt -rn -o UUID '
+        '--mountpoint "$MOUNT_POINT" | tr "[:upper:]" "[:lower:]"); '
+        'MOUNTED_TYPE=$(sudo findmnt -rn -o FSTYPE '
+        '--mountpoint "$MOUNT_POINT"); '
+        'test "$MOUNTED_UUID" = "$EXPECTED_UUID"; '
+        'test "$MOUNTED_TYPE" = xfs; '
+        'DEVICE_MOUNTS=$(lsblk -dnro MOUNTPOINTS "$DEVICE" '
+        '| sed \'/^[[:space:]]*$/d\'); '
+        'test "$DEVICE_MOUNTS" = "$MOUNT_POINT"; '
+        'EXPECTED_FSTAB="UUID=$EXPECTED_UUID '
+        '/var/lib/deathstarbench/database xfs discard,nofail 0 2 '
+        '# cloud-benchmark-dsb-database"; '
+        'grep -Fxq "$EXPECTED_FSTAB" /etc/fstab; '
+        'printf "AZURE_DSB_DATABASE_VOLUME lun=0 device_link=%s uuid=%s '
+        'mount_point=/var/lib/deathstarbench/database filesystem=xfs\\n" '
+        '"$DEVICE_LINK" "$EXPECTED_UUID"'
+    )
+
+
 def iperf3_peer_startup_script(
     protocols: Iterable[str],
     *,

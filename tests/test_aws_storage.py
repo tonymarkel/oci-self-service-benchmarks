@@ -525,6 +525,11 @@ class AwsStorageGuestTests(unittest.TestCase):
 
     def test_aws_storage_workloads_mount_and_use_strict_parsers(self):
         plan = storage_plan()
+        target_metadata = {
+            'storage_target_contract': 'v1',
+            'storage_target_kind': 'instance_local_nvme',
+            'storage_target_mount_point': '/benchmark-local',
+        }
         job = {
             'id': 'job123',
             'events': [],
@@ -543,17 +548,30 @@ class AwsStorageGuestTests(unittest.TestCase):
         with (
             patch.object(main, 'ssh', return_value='ready'),
             patch.object(main, 'mount_data_volume') as mount,
+            patch.object(
+                main,
+                'prepare_storage_benchmark_target',
+                return_value=('/benchmark-local', target_metadata),
+            ) as prepare_target,
             patch.object(main, 'execute_benchmark') as execute,
             patch.object(main, 'run_phoronix_profiles', return_value=()),
         ):
             main.run_aws_benchmarks(job, plan)
 
-        mount.assert_called_once_with(job)
+        mount.assert_not_called()
+        prepare_target.assert_called_once()
+        self.assertIs(prepare_target.call_args.args[0], job)
+        self.assertIs(prepare_target.call_args.args[1], plan)
         calls = {
             item.args[1]: item
             for item in execute.call_args_list
         }
         self.assertEqual(set(calls), {'fio', 'sysbench_fileio'})
+        self.assertIn('--directory=/benchmark-local', calls['fio'].args[3])
+        self.assertIn(
+            'cd /benchmark-local',
+            calls['sysbench_fileio'].args[3],
+        )
         self.assertIs(
             calls['fio'].kwargs['parser'],
             main.amazon_linux.parse_fio_output,
@@ -566,6 +584,19 @@ class AwsStorageGuestTests(unittest.TestCase):
             calls['fio'].kwargs['metadata']['data_volume_iops'],
             3000,
         )
+        for benchmark_id in ('fio', 'sysbench_fileio'):
+            self.assertEqual(
+                calls[benchmark_id].kwargs['metadata'][
+                    'storage_target_contract'
+                ],
+                'v1',
+            )
+            self.assertEqual(
+                calls[benchmark_id].kwargs['metadata'][
+                    'storage_target_mount_point'
+                ],
+                '/benchmark-local',
+            )
         self.assertIsNone(calls['fio'].kwargs['output_limit'])
 
 

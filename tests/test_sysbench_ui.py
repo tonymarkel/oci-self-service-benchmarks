@@ -74,6 +74,27 @@ class SysbenchUiTests(unittest.TestCase):
             ['cpu', 'memory', 'fileio'],
         )
 
+    def test_storage_copy_explains_local_nvme_preference_and_fallback(self):
+        fio = next(item for item in BENCHMARKS if item['id'] == 'fio')
+        fileio = next(
+            item for item in SYSBENCH_WORKLOADS
+            if item['id'] == 'fileio'
+        )
+
+        for description in (fio['description'], fileio['description']):
+            self.assertIn('provider-verified instance-local NVMe', description)
+            self.assertIn('/data', description)
+            self.assertIn('ephemeral', description)
+        self.assertIn('/benchmark-local', INDEX)
+        self.assertIn(
+            'always require and provision the additional /data',
+            INDEX,
+        )
+        self.assertIn(
+            'current GCP catalog excludes Local SSD and -lssd machine types',
+            INDEX,
+        )
+
     def test_javascript_renders_nested_workloads_with_cpu_default(self):
         render = javascript_function('renderCatalog')
 

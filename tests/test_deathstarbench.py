@@ -911,6 +911,17 @@ class RevisionPinningTests(unittest.TestCase):
 
         self.assertEqual(result["upstream_revision"], EXPECTED_REVISION)
         self.assertEqual(result["container_runtime"], "Podman with podman-compose")
+        self.assertEqual(result["topology_id"], "single_host_v1")
+        self.assertEqual(result["runtime_id"], "podman_compose_v1")
+        self.assertEqual(
+            result["runtime_revision"],
+            "legacy-podman-compose-runtime-v1",
+        )
+        self.assertEqual(
+            result["service_placement_revision"],
+            "all-workload-services-on-runner-v1",
+        )
+        self.assertEqual(result["topology_roles"], "runner, load_generator")
 
 
 if __name__ == "__main__":

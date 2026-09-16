@@ -111,7 +111,10 @@ records that resolved profile in every benchmark result; it does not accept a
 client-supplied disk or NIC override. C4A `-lssd`, bare-metal, and accelerator
 variants remain excluded. Other families that require an unimplemented
 Hyperdisk profile, bundled Local SSD, or accelerators remain hidden. Discovery
-also lists only machine types whose Compute Engine metadata reports an explicit
+therefore never exposes a provider-verified instance-local device to the
+current GCP storage-target policy: GCP fio and Sysbench file I/O runs use the
+provisioned `/data` disk. Discovery also lists only machine types whose Compute
+Engine metadata reports an explicit
 x86_64 or Arm64 architecture; legacy types with unspecified architecture stay
 hidden rather than risking selection of the wrong guest image. That strict rule
 continues to apply to customer-selected targets. The fixed
@@ -160,10 +163,13 @@ also fail after discovery and is reported separately.
 
 Azure runs use a pinned Rocky Linux 9 image matching the selected x86_64 or
 Arm64 VM. Cobalt `Dpsv6` and `Dplsv6` sizes are exposed when Azure reports them
-available. Storage tests use a zonal Premium SSD v2 `/data` disk at its baseline
-3,000 IOPS and 125 MiB/s profile. The guest mounts only the persisted Azure LUN
-through Azure's stable disk links. Azure iperf3 supports TCP and UDP; SCTP is
-hidden and rejected until Azure Virtual Network support is proven.
+available. The required storage fallback is a zonal Premium SSD v2 `/data` disk
+at its baseline 3,000 IOPS and 125 MiB/s profile. The guest mounts only the
+persisted Azure LUN through Azure's stable disk links. When Azure verifies a
+blank instance-local NVMe device, fio and Sysbench file I/O prefer that device
+at `/benchmark-local`; otherwise they use `/data`. Azure iperf3 supports TCP
+and UDP; SCTP is hidden and rejected until Azure Virtual Network support is
+proven.
 
 ## Default SSH key pair
 
@@ -186,10 +192,11 @@ during cleanup; AWS EC2 accepts RSA and Ed25519 keys for this flow.
 
 - OCI runs use Oracle Linux. AWS runs use the latest default Amazon Linux 2023 AMI. GCP and Azure runs use a pinned Rocky Linux 9 image for the selected architecture.
 - OCI, AWS, and GCP support the full exposed workload set: Sysbench CPU, memory, and file I/O; STREAM; fio; iperf3 TCP, UDP, and SCTP; the curated Phoronix profiles; ApacheBench; DeathStarBench; and CPU-only llama.cpp. Azure supports the same surface except SCTP; its iperf3 choices are TCP and UDP.
-- AWS storage tests use an optional encrypted gp3 `/data` volume with selectable capacity and the gp3 baseline of 3,000 IOPS and 125 MiB/s. It is mounted by its exact EBS volume ID with a persistent filesystem UUID and is included in ownership-safe cleanup.
-- GCP storage tests use `pd-balanced` on the broadly compatible machine families. C4A uses Hyperdisk Balanced at 3,000 IOPS / 140 MiB/s with NVMe and gVNIC. An untouched C4A `/data` size defaults to 100 GiB; larger plans still require sufficient regional Hyperdisk capacity and performance quota.
-- Azure storage tests use a zonal Premium SSD v2 `/data` disk at 3,000 IOPS and 125 MiB/s. Region, zone, VM-size, and disk support are validated before launch.
-- Sysbench is selected once, then its CPU, memory, and file I/O workloads can be enabled independently. CPU is the default; file I/O uses the additional `/data` volume.
+- fio and Sysbench file I/O always require and provision the additional `/data` volume as a safe fallback. Before either benchmark, the app prefers one blank, provider-verified instance-local NVMe device and mounts it at `/benchmark-local`; if none is verified, it uses the exact provisioned `/data` volume. An NVMe device name or transport alone is not treated as proof of local storage. Instance-local storage is ephemeral, so its contents disappear with the benchmark instance. Reports record the target that was actually tested.
+- AWS storage fallbacks use an encrypted gp3 `/data` volume with selectable capacity and the gp3 baseline of 3,000 IOPS and 125 MiB/s. It is mounted by its exact EBS volume ID with a persistent filesystem UUID and is included in ownership-safe cleanup even when verified local NVMe is selected for the benchmark.
+- GCP storage tests use `pd-balanced` on the broadly compatible machine families. C4A uses Hyperdisk Balanced at 3,000 IOPS / 140 MiB/s with NVMe and gVNIC. An untouched C4A `/data` size defaults to 100 GiB; larger plans still require sufficient regional Hyperdisk capacity and performance quota. Because the current catalog excludes Local SSD, `-lssd`, and bundled-local-SSD machine types, GCP storage benchmarks use `/data`.
+- Azure storage fallbacks use a zonal Premium SSD v2 `/data` disk at 3,000 IOPS and 125 MiB/s. Region, zone, VM-size, and disk support are validated before launch; the disk remains provisioned and cleanup-owned when verified local NVMe is benchmarked instead.
+- Sysbench is selected once, then its CPU, memory, and file I/O workloads can be enabled independently. CPU is the default; file I/O follows the verified-local-NVMe preference and `/data` fallback policy above.
 - iperf3 is selected once and TCP is the default. OCI, AWS, and GCP support TCP, UDP, and SCTP; Azure supports TCP and UDP. Every provider uses a separate peer and targets only its private address. AWS, GCP, and Azure use a same-size peer in the runner's Availability Zone or zone so a small helper does not cap the result. TCP/5201 is retained for control and TCP data, and UDP/5201 is opened only when selected. SCTP rules and guest kernel validation apply only to providers advertising SCTP support.
 - llama.cpp runs CPU-only on the selected x86_64 or Arm64 target and uses all detected logical CPUs. It builds release `b10218` at commit `de699957b92f490efebad149665b0dccf127eaff` with GPU backends disabled. x86_64 uses a fixed portable AVX2-era profile with AVX-512 and AMX disabled so every cloud executes the same instruction baseline; Arm64 retains native optimization. It then benchmarks `tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf` from immutable model revision `c1d7cb837a660d93ba28f936efb148591bfba3e9`. Rocky Linux runners use the coherent GCC Toolset 15 compiler/binutils stack; OCI retains GCC Toolset 12 and AWS uses its Amazon Linux toolchain. Before building, every runner records and validates the CPU build profile plus the selected GCC and GNU assembler paths and versions. The validated x86_64 portable and Arm64 native profiles implement one architecture-appropriate CPU benchmark method, so matching workloads can be compared across providers and architectures. Charts show non-blocking provenance warnings with each exact architecture, build profile, and toolchain because ISA-specific kernels and compiler code generation can affect performance; historical or unrecognized build profiles remain separate. The model is Q4_K_M, its expected SHA-256 is `9fecc3b3cd76bba89d504f29b616eedf7da85b96540e490ca5824d3f7d2776a0`, and reports verify the build, artifact, CPU backend, zero GPU offload, thread count, toolchain, downloaded file size, and llama-bench payload size.
 - Phoronix Test Suite is selected once, then pinned 7-Zip, OpenSSL SHA-256, Linux kernel compilation, and Tinymembench profiles can be enabled independently; 7-Zip is the default. Each profile runs three measured trials with fixed options, structured metrics, and its own report section. The Linux kernel profile has a 60-minute execution limit; the other profiles have a 30-minute limit. The Phoronix client revision and exact profile versions are recorded in the report.

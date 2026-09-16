@@ -1,0 +1,535 @@
+{
+  "components": [
+    {
+      "entrypoint": "ComposePostService",
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "social-network-microservices",
+      "name": "compose-post-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "redis",
+      "name": "home-timeline-redis",
+      "ports": [
+        {
+          "container_port": 6379,
+          "name": "redis",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 6379
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": "HomeTimelineService",
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "social-network-microservices",
+      "name": "home-timeline-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": null,
+      "environment": {
+        "COLLECTOR_ZIPKIN_HTTP_PORT": "9411"
+      },
+      "external_traffic_policy": null,
+      "image_key": "jaeger",
+      "name": "jaeger-agent",
+      "ports": [
+        {
+          "container_port": 6831,
+          "name": "jaeger-compact",
+          "node_port": null,
+          "protocol": "UDP",
+          "service_port": 6831
+        },
+        {
+          "container_port": 16686,
+          "name": "jaeger-admin",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 16686
+        }
+      ],
+      "role": "control",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": null,
+      "environment": {
+        "fqdn_suffix": ".deathstarbench-social.svc.cluster.local"
+      },
+      "external_traffic_policy": null,
+      "image_key": "media-frontend",
+      "name": "media-frontend",
+      "ports": [
+        {
+          "container_port": 8080,
+          "name": "http-media",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 8081
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "memcached",
+      "name": "media-memcached",
+      "ports": [
+        {
+          "container_port": 11211,
+          "name": "memcached",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 11211
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "media-mongodb",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "media-mongodb"
+    },
+    {
+      "entrypoint": "MediaService",
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "social-network-microservices",
+      "name": "media-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": null,
+      "environment": {
+        "fqdn_suffix": ".deathstarbench-social.svc.cluster.local"
+      },
+      "external_traffic_policy": "Local",
+      "image_key": "nginx-thrift",
+      "name": "nginx-thrift",
+      "ports": [
+        {
+          "container_port": 8080,
+          "name": "http",
+          "node_port": 8080,
+          "protocol": "TCP",
+          "service_port": 8080
+        }
+      ],
+      "role": "application",
+      "service_type": "NodePort",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "memcached",
+      "name": "post-storage-memcached",
+      "ports": [
+        {
+          "container_port": 11211,
+          "name": "memcached",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 11211
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "post-storage-mongodb",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "post-storage-mongodb"
+    },
+    {
+      "entrypoint": "PostStorageService",
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "social-network-microservices",
+      "name": "post-storage-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "social-graph-mongodb",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "social-graph-mongodb"
+    },
+    {
+      "entrypoint": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "redis",
+      "name": "social-graph-redis",
+      "ports": [
+        {
+          "container_port": 6379,
+          "name": "redis",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 6379
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": "SocialGraphService",
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "social-network-microservices",
+      "name": "social-graph-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": "TextService",
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "social-network-microservices",
+      "name": "text-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": "UniqueIdService",
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "social-network-microservices",
+      "name": "unique-id-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "memcached",
+      "name": "url-shorten-memcached",
+      "ports": [
+        {
+          "container_port": 11211,
+          "name": "memcached",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 11211
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "url-shorten-mongodb",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "url-shorten-mongodb"
+    },
+    {
+      "entrypoint": "UrlShortenService",
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "social-network-microservices",
+      "name": "url-shorten-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "memcached",
+      "name": "user-memcached",
+      "ports": [
+        {
+          "container_port": 11211,
+          "name": "memcached",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 11211
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": "UserMentionService",
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "social-network-microservices",
+      "name": "user-mention-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "user-mongodb",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "user-mongodb"
+    },
+    {
+      "entrypoint": "UserService",
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "social-network-microservices",
+      "name": "user-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "user-timeline-mongodb",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "user-timeline-mongodb"
+    },
+    {
+      "entrypoint": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "redis",
+      "name": "user-timeline-redis",
+      "ports": [
+        {
+          "container_port": 6379,
+          "name": "redis",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 6379
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "entrypoint": "UserTimelineService",
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "social-network-microservices",
+      "name": "user-timeline-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    }
+  ],
+  "namespace": "deathstarbench-social",
+  "released": false,
+  "schema_version": 1,
+  "upstream_revision": "6ecb09706140f8730b5385c08f1386c654c3c526",
+  "workload_revision": "social-network-6ecb097-workload-v1"
+}

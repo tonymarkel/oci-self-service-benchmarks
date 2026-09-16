@@ -26,6 +26,14 @@ class ProviderPlanTests(unittest.TestCase):
         self.assertEqual(plan.aws_profile, 'default')
         self.assertTrue(plan.storage.additional_volume)
 
+    def test_legacy_nvme_block_attachment_normalizes_to_paravirtualized(self):
+        plan = BenchmarkPlan(**plan_values(storage={
+            'additional_volume': True,
+            'mount_style': 'nvme',
+        }))
+
+        self.assertEqual(plan.storage.mount_style, 'paravirtualized')
+
     def test_oci_rejects_benchmarks_outside_its_advertised_capabilities(self):
         with self.assertRaisesRegex(
             ValidationError,

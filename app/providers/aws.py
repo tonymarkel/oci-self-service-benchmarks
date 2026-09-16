@@ -326,6 +326,65 @@ def _supported_architectures(instance_type):
     return [item for item in SUPPORTED_ARCHITECTURES if item in architectures]
 
 
+def _local_nvme_storage_summary(instance_type):
+    """Return a fail-closed local-NVMe profile from EC2 type metadata.
+
+    ``/dev/nvme*`` is not sufficient evidence of instance-local storage on
+    Nitro because EBS volumes use the same guest interface.  Only advertise a
+    profile when EC2 positively reports instance storage, NVMe support, a
+    uniform all-SSD disk layout, and an internally consistent total size.
+    """
+    unavailable = {
+        'local_nvme_supported': False,
+        'local_nvme_disk_count': 0,
+        'local_nvme_disk_size_gb': 0,
+        'local_nvme_total_size_gb': 0,
+    }
+    if instance_type.get('InstanceStorageSupported') is not True:
+        return unavailable
+    storage = instance_type.get('InstanceStorageInfo') or {}
+    if str(storage.get('NvmeSupport') or '').casefold() not in {
+        'supported',
+        'required',
+    }:
+        return unavailable
+    total_size_gb = storage.get('TotalSizeInGB')
+    if (
+        isinstance(total_size_gb, bool)
+        or not isinstance(total_size_gb, int)
+        or total_size_gb <= 0
+    ):
+        return unavailable
+    disk_count = 0
+    disk_sizes = set()
+    for disk in storage.get('Disks') or ():
+        count = disk.get('Count')
+        size_gb = disk.get('SizeInGB')
+        if (
+            str(disk.get('Type') or '').casefold() != 'ssd'
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count <= 0
+            or isinstance(size_gb, bool)
+            or not isinstance(size_gb, int)
+            or size_gb <= 0
+        ):
+            return unavailable
+        disk_count += count
+        disk_sizes.add(size_gb)
+    if len(disk_sizes) != 1 or disk_count <= 0:
+        return unavailable
+    disk_size_gb = disk_sizes.pop()
+    if disk_count * disk_size_gb != total_size_gb:
+        return unavailable
+    return {
+        'local_nvme_supported': True,
+        'local_nvme_disk_count': disk_count,
+        'local_nvme_disk_size_gb': disk_size_gb,
+        'local_nvme_total_size_gb': total_size_gb,
+    }
+
+
 def _al2023_incompatibility(instance_type):
     """Explain EC2 families whose advertised ISA cannot boot this AL2023 AMI."""
     name = str(instance_type.get('InstanceType') or '').casefold()
@@ -366,6 +425,7 @@ def _instance_type_summary(item):
         'bare_metal': bool(item.get('BareMetal', False)),
         'burstable': bool(item.get('BurstablePerformanceSupported', False)),
         'hypervisor': item.get('Hypervisor'),
+        **_local_nvme_storage_summary(item),
     }
 
 
@@ -503,6 +563,7 @@ def _instance_type_details(ec2, instance_type):
         'memory_gb': item.get('MemoryInfo', {}).get('SizeInMiB', 0) / 1024,
         'bare_metal': bool(item.get('BareMetal', False)),
         'hypervisor': item.get('Hypervisor'),
+        **_local_nvme_storage_summary(item),
     }
 
 
@@ -800,6 +861,18 @@ def provision(
         memory_gb=type_details['memory_gb'],
         bare_metal=type_details['bare_metal'],
         hypervisor=type_details.get('hypervisor'),
+        local_nvme_supported=bool(
+            type_details.get('local_nvme_supported', False)
+        ),
+        local_nvme_disk_count=int(
+            type_details.get('local_nvme_disk_count', 0) or 0
+        ),
+        local_nvme_disk_size_gb=int(
+            type_details.get('local_nvme_disk_size_gb', 0) or 0
+        ),
+        local_nvme_total_size_gb=int(
+            type_details.get('local_nvme_total_size_gb', 0) or 0
+        ),
         availability_zone=availability_zone,
         ami_parameter=image['parameter_name'],
         ami_parameter_version=image.get('parameter_version'),

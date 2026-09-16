@@ -24,6 +24,10 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import PHORONIX_PROFILES
+from .deathstarbench_contract import (
+    SINGLE_HOST_RUNTIME_REVISION,
+    runtime_profile,
+)
 from .llama_cpp import (
     AARCH64_NATIVE_CMAKE_OPTIONS,
     AARCH64_NATIVE_CPU_PROFILE,
@@ -33,6 +37,8 @@ from .llama_cpp import (
 )
 from .models import (
     ApacheBenchOptions,
+    DEATHSTARBENCH_DEFAULT_RUNTIME_ID,
+    DEATHSTARBENCH_DEFAULT_TOPOLOGY_ID,
     DeathStarBenchOptions,
     Iperf3Options,
     PhoronixOptions,
@@ -52,6 +58,30 @@ COMPARISON_SCHEMA_VERSION = 1
 WORKLOAD_CONTRACT_VERSION = 3
 
 LLAMA_ARCHITECTURE_PROFILE_METHOD = 'validated-cloud-cpu-profile-v1'
+DEATHSTARBENCH_LEGACY_RUNTIME_REVISION = SINGLE_HOST_RUNTIME_REVISION
+STORAGE_RESULT_IDS = frozenset({'fio', 'sysbench_fileio'})
+STORAGE_TARGET_CONTRACT = 'v1'
+STORAGE_TARGET_POLICY = (
+    'prefer_verified_instance_local_nvme_else_additional_volume_v1'
+)
+STORAGE_TARGET_KINDS = frozenset({
+    'instance_local_nvme',
+    'provisioned_data_volume',
+})
+STORAGE_TARGET_LAYOUT = 'single_device_v1'
+STORAGE_TARGET_MOUNT_POINTS = frozenset({'/benchmark-local', '/data'})
+STORAGE_TARGET_TRANSPORTS = frozenset({
+    'iscsi',
+    'nvme',
+    'paravirtualized',
+    'scsi',
+    'virtio',
+    'xen',
+})
+STORAGE_TARGET_VERIFICATION = {
+    'instance_local_nvme': 'provider_attested_guest_verified_v1',
+    'provisioned_data_volume': 'manifest_bound_guest_verified_v1',
+}
 
 DIRECTION_HIGHER = 'higher_is_better'
 DIRECTION_LOWER = 'lower_is_better'
@@ -599,6 +629,313 @@ def _profile_for_result(result_id: str) -> dict[str, Any] | None:
     )
 
 
+def _storage_target_context(
+    metadata: Mapping[str, Any],
+    issues: list[str],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Return the versioned storage method and observed target provenance.
+
+    Results without a marker predate automatic local-NVMe selection.  Their
+    exact historical contract remains the additional ``/data`` volume so
+    existing fingerprints and comparison links stay stable.  Once a marker
+    is present, incomplete or contradictory metadata fails closed rather
+    than being mistaken for a legacy result.
+    """
+
+    marker = metadata.get('storage_target_contract')
+    has_storage_target_metadata = any(
+        str(key).startswith('storage_target_') for key in metadata
+    )
+    if marker is None and not has_storage_target_metadata:
+        return {'data_path': 'additional_volume'}, None
+
+    settings = {
+        'data_path': 'selected_benchmark_storage',
+        'storage_target_contract': STORAGE_TARGET_CONTRACT,
+        'storage_target_policy': STORAGE_TARGET_POLICY,
+        'filesystem': 'xfs',
+        'layout_policy': STORAGE_TARGET_LAYOUT,
+    }
+    if marker is None:
+        issues.append(
+            'The storage target contract marker is missing from otherwise '
+            'versioned storage metadata.'
+        )
+    elif marker != STORAGE_TARGET_CONTRACT:
+        issues.append(
+            'The storage target contract marker is unsupported.'
+        )
+
+    policy = metadata.get('storage_target_policy')
+    if policy != STORAGE_TARGET_POLICY:
+        issues.append(
+            'The storage target selection policy is missing or unsupported.'
+        )
+
+    kind = metadata.get('storage_target_kind')
+    if not isinstance(kind, str) or kind not in STORAGE_TARGET_KINDS:
+        issues.append(
+            'The observed storage target kind is missing or unsupported.'
+        )
+
+    verification = metadata.get('storage_target_verification')
+    expected_verification = (
+        STORAGE_TARGET_VERIFICATION.get(kind)
+        if isinstance(kind, str)
+        else None
+    )
+    if not expected_verification or verification != expected_verification:
+        issues.append(
+            'The observed storage target verification is missing or '
+            'inconsistent with its kind.'
+        )
+
+    layout = metadata.get('storage_target_layout')
+    if layout != STORAGE_TARGET_LAYOUT:
+        issues.append(
+            'The observed storage target layout is missing or unsupported.'
+        )
+
+    device_count = metadata.get('storage_target_device_count')
+    if (
+        isinstance(device_count, bool)
+        or not isinstance(device_count, int)
+        or device_count != 1
+    ):
+        issues.append(
+            'The observed storage target must contain exactly one device.'
+        )
+
+    filesystem = metadata.get('storage_target_filesystem')
+    if filesystem != 'xfs':
+        issues.append(
+            'The observed storage target filesystem must be XFS.'
+        )
+
+    mount_point = metadata.get('storage_target_mount_point')
+    expected_mount_point = (
+        '/benchmark-local'
+        if kind == 'instance_local_nvme'
+        else '/data'
+    )
+    if (
+        not isinstance(mount_point, str)
+        or mount_point not in STORAGE_TARGET_MOUNT_POINTS
+        or mount_point != expected_mount_point
+    ):
+        issues.append(
+            'The observed storage target mount point is missing or '
+            'inconsistent with its kind.'
+        )
+
+    capacity_bytes = metadata.get('storage_target_capacity_bytes')
+    if (
+        isinstance(capacity_bytes, bool)
+        or not isinstance(capacity_bytes, int)
+        or capacity_bytes <= 0
+    ):
+        issues.append(
+            'The observed storage target capacity must be a positive integer.'
+        )
+
+    transport = metadata.get('storage_target_transport')
+    if (
+        not isinstance(transport, str)
+        or transport not in STORAGE_TARGET_TRANSPORTS
+    ):
+        issues.append(
+            'The observed storage target transport is missing or unsupported.'
+        )
+    elif kind == 'instance_local_nvme' and transport != 'nvme':
+        issues.append(
+            'An instance-local storage target must use the NVMe transport.'
+        )
+
+    raw_model = metadata.get('storage_target_model')
+    model = (
+        _clean_text(raw_model.strip(), 256).strip()
+        if isinstance(raw_model, str)
+        else ''
+    )
+    if not model:
+        issues.append(
+            'The observed storage target model is missing or must be '
+            'non-empty text.'
+        )
+
+    target = {
+        'kind': kind,
+        'verification': verification,
+        'transport': transport,
+        'capacity_bytes': capacity_bytes,
+        'device_count': device_count,
+        'layout': layout,
+        'filesystem': filesystem,
+        'mount_point': mount_point,
+    }
+    if model:
+        target['model'] = model
+    # Invalid descriptors are never exposed as verified provenance.  Keeping
+    # their raw structural values out of later cohort processing also ensures
+    # a damaged artifact is excluded rather than raising while warnings are
+    # assembled.
+    return settings, None if issues else {'storage_target': target}
+
+
+def _deathstarbench_execution_context(
+    options: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    issues: list[str],
+) -> dict[str, Any]:
+    """Return the attested DeathStarBench topology/runtime identity.
+
+    Historical results predate explicit execution metadata.  The only safe
+    compatibility inference for those artifacts is the original single-host
+    Podman Compose implementation.  Any distributed result, or any result
+    that starts emitting the versioned markers, must attest the complete
+    identity, registered topology/placement revisions, and an exact runtime
+    revision.  Runtime revisions are intentionally not required to equal the
+    profile's current revision: keeping the recorded value in the fingerprint
+    preserves comparison support for older, fully attested runtime builds.
+    """
+
+    topology_id = options.get(
+        'topology_id',
+        DEATHSTARBENCH_DEFAULT_TOPOLOGY_ID,
+    )
+    runtime_id = options.get(
+        'runtime_id',
+        DEATHSTARBENCH_DEFAULT_RUNTIME_ID,
+    )
+    marker_keys = (
+        'topology_id',
+        'topology_revision',
+        'runtime_id',
+        'runtime_revision',
+        'service_placement_revision',
+    )
+    present_marker_keys = tuple(key for key in marker_keys if key in metadata)
+
+    try:
+        profile = runtime_profile(topology_id, runtime_id)
+    except ValueError:
+        profile = None
+        issues.append(
+            'The planned DeathStarBench topology/runtime profile is not '
+            'registered.'
+        )
+
+    if not present_marker_keys:
+        if (
+            topology_id == DEATHSTARBENCH_DEFAULT_TOPOLOGY_ID
+            and runtime_id == DEATHSTARBENCH_DEFAULT_RUNTIME_ID
+            and profile is not None
+        ):
+            topology_revision: str | None = profile.topology_revision
+            runtime_revision: str | None = profile.runtime_revision
+            placement_revision: str | None = profile.placement_revision
+        else:
+            topology_revision = None
+            runtime_revision = None
+            placement_revision = None
+            issues.append(
+                'DeathStarBench distributed topology/runtime metadata is '
+                'missing.'
+            )
+        return {
+            'topology_id': topology_id,
+            'topology_revision': topology_revision,
+            'runtime_id': runtime_id,
+            'runtime_revision': runtime_revision,
+            'service_placement_revision': placement_revision,
+        }
+
+    if len(present_marker_keys) != len(marker_keys):
+        missing = [key for key in marker_keys if key not in metadata]
+        issues.append(
+            'The complete DeathStarBench execution attestation is required; '
+            'missing: ' + ', '.join(missing) + '.'
+        )
+
+    reported_topology_id = metadata.get('topology_id')
+    if not isinstance(reported_topology_id, str) or not reported_topology_id:
+        issues.append(
+            'The DeathStarBench topology identity is missing or invalid.'
+        )
+    elif reported_topology_id != topology_id:
+        issues.append(
+            'The reported DeathStarBench topology does not match the plan.'
+        )
+
+    raw_topology_revision = metadata.get('topology_revision')
+    topology_revision = (
+        _clean_text(raw_topology_revision, 256).strip()
+        if isinstance(raw_topology_revision, str)
+        else ''
+    )
+    if not topology_revision:
+        issues.append(
+            'The DeathStarBench topology revision is missing or invalid.'
+        )
+    elif (
+        profile is not None
+        and topology_revision != profile.topology_revision
+    ):
+        issues.append(
+            'The reported DeathStarBench topology revision does not match '
+            'the registered topology/runtime profile.'
+        )
+
+    reported_runtime_id = metadata.get('runtime_id')
+    if not isinstance(reported_runtime_id, str) or not reported_runtime_id:
+        issues.append(
+            'The DeathStarBench runtime identity is missing or invalid.'
+        )
+    elif reported_runtime_id != runtime_id:
+        issues.append(
+            'The reported DeathStarBench runtime does not match the plan.'
+        )
+
+    raw_runtime_revision = metadata.get('runtime_revision')
+    runtime_revision = (
+        _clean_text(raw_runtime_revision, 256).strip()
+        if isinstance(raw_runtime_revision, str)
+        else ''
+    )
+    if not runtime_revision:
+        issues.append(
+            'The exact DeathStarBench runtime revision is missing or invalid.'
+        )
+
+    raw_placement_revision = metadata.get('service_placement_revision')
+    placement_revision = (
+        _clean_text(raw_placement_revision, 256).strip()
+        if isinstance(raw_placement_revision, str)
+        else ''
+    )
+    if not placement_revision:
+        issues.append(
+            'The DeathStarBench service placement revision is missing or '
+            'invalid.'
+        )
+    elif (
+        profile is not None
+        and placement_revision != profile.placement_revision
+    ):
+        issues.append(
+            'The reported DeathStarBench service placement revision does '
+            'not match the registered topology/runtime profile.'
+        )
+
+    return {
+        'topology_id': topology_id,
+        'topology_revision': topology_revision or None,
+        'runtime_id': runtime_id,
+        'runtime_revision': runtime_revision or None,
+        'service_placement_revision': placement_revision or None,
+    }
+
+
 def workload_fingerprint(
     result_id: str,
     plan: Mapping[str, Any] | object,
@@ -643,8 +980,12 @@ def workload_fingerprint(
             'workload': 'fileio_random_read_write',
             'duration_seconds': 60,
             'file_total_size_gib': 4,
-            'data_path': 'additional_volume',
         }
+        storage_settings, provenance = _storage_target_context(
+            safe_metadata,
+            issues,
+        )
+        settings.update(storage_settings)
     elif result_id == 'stream':
         settings = {
             'tool': 'STREAM',
@@ -668,8 +1009,12 @@ def workload_fingerprint(
             'duration_seconds_each': 60,
             'direct_io': True,
             'time_based': True,
-            'data_path': 'additional_volume',
         }
+        storage_settings, provenance = _storage_target_context(
+            safe_metadata,
+            issues,
+        )
+        settings.update(storage_settings)
     elif result_id in {'iperf_tcp', 'iperf_udp', 'iperf_sctp'}:
         protocol = result_id.removeprefix('iperf_')
         settings = {
@@ -723,6 +1068,13 @@ def workload_fingerprint(
             'upstream_revision': upstream_revision,
             'latency_distribution': 'exponential',
         }
+        settings.update(
+            _deathstarbench_execution_context(
+                options,
+                safe_metadata,
+                issues,
+            )
+        )
     elif result_id == 'llama_bench':
         required = (
             'llama_cpp_revision',
@@ -1436,6 +1788,98 @@ def _add_llama_provenance_warnings(
     return warnings
 
 
+def _storage_capacity_description(value: object) -> str | None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value <= 0
+    ):
+        return None
+    gibibytes = value / (1024 ** 3)
+    if gibibytes >= 1024:
+        amount = gibibytes / 1024
+        number = f'{amount:.2f}'.rstrip('0').rstrip('.')
+        return f'{number} TiB'
+    number = f'{gibibytes:.2f}'.rstrip('0').rstrip('.')
+    return f'{number} GiB'
+
+
+def _storage_target_description(provenance: object) -> str:
+    """Return a concise, display-safe description of tested storage."""
+
+    target = _mapping(_mapping(provenance).get('storage_target'))
+    kind = {
+        'instance_local_nvme': 'instance-local NVMe',
+        'provisioned_data_volume': 'provisioned data volume',
+    }.get(target.get('kind'), 'unknown storage')
+    pieces = [kind]
+    model = target.get('model')
+    if isinstance(model, str) and model.strip():
+        pieces.append(model.strip())
+    transport = target.get('transport')
+    if isinstance(transport, str) and transport.strip():
+        pieces.append(
+            'NVMe'
+            if transport.strip().lower() == 'nvme'
+            else transport.strip().replace('_', ' ')
+        )
+    device_count = target.get('device_count')
+    if isinstance(device_count, int) and not isinstance(device_count, bool):
+        suffix = '' if device_count == 1 else 's'
+        pieces.append(f'{device_count} device{suffix}')
+    filesystem = target.get('filesystem')
+    if isinstance(filesystem, str) and filesystem.strip():
+        pieces.append(filesystem.strip().upper())
+    capacity = _storage_capacity_description(target.get('capacity_bytes'))
+    if capacity:
+        pieces.append(capacity)
+    return ' · '.join(pieces)
+
+
+def _add_storage_provenance_warnings(
+    result_id: str,
+    cohort_entries: Sequence[dict[str, Any]],
+) -> list[str]:
+    """Call out mixed tested-storage classes without splitting the cohort."""
+
+    if result_id not in STORAGE_RESULT_IDS or len(cohort_entries) < 2:
+        return []
+    targets = [
+        _mapping(_mapping(entry.get('provenance')).get('storage_target'))
+        for entry in cohort_entries
+    ]
+    if not all(targets):
+        # Legacy storage cohorts intentionally have no target provenance and
+        # cannot share a fingerprint with the versioned selection method.
+        return []
+    signatures = {
+        (
+            target.get('kind'),
+            target.get('transport'),
+            target.get('layout'),
+            target.get('model'),
+            target.get('capacity_bytes'),
+        )
+        for target in targets
+    }
+    if len(signatures) <= 1:
+        return []
+    for entry in cohort_entries:
+        warning = (
+            'Storage target: '
+            + _storage_target_description(entry.get('provenance'))
+            + '.'
+        )
+        entry_warnings = entry.setdefault('warnings', [])
+        if warning not in entry_warnings:
+            entry_warnings.append(warning)
+    return [
+        'These runs use the same storage workload but different storage '
+        'target classes, attachment transports, device models, or capacities; '
+        'deltas compare storage hardware and are not compute-only differences.'
+    ]
+
+
 def build_comparison_payload(
     documents: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -1543,6 +1987,12 @@ def build_comparison_payload(
                 result_id,
                 cohort_entries,
             )
+            provenance_warnings.extend(
+                _add_storage_provenance_warnings(
+                    result_id,
+                    cohort_entries,
+                )
+            )
             metric_series: dict[tuple[str, str, str, str], dict[str, Any]] = {}
             for entry in cohort_entries:
                 for metric in entry['metrics']:
@@ -1569,6 +2019,7 @@ def build_comparison_payload(
                         'uncertainty': metric.get('uncertainty'),
                         'uncertainty_kind': metric.get('uncertainty_kind'),
                         'warnings': entry.get('warnings', []),
+                        'provenance': entry.get('provenance', {}),
                     })
             cohort_run_ids = [entry['run_id'] for entry in cohort_entries]
             metrics = []
@@ -1621,6 +2072,7 @@ def build_comparison_payload(
                         'run_id': item['run_id'],
                         'value': item['value'],
                         'warnings': item.get('warnings', []),
+                        'provenance': item.get('provenance', {}),
                     }
                     uncertainty = _finite_number(item.get('uncertainty'))
                     if uncertainty is not None:
@@ -1991,6 +2443,7 @@ __all__ = [
     'CANONICAL_RESULT_IDS',
     'COMPARISON_SCHEMA',
     'COMPARISON_SCHEMA_VERSION',
+    'DEATHSTARBENCH_LEGACY_RUNTIME_REVISION',
     'DIRECTION_HIGHER',
     'DIRECTION_LOWER',
     'LLAMA_ARCHITECTURE_PROFILE_METHOD',
@@ -1999,6 +2452,14 @@ __all__ = [
     'RESULTS_ARTIFACT_NAME',
     'RESULTS_SCHEMA',
     'RESULTS_SCHEMA_VERSION',
+    'STORAGE_RESULT_IDS',
+    'STORAGE_TARGET_CONTRACT',
+    'STORAGE_TARGET_KINDS',
+    'STORAGE_TARGET_LAYOUT',
+    'STORAGE_TARGET_MOUNT_POINTS',
+    'STORAGE_TARGET_POLICY',
+    'STORAGE_TARGET_TRANSPORTS',
+    'STORAGE_TARGET_VERIFICATION',
     'WORKLOAD_CONTRACT_VERSION',
     'build_comparison_payload',
     'build_results_artifact',

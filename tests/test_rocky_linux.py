@@ -322,6 +322,19 @@ class RockyLinuxGuestContractTests(unittest.TestCase):
         for _name, command in commands.values():
             self.assert_valid_bash(command)
 
+        local_commands = rocky_linux.benchmark_commands(
+            4,
+            storage_directory='/benchmark-local',
+        )
+        self.assertIn(
+            'cd /benchmark-local',
+            local_commands['sysbench_fileio'][1],
+        )
+        self.assertIn(
+            '--directory=/benchmark-local',
+            local_commands['fio'][1],
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

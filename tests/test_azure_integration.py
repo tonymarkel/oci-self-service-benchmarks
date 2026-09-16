@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app import main
+from app.models import BenchmarkPlan
 
 
 class AzureDiscoveryRouteTests(unittest.TestCase):
@@ -190,6 +191,83 @@ class AzureLifecycleDispatchTests(unittest.TestCase):
         self.assertEqual(metadata['architecture'], 'arm64')
         self.assertEqual(metadata['data_volume_type'], 'PremiumV2_LRS')
         self.assertEqual(metadata['data_volume_provisioned_iops'], 3000)
+
+    def test_storage_runner_uses_selected_directory_and_scoped_metadata(self):
+        plan = BenchmarkPlan(**{
+            'provider': 'azure',
+            'azure_subscription_id': 'subscription-id',
+            'azure_zone': '1',
+            'region': 'eastus2',
+            'shape': 'Standard_D8ps_v6',
+            'ocpus': 8,
+            'memory_gb': 32,
+            'ssh_private_key': 'private',
+            'ssh_public_key': 'ssh-ed25519 AAAATEST',
+            'storage': {
+                'additional_volume': True,
+                'additional_size_gb': 100,
+            },
+            'benchmarks': ['sysbench', 'fio'],
+            'sysbench': {'workloads': ['cpu', 'fileio']},
+        })
+        job = {
+            'id': 'azure-storage-runtime',
+            'events': [],
+            'results': [],
+            'resources': {
+                'provider': 'azure',
+                'public_ip': '198.51.100.30',
+                'private_ip': '10.42.1.30',
+                'ssh_user': 'benchmark',
+                'architecture': 'x86_64',
+                'image_id': '/images/rocky-9',
+                'image_name': 'Rocky Linux 9',
+                'azure_data_disk_lun': 0,
+                'azure_data_disk_type': 'PremiumV2_LRS',
+                'azure_data_disk_size_gb': 100,
+                'azure_data_disk_iops': 3000,
+                'azure_data_disk_throughput_mibps': 125,
+            },
+        }
+        target_metadata = {
+            'storage_target_contract': 'v1',
+            'storage_target_kind': 'instance_local_nvme',
+            'storage_target_mount_point': '/benchmark-local',
+        }
+
+        with (
+            patch.object(main, 'ssh', return_value='ready'),
+            patch.object(
+                main,
+                'prepare_storage_benchmark_target',
+                return_value=('/benchmark-local', target_metadata),
+            ) as prepare_target,
+            patch.object(main, 'execute_benchmark') as execute,
+        ):
+            main.run_azure_benchmarks(job, plan)
+
+        prepare_target.assert_called_once()
+        calls = {item.args[1]: item for item in execute.call_args_list}
+        self.assertEqual(
+            set(calls),
+            {'sysbench_cpu', 'sysbench_fileio', 'fio'},
+        )
+        self.assertIn('--directory=/benchmark-local', calls['fio'].args[3])
+        self.assertIn(
+            'cd /benchmark-local',
+            calls['sysbench_fileio'].args[3],
+        )
+        for benchmark_id in ('fio', 'sysbench_fileio'):
+            self.assertEqual(
+                calls[benchmark_id].kwargs['metadata'][
+                    'storage_target_contract'
+                ],
+                'v1',
+            )
+        self.assertNotIn(
+            'storage_target_contract',
+            calls['sysbench_cpu'].kwargs['metadata'],
+        )
 
 
 if __name__ == '__main__':

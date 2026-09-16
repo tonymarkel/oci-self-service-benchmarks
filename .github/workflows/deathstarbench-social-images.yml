@@ -1,0 +1,183 @@
+name: Publish DeathStarBench Social Network candidate images
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: deathstarbench-social-images-${{ github.run_id }}
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REVISION: 6ecb09706140f8730b5385c08f1386c654c3c526
+
+jobs:
+  publish-candidate:
+    name: Build, publish, and lock candidate images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out benchmark application
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Check out exact DeathStarBench source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: delimitrou/DeathStarBench
+          ref: 6ecb09706140f8730b5385c08f1386c654c3c526
+          path: .build/upstream
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare drift-checked build contexts
+        run: >-
+          python3 scripts/prepare_deathstarbench_social_images.py
+          --upstream .build/upstream
+          --output .build/contexts
+
+      - name: Derive candidate image names
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          RUN_IDENTIFIER: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          owner=$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          case "$owner" in
+            ''|*[!a-z0-9_.-]*)
+              echo "The GHCR owner is invalid after normalization." >&2
+              exit 1
+              ;;
+          esac
+          short_revision=${UPSTREAM_REVISION%%????????????????????????????}
+          image_tag="dsb-${short_revision}-${RUN_IDENTIFIER}-${RUN_ATTEMPT}"
+          {
+            echo "IMAGE_TAG=${image_tag}"
+            echo "APP_IMAGE=ghcr.io/${owner}/deathstarbench-social-app"
+            echo "FRONTEND_IMAGE=ghcr.io/${owner}/deathstarbench-social-frontend"
+            echo "MEDIA_FRONTEND_IMAGE=ghcr.io/${owner}/deathstarbench-social-media-frontend"
+          } >> "$GITHUB_ENV"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: amd64,arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Preflight support images and deployment lock schema
+        run: |
+          set -euo pipefail
+          python3 scripts/create_deathstarbench_image_lock.py \
+            --context-manifest .build/contexts/context-manifest.json \
+            --preflight-third-party \
+            --output .build/deathstarbench-social-support-preflight.json
+
+      - name: Authenticate to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish application candidate
+        id: build-app
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .build/contexts/app
+          file: .build/contexts/app/Dockerfile.candidate
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          push: true
+          tags: ${{ env.APP_IMAGE }}:${{ env.IMAGE_TAG }}
+          build-args: |
+            OCI_SOURCE_REPOSITORY=${{ github.server_url }}/${{ github.repository }}
+            OCI_SOURCE_REVISION=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Build and publish frontend candidate
+        id: build-frontend
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .build/contexts/frontend
+          file: .build/contexts/frontend/Dockerfile.candidate
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          push: true
+          tags: ${{ env.FRONTEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          build-args: |
+            OCI_SOURCE_REPOSITORY=${{ github.server_url }}/${{ github.repository }}
+            OCI_SOURCE_REVISION=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Build and publish media frontend candidate
+        id: build-media-frontend
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .build/contexts/media_frontend
+          file: .build/contexts/media_frontend/Dockerfile.candidate
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          push: true
+          tags: ${{ env.MEDIA_FRONTEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          build-args: |
+            OCI_SOURCE_REPOSITORY=${{ github.server_url }}/${{ github.repository }}
+            OCI_SOURCE_REVISION=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Resolve exact platform digests
+        env:
+          APP_INDEX_DIGEST: ${{ steps.build-app.outputs.digest }}
+          FRONTEND_INDEX_DIGEST: ${{ steps.build-frontend.outputs.digest }}
+          MEDIA_FRONTEND_INDEX_DIGEST: ${{ steps.build-media-frontend.outputs.digest }}
+        run: |
+          set -euo pipefail
+          python3 scripts/create_deathstarbench_image_lock.py \
+            --context-manifest .build/contexts/context-manifest.json \
+            --third-party-preflight .build/deathstarbench-social-support-preflight.json \
+            --output .build/deathstarbench-social-image-lock.json \
+            --app-image "${APP_IMAGE}:${IMAGE_TAG}@${APP_INDEX_DIGEST}" \
+            --frontend-image "${FRONTEND_IMAGE}:${IMAGE_TAG}@${FRONTEND_INDEX_DIGEST}" \
+            --media-frontend-image "${MEDIA_FRONTEND_IMAGE}:${IMAGE_TAG}@${MEDIA_FRONTEND_INDEX_DIGEST}"
+
+      - name: Upload candidate image lock
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: deathstarbench-social-image-lock-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .build/deathstarbench-social-image-lock.json
+            .build/deathstarbench-social-support-preflight.json
+            .build/contexts/context-manifest.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Record publication limitations
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ## DeathStarBench candidate publication
+
+          The artifact contains exact `linux/amd64` and `linux/arm64` digests
+          for all custom and supporting images. These are candidate images;
+          the deployment release gate remains closed until live qualification.
+
+          GHCR creates new packages as private by default. A package owner must
+          change all three `deathstarbench-social-*` packages to **Public** in
+          the GitHub package settings before an Azure K3s node can pull them
+          anonymously. A successful workflow run does not prove public pull
+          access.
+
+          The lock makes this published runtime immutable. It does not promise
+          byte-for-byte rebuilds because the pinned upstream Dockerfiles still
+          consume mutable package repositories and incompletely checksummed
+          build downloads.
+          SUMMARY

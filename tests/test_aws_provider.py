@@ -210,6 +210,63 @@ class AwsDiscoveryTests(unittest.TestCase):
             ['m7g.large'],
         )
 
+    def test_instance_type_summary_exposes_only_verified_local_nvme(self):
+        instance_type = {
+            'InstanceType': 'c8id.8xlarge',
+            'ProcessorInfo': {'SupportedArchitectures': ['x86_64']},
+            'VCpuInfo': {'DefaultVCpus': 32},
+            'MemoryInfo': {'SizeInMiB': 65536},
+            'InstanceStorageSupported': True,
+            'InstanceStorageInfo': {
+                'TotalSizeInGB': 1900,
+                'NvmeSupport': 'required',
+                'Disks': [{'Count': 2, 'SizeInGB': 950, 'Type': 'ssd'}],
+            },
+        }
+
+        summary = aws._instance_type_summary(instance_type)
+
+        self.assertTrue(summary['local_nvme_supported'])
+        self.assertEqual(summary['local_nvme_disk_count'], 2)
+        self.assertEqual(summary['local_nvme_disk_size_gb'], 950)
+        self.assertEqual(summary['local_nvme_total_size_gb'], 1900)
+
+        unsafe_profiles = (
+            {'InstanceStorageSupported': False},
+            {'InstanceStorageInfo': {
+                'TotalSizeInGB': 1900,
+                'NvmeSupport': 'unsupported',
+                'Disks': [{'Count': 2, 'SizeInGB': 950, 'Type': 'ssd'}],
+            }},
+            {'InstanceStorageInfo': {
+                'TotalSizeInGB': 1800,
+                'NvmeSupport': 'required',
+                'Disks': [{'Count': 2, 'SizeInGB': 950, 'Type': 'ssd'}],
+            }},
+            {'InstanceStorageInfo': {
+                'TotalSizeInGB': 1900,
+                'NvmeSupport': 'required',
+                'Disks': [{'Count': 2, 'SizeInGB': 950, 'Type': 'hdd'}],
+            }},
+            {'InstanceStorageInfo': {
+                'TotalSizeInGB': 1900,
+                'NvmeSupport': 'required',
+                'Disks': [
+                    {'Count': 1, 'SizeInGB': 900, 'Type': 'ssd'},
+                    {'Count': 1, 'SizeInGB': 1000, 'Type': 'ssd'},
+                ],
+            }},
+        )
+        for override in unsafe_profiles:
+            with self.subTest(override=override):
+                candidate = copy.deepcopy(instance_type)
+                candidate.update(override)
+                unsafe = aws._instance_type_summary(candidate)
+                self.assertFalse(unsafe['local_nvme_supported'])
+                self.assertEqual(unsafe['local_nvme_disk_count'], 0)
+                self.assertEqual(unsafe['local_nvme_disk_size_gb'], 0)
+                self.assertEqual(unsafe['local_nvme_total_size_gb'], 0)
+
     def test_latest_ami_uses_the_dynamic_default_public_parameter(self):
         ssm = MagicMock()
         ssm.get_parameter.return_value = {
@@ -335,6 +392,10 @@ class AwsProvisionTests(unittest.TestCase):
         self.assertEqual(resources['availability_zone'], 'us-east-2a')
         self.assertEqual(resources['aws_account_id'], '123456789012')
         self.assertFalse(resources['bare_metal'])
+        self.assertFalse(resources['local_nvme_supported'])
+        self.assertEqual(resources['local_nvme_disk_count'], 0)
+        self.assertEqual(resources['local_nvme_disk_size_gb'], 0)
+        self.assertEqual(resources['local_nvme_total_size_gb'], 0)
         self.assertEqual(
             resources['aws_instance_client_token'],
             self.ec2.run_instances.call_args.kwargs['ClientToken'],
@@ -409,6 +470,28 @@ class AwsProvisionTests(unittest.TestCase):
             40 * 60,
         )
         self.assertTrue(resources['bare_metal'])
+
+    def test_provision_persists_verified_local_nvme_profile(self):
+        self.ec2.describe_instance_types.return_value['InstanceTypes'][0].update({
+            'InstanceStorageSupported': True,
+            'InstanceStorageInfo': {
+                'TotalSizeInGB': 950,
+                'NvmeSupport': 'supported',
+                'Disks': [{'Count': 1, 'SizeInGB': 950, 'Type': 'ssd'}],
+            },
+        })
+
+        resources = aws.provision(
+            {'id': 'job123', 'resources': {}},
+            plan(),
+            public_key='ssh-ed25519 AAAATEST tester',
+            aws_session=self.session,
+        )
+
+        self.assertTrue(resources['local_nvme_supported'])
+        self.assertEqual(resources['local_nvme_disk_count'], 1)
+        self.assertEqual(resources['local_nvme_disk_size_gb'], 950)
+        self.assertEqual(resources['local_nvme_total_size_gb'], 950)
 
     def test_partial_failure_leaves_a_persisted_cleanup_manifest(self):
         self.ec2.create_route_table.side_effect = RuntimeError('route failure')

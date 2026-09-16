@@ -5,7 +5,7 @@ BENCHMARKS = [
     {"id": "phoronix", "category": "Comprehensive", "name": "Phoronix Test Suite", "description": "Runs one or more selectable, pinned OpenBenchmarking CPU and memory profiles.", "requires_data": False},
     {"id": "stream", "category": "Memory", "name": "STREAM", "description": "Sustainable memory bandwidth (Copy, Scale, Add, Triad)."},
     {"id": "iperf3", "category": "Network", "name": "iperf3", "description": "Runs one or more selectable TCP, UDP, and SCTP tests against a temporary private peer."},
-    {"id": "fio", "category": "Storage", "name": "fio", "description": "Sequential and random I/O on /data, with IOPS and latency."},
+    {"id": "fio", "category": "Storage", "name": "fio", "description": "Sequential and random I/O on one blank, provider-verified instance-local NVMe device when available; otherwise on the provisioned /data volume. Local NVMe is ephemeral."},
 ]
 
 LLM_BENCHMARKS = [
@@ -27,7 +27,7 @@ SYSBENCH_WORKLOADS = [
     {
         "id": "fileio",
         "name": "File I/O",
-        "description": "A 60-second random read/write workload over 4 GiB on the additional /data volume.",
+        "description": "A 60-second random read/write workload over 4 GiB. It prefers one blank, provider-verified instance-local NVMe device and otherwise uses the provisioned /data volume; local NVMe is ephemeral.",
         "requires_data": True,
     },
 ]

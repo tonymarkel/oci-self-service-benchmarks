@@ -83,7 +83,31 @@ def vm_sku(
     restrictions=(),
     premium_v2=True,
     gpus=0,
+    local_nvme_total_mib=None,
+    local_nvme_per_disk_mib=None,
+    local_nvme_disk_count=None,
 ):
+    capabilities = [
+        capability('CpuArchitectureType', architecture),
+        capability('vCPUs', vcpus),
+        capability('MemoryGB', memory_gb),
+        capability('GPUs', gpus),
+        capability('PremiumIO', 'True'),
+        capability('PremiumIOV2Supported', str(premium_v2)),
+        capability('AcceleratedNetworkingEnabled', 'True'),
+        capability('MaxDataDiskCount', 8),
+        capability('MaxNetworkBandwidth', 12500),
+    ]
+    if local_nvme_total_mib is not None:
+        capabilities.append(
+            capability('NvmeDiskSizeInMiB', local_nvme_total_mib)
+        )
+    if local_nvme_per_disk_mib is not None:
+        capabilities.append(
+            capability('NvmeSizePerDiskInMiB', local_nvme_per_disk_mib)
+        )
+    if local_nvme_disk_count is not None:
+        capabilities.append(capability('NvmeDiskCount', local_nvme_disk_count))
     return {
         'name': name,
         'resource_type': 'virtualMachines',
@@ -91,17 +115,7 @@ def vm_sku(
         'family': name.split('_', 1)[-1].split('_', 1)[0],
         'locations': ['eastus2'],
         'location_info': [{'location': 'eastus2', 'zones': list(zones)}],
-        'capabilities': [
-            capability('CpuArchitectureType', architecture),
-            capability('vCPUs', vcpus),
-            capability('MemoryGB', memory_gb),
-            capability('GPUs', gpus),
-            capability('PremiumIO', 'True'),
-            capability('PremiumIOV2Supported', str(premium_v2)),
-            capability('AcceleratedNetworkingEnabled', 'True'),
-            capability('MaxDataDiskCount', 8),
-            capability('MaxNetworkBandwidth', 12500),
-        ],
+        'capabilities': capabilities,
         'restrictions': list(restrictions),
     }
 
@@ -252,8 +266,9 @@ class ArmResources:
                 configurations = copy.deepcopy(
                     body['properties']['ipConfigurations']
                 )
-                configurations[0]['properties']['privateIPAddress'] = (
-                    f'10.42.1.{10 + self.counter}'
+                configurations[0]['properties'].setdefault(
+                    'privateIPAddress',
+                    f'10.42.1.{10 + self.counter}',
                 )
                 resource['properties']['ipConfigurations'] = configurations
             self.items[(group, name)] = resource
@@ -294,12 +309,19 @@ class Subnets(ArmResources):
 
         return Operation(callback=create)
 
+    def get(self, group, vnet, name):
+        key = (group, vnet, name)
+        if key not in self.items:
+            raise NotFound(name)
+        return copy.deepcopy(self.items[key])
+
 
 class ResourceInventory:
     TOP_LEVEL_KEYS = (
         'network_security_groups',
         'virtual_networks',
         'public_ip_addresses',
+        'nat_gateways',
         'network_interfaces',
         'disks',
         'virtual_machines',
@@ -354,6 +376,9 @@ def fake_clients():
         'subnets': Subnets(groups),
         'public_ip_addresses': ArmResources(
             groups, 'Microsoft.Network', 'publicIPAddresses'
+        ),
+        'nat_gateways': ArmResources(
+            groups, 'Microsoft.Network', 'natGateways'
         ),
         'network_interfaces': ArmResources(
             groups, 'Microsoft.Network', 'networkInterfaces'
@@ -447,10 +472,82 @@ class AzureDiscoveryTests(unittest.TestCase):
         self.assertEqual(arm['memory_gb'], 16)
         self.assertEqual(arm['architecture'], 'arm64')
         self.assertEqual(arm['network_bandwidth_gbps'], 12.5)
+        self.assertFalse(arm['local_nvme_supported'])
+        self.assertEqual(arm['local_nvme_disk_count'], 0)
+        self.assertEqual(arm['local_nvme_disk_size_gb'], 0)
+        self.assertEqual(arm['local_nvme_total_size_gb'], 0)
         self.assertTrue(all(
             call == "location eq 'eastus2'"
             for call in clients['resource_skus'].calls
         ))
+
+    def test_sizes_expose_only_self_consistent_local_nvme_capacity(self):
+        clients = fake_clients()
+        clients['resource_skus'].items.append(vm_sku(
+            'Standard_D8ads_v7',
+            'x64',
+            8,
+            32,
+            local_nvme_total_mib=450560,
+            local_nvme_per_disk_mib=112640,
+            local_nvme_disk_count=4,
+        ))
+
+        sizes = azure.vm_sizes(
+            SUBSCRIPTION_ID, 'eastus2', '1', clients=clients
+        )
+        local = next(
+            item for item in sizes['items']
+            if item['vm_size'] == 'Standard_D8ads_v7'
+        )
+
+        self.assertTrue(local['local_nvme_supported'])
+        self.assertEqual(local['local_nvme_disk_count'], 4)
+        self.assertEqual(local['local_nvme_disk_size_gb'], 110)
+        self.assertEqual(local['local_nvme_total_size_gb'], 440)
+
+    def test_local_nvme_capabilities_fail_closed_when_ambiguous(self):
+        unsafe_capabilities = (
+            {},
+            {
+                'nvmedisksizeinmib': '112640',
+            },
+            {
+                'nvmedisksizeinmib': '0',
+                'nvmesizeperdiskinmib': '0',
+            },
+            {
+                'nvmedisksizeinmib': '450560',
+                'nvmesizeperdiskinmib': '112640',
+                'nvmediskcount': '3',
+            },
+            {
+                'nvmedisksizeinmib': '450000',
+                'nvmesizeperdiskinmib': '112640',
+            },
+            {
+                # DiskControllerTypes alone also describes remote NVMe disks.
+                'diskcontrollertypes': 'SCSI,NVMe',
+            },
+        )
+        for capabilities in unsafe_capabilities:
+            with self.subTest(capabilities=capabilities):
+                summary = azure._local_nvme_storage_summary(capabilities)
+                self.assertFalse(summary['local_nvme_supported'])
+                self.assertEqual(summary['local_nvme_disk_count'], 0)
+                self.assertEqual(summary['local_nvme_disk_size_gb'], 0)
+                self.assertEqual(summary['local_nvme_total_size_gb'], 0)
+
+    def test_local_nvme_accepts_azure_per_device_mib_rounding(self):
+        summary = azure._local_nvme_storage_summary({
+            'nvmedisksizeinmib': '29296875',
+            'nvmesizeperdiskinmib': '3662109',
+        })
+
+        self.assertTrue(summary['local_nvme_supported'])
+        self.assertEqual(summary['local_nvme_disk_count'], 8)
+        self.assertEqual(summary['local_nvme_disk_size_gb'], 3576.27832)
+        self.assertEqual(summary['local_nvme_total_size_gb'], 28610.229492)
 
     def test_documented_loadgen_bandwidth_fills_unusable_live_capability(self):
         for live_value in (None, '0', 'not-a-number'):
@@ -606,6 +703,10 @@ class AzureProvisionTests(unittest.TestCase):
         self.assertTrue(resources['peer_private_ip'].startswith('10.42.1.'))
         self.assertEqual(resources['azure_data_disk_lun'], 0)
         self.assertEqual(resources['azure_data_disk_type'], 'PremiumV2_LRS')
+        self.assertFalse(resources['local_nvme_supported'])
+        self.assertEqual(resources['local_nvme_disk_count'], 0)
+        self.assertEqual(resources['local_nvme_disk_size_gb'], 0)
+        self.assertEqual(resources['local_nvme_total_size_gb'], 0)
 
         first_group_anchor = next(
             state['resources'] for state in persisted
@@ -669,6 +770,36 @@ class AzureProvisionTests(unittest.TestCase):
         self.assertIn('allow-iperf-tcp', {rule['name'] for rule in nsg_rules})
         self.assertIn('allow-iperf-udp', {rule['name'] for rule in nsg_rules})
         self.assertIn('allow-web-loadgen', {rule['name'] for rule in nsg_rules})
+
+    def test_provision_persists_verified_local_nvme_profile(self):
+        clients = fake_clients()
+        clients['resource_skus'].items.append(vm_sku(
+            'Standard_D2ads_v7',
+            'x64',
+            2,
+            8,
+            local_nvme_total_mib=112640,
+            local_nvme_per_disk_mib=112640,
+        ))
+        selected_plan = full_plan()
+        selected_plan.update({
+            'azure_vm_size': 'Standard_D2ads_v7',
+            'ocpus': 2,
+            'memory_gb': 8,
+            'benchmarks': ['fio'],
+        })
+
+        resources = azure.provision(
+            {'id': 'localnvme', 'resources': {}},
+            selected_plan,
+            public_key=PUBLIC_KEY,
+            clients=clients,
+        )
+
+        self.assertTrue(resources['local_nvme_supported'])
+        self.assertEqual(resources['local_nvme_disk_count'], 1)
+        self.assertEqual(resources['local_nvme_disk_size_gb'], 110)
+        self.assertEqual(resources['local_nvme_total_size_gb'], 110)
 
     def test_each_web_benchmark_uses_standard_d2as_v7_loadgen(self):
         for benchmark in ('apachebench', 'deathstarbench'):
@@ -934,7 +1065,11 @@ class AzureCleanupTests(unittest.TestCase):
         clients, job = self._provision_minimal()
         clients['resource_groups'].delete_response_lost = True
 
-        azure.destroy_resources(job, clients=clients)
+        azure.destroy_resources(
+            job,
+            clients=clients,
+            absence_retry_delay_seconds=0,
+        )
 
         self.assertNotIn('azure_resource_group_name', job['resources'])
         self.assertEqual(job['status'], 'destroyed')

@@ -370,15 +370,28 @@ class GcpBenchmarkRuntimeTests(unittest.TestCase):
             gcp_data_disk_type='pd-balanced',
             gcp_data_disk_size_gb=100,
         )
+        target_metadata = {
+            'storage_target_contract': 'v1',
+            'storage_target_kind': 'provisioned_data_volume',
+            'storage_target_mount_point': '/data',
+        }
 
         with (
             patch.object(main, 'ssh', return_value='ready'),
             patch.object(main, 'mount_data_volume') as mount,
+            patch.object(
+                main,
+                'prepare_storage_benchmark_target',
+                return_value=('/data', target_metadata),
+            ) as prepare_target,
             patch.object(main, 'execute_benchmark') as execute,
         ):
             main.run_gcp_benchmarks(job, plan)
 
-        mount.assert_called_once_with(job)
+        mount.assert_not_called()
+        prepare_target.assert_called_once()
+        self.assertIs(prepare_target.call_args.args[0], job)
+        self.assertIs(prepare_target.call_args.args[1], plan)
         calls = {call.args[1]: call for call in execute.call_args_list}
         self.assertEqual(set(calls), {'fio', 'sysbench_fileio'})
         self.assertIn('--directory=/data', calls['fio'].args[3])
@@ -395,6 +408,19 @@ class GcpBenchmarkRuntimeTests(unittest.TestCase):
             calls['fio'].kwargs['metadata']['data_volume_type'],
             'pd-balanced',
         )
+        for benchmark_id in ('fio', 'sysbench_fileio'):
+            self.assertEqual(
+                calls[benchmark_id].kwargs['metadata'][
+                    'storage_target_contract'
+                ],
+                'v1',
+            )
+            self.assertEqual(
+                calls[benchmark_id].kwargs['metadata'][
+                    'storage_target_kind'
+                ],
+                'provisioned_data_volume',
+            )
 
     def test_gcp_iperf_uses_same_zone_private_peer_for_tcp_and_udp(self):
         plan = gcp_plan(

@@ -11,7 +11,9 @@ import uuid
 import base64
 import html
 import hmac
+import math
 import re
+import shlex
 from ipaddress import ip_address
 from pathlib import Path
 from datetime import datetime, timezone
@@ -69,13 +71,24 @@ from .deathstarbench import (
     prepare_workload_command,
     workload as deathstarbench_workload,
 )
+from .deathstarbench_contract import (
+    DISTRIBUTED_TIERED_TOPOLOGY_ID,
+    K3S_RUNTIME_ID,
+    PODMAN_COMPOSE_RUNTIME_ID,
+    SINGLE_HOST_TOPOLOGY_ID,
+    require_released_runtime,
+)
+from .deathstarbench_distributed import (
+    prepare_azure_distributed_k3s_candidate,
+    prepare_azure_distributed_social_network_candidate,
+)
 from .models import (
     BenchmarkPlan,
     ClearSavedRunsRequest,
     canonicalize_benchmark_plan,
 )
 from .guests import amazon_linux, rocky_linux, web as web_guest
-from . import llama_cpp
+from . import llama_cpp, storage_target
 from .iperf3 import parse_output as parse_iperf3_output
 from .providers import aws as aws_provider
 from .providers import azure as azure_provider
@@ -84,6 +97,11 @@ from .providers.registry import (
     dispatch_provider_operation,
     provider_adapter,
     providers as registered_providers,
+)
+from .resource_inventory import (
+    ROLE_NODE_INVENTORY_KEY,
+    ResourceInventoryError,
+    load_role_node_inventory,
 )
 from .phoronix import (
     PREPARE_TIMEOUT_SECONDS as PHORONIX_PREPARE_TIMEOUT_SECONDS,
@@ -117,6 +135,7 @@ SYSBENCH_RESULT_IDS = {
     'memory': 'sysbench_memory',
     'fileio': 'sysbench_fileio',
 }
+STORAGE_BENCHMARK_RESULT_IDS = frozenset({'fio', 'sysbench_fileio'})
 IPERF3_RESULT_IDS = {
     'tcp': 'iperf_tcp',
     'udp': 'iperf_udp',
@@ -690,6 +709,48 @@ def require_complete_benchmark_results(job):
 def has_recoverable_resources(job):
     """Return whether a saved run has enough state for provider cleanup."""
     resources = job.get('resources', {})
+    if not isinstance(resources, dict):
+        return True
+    if ROLE_NODE_INVENTORY_KEY in resources:
+        try:
+            inventory = load_role_node_inventory(
+                resources,
+                plan=job.get('plan'),
+            )
+        except ResourceInventoryError:
+            # Cleanup must inspect an unknown or damaged manifest rather than
+            # advertising the run as disposable. Provider destroy paths will
+            # refuse mutation until they understand the persisted schema.
+            return True
+        pending_statuses = {
+            'creating',
+            'create_ambiguous',
+            'running',
+            'stopping',
+            'stopped',
+            'deleting',
+            'delete_ambiguous',
+            'failed',
+        }
+        for node in inventory.nodes:
+            node_identity = bool(
+                node.provider_resource_id
+                or node.provider_resource_name
+                or node.public_addresses
+                or node.private_addresses
+            )
+            storage_identity = any(
+                item.provider_resource_id
+                or item.provider_resource_name
+                or item.lifecycle_status in pending_statuses
+                for item in node.storage
+            )
+            if (
+                node_identity
+                or storage_identity
+                or node.lifecycle_status in pending_statuses
+            ):
+                return True
     identity_only_ids = {
         'image_id',
         'aws_account_id',
@@ -1449,6 +1510,43 @@ def placement(region: str, compartment_id: str | None = None):
     except Exception as exc: raise HTTPException(400, str(exc))
 
 
+def _oci_local_nvme_storage_summary(shape):
+    """Return a fail-closed local-NVMe profile from one OCI Shape."""
+
+    unavailable = {
+        'local_nvme_supported': False,
+        'local_nvme_disk_count': 0,
+        'local_nvme_disk_size_gb': 0,
+        'local_nvme_total_size_gb': 0,
+    }
+    raw_count = getattr(shape, 'local_disks', 0)
+    raw_total = getattr(shape, 'local_disks_total_size_in_gbs', 0)
+    description = str(
+        getattr(shape, 'local_disk_description', '') or ''
+    ).strip()
+    try:
+        total_size_gb = float(raw_total)
+    except (TypeError, ValueError):
+        return unavailable
+    if (
+        isinstance(raw_count, bool)
+        or not isinstance(raw_count, int)
+        or raw_count <= 0
+        or isinstance(raw_total, bool)
+        or not isinstance(raw_total, (int, float))
+        or not math.isfinite(total_size_gb)
+        or total_size_gb <= 0
+        or 'nvme' not in description.casefold()
+    ):
+        return unavailable
+    return {
+        'local_nvme_supported': True,
+        'local_nvme_disk_count': raw_count,
+        'local_nvme_disk_size_gb': total_size_gb / raw_count,
+        'local_nvme_total_size_gb': total_size_gb,
+    }
+
+
 def unique_shape_summaries(items):
     unique = {}
     for item in items:
@@ -1460,6 +1558,7 @@ def unique_shape_summaries(items):
             'memory_gb': item.memory_in_gbs,
             'flexible': bool(item.ocpu_options or item.memory_options),
             'networking': item.networking_bandwidth_in_gbps,
+            **_oci_local_nvme_storage_summary(item),
         }
     return [unique[name] for name in sorted(unique, key=str.casefold)]
 
@@ -1683,6 +1782,16 @@ def azure_vm_sizes(
 @app.post('/api/jobs')
 async def create_job(plan: BenchmarkPlan):
     adapter = provider_adapter(plan)
+    if 'deathstarbench' in plan.benchmarks:
+        try:
+            require_released_runtime(
+                plan.deathstarbench.topology_id,
+                plan.deathstarbench.runtime_id,
+            )
+        except ValueError as exc:
+            # Reject unreleased topology contracts before SSH validation,
+            # filesystem writes, task creation, or any cloud API call.
+            raise HTTPException(422, str(exc)) from exc
     try:
         derived_public_key = derive_public_key(
             plan.ssh_private_key,
@@ -2279,6 +2388,32 @@ def configured_network_bandwidth_gbps(shape, ocpus):
 
 
 def provision(job, plan):
+    selected_benchmarks = (
+        plan.get('benchmarks', ())
+        if isinstance(plan, dict)
+        else getattr(plan, 'benchmarks', ())
+    ) or ()
+    if 'deathstarbench' in selected_benchmarks:
+        # Defense in depth for direct/background callers that bypass the API.
+        options = (
+            plan.get('deathstarbench', {})
+            if isinstance(plan, dict)
+            else getattr(plan, 'deathstarbench', None)
+        )
+        topology_id = (
+            options.get('topology_id', SINGLE_HOST_TOPOLOGY_ID)
+            if isinstance(options, dict)
+            else getattr(options, 'topology_id', SINGLE_HOST_TOPOLOGY_ID)
+        )
+        runtime_id = (
+            options.get('runtime_id', PODMAN_COMPOSE_RUNTIME_ID)
+            if isinstance(options, dict)
+            else getattr(options, 'runtime_id', PODMAN_COMPOSE_RUNTIME_ID)
+        )
+        require_released_runtime(
+            topology_id,
+            runtime_id,
+        )
     return dispatch_provider_operation(
         plan,
         'provision',
@@ -2307,6 +2442,36 @@ def provision(job, plan):
             ),
         },
     )
+
+
+def _oci_available_volume_device(compute, instance_id):
+    """Reserve one OCI-reported virtual block-device path for ``/data``."""
+
+    available = sorted(
+        {
+            str(getattr(device, 'name', '') or '').strip()
+            for device in compute.list_instance_devices(instance_id).data
+            if getattr(device, 'is_available', False) is True
+        },
+        key=str.casefold,
+    )
+    valid = [
+        device
+        for device in available
+        if (
+            re.fullmatch(
+                r'/dev/(?:[A-Za-z0-9._+-]+/)*[A-Za-z0-9._+-]+',
+                device,
+            )
+            and '..' not in device.split('/')
+        )
+    ]
+    if not valid:
+        raise RuntimeError(
+            'OCI did not report an available virtual block-device path for '
+            'the additional /data volume.'
+        )
+    return valid[0]
 
 
 def provision_oci(job, plan):
@@ -2350,6 +2515,7 @@ def provision_oci(job, plan):
         availability_domain=ad,
     ).data
     listed_shape = next(x for x in available_shapes if x.shape == plan.shape)
+    record_resource(job, 'provider', 'oci')
     shape_config = oci.core.models.LaunchInstanceShapeConfigDetails(ocpus=plan.ocpus, memory_in_gbs=plan.memory_gb) if (listed_shape.ocpu_options or listed_shape.memory_options) else None
     source = oci.core.models.InstanceSourceViaImageDetails(source_type='image', image_id=image_id, boot_volume_size_in_gbs=plan.storage.boot_size_gb, boot_volume_vpus_per_gb=plan.storage.boot_performance)
     launch_options = oci.core.models.LaunchOptions(network_type='VFIO' if plan.networking == 'sriov' else 'PARAVIRTUALIZED')
@@ -2357,6 +2523,38 @@ def provision_oci(job, plan):
     instance = compute.launch_instance(launch).data; record_resource(job, 'instance_id', instance.id)
     event(job, 'Provision', f'Launched {plan.shape}; waiting for it to become RUNNING.')
     oci.wait_until(compute, compute.get_instance(instance.id), 'lifecycle_state', 'RUNNING')
+    running_instance = compute.get_instance(instance.id).data
+    instance_shape_config = getattr(running_instance, 'shape_config', None)
+    local_nvme = _oci_local_nvme_storage_summary(instance_shape_config)
+    record_resource(
+        job,
+        'local_nvme_supported',
+        local_nvme['local_nvme_supported'],
+    )
+    record_resource(
+        job,
+        'local_nvme_disk_count',
+        local_nvme['local_nvme_disk_count'],
+    )
+    record_resource(
+        job,
+        'local_nvme_total_size_gb',
+        local_nvme['local_nvme_total_size_gb'],
+    )
+    record_resource(
+        job,
+        'local_nvme_disk_size_gb',
+        local_nvme['local_nvme_disk_size_gb'],
+    )
+    local_nvme_description = str(
+        getattr(instance_shape_config, 'local_disk_description', '') or ''
+    ).strip()
+    if local_nvme_description:
+        record_resource(
+            job,
+            'local_nvme_description',
+            local_nvme_description,
+        )
     vnic_attachment = compute.list_vnic_attachments(
         compartment,
         instance_id=instance.id,
@@ -2366,6 +2564,11 @@ def provision_oci(job, plan):
     record_resource(job, 'public_ip', pub)
     record_resource(job, 'private_ip', runner_vnic.private_ip)
     if plan.storage.additional_volume:
+        data_volume_device = _oci_available_volume_device(
+            compute,
+            instance.id,
+        )
+        record_resource(job, 'oci_data_volume_device', data_volume_device)
         vol = storage.create_volume(oci.core.models.CreateVolumeDetails(compartment_id=compartment, availability_domain=ad, size_in_gbs=plan.storage.additional_size_gb, vpus_per_gb=plan.storage.additional_performance, display_name=f'benchmark-data-{suffix}', freeform_tags=tags)).data; record_resource(job, 'volume_id', vol.id)
         oci.wait_until(storage, storage.get_volume(vol.id), 'lifecycle_state', 'AVAILABLE')
         if plan.storage.mount_style == 'iscsi':
@@ -2373,6 +2576,7 @@ def provision_oci(job, plan):
                 type='iscsi',
                 instance_id=instance.id,
                 volume_id=vol.id,
+                device=data_volume_device,
                 is_shareable=False,
                 use_chap=False,
                 is_agent_auto_iscsi_login_enabled=True,
@@ -2382,6 +2586,7 @@ def provision_oci(job, plan):
                 type='paravirtualized',
                 instance_id=instance.id,
                 volume_id=vol.id,
+                device=data_volume_device,
                 is_shareable=False,
             )
         attachment = compute.attach_volume(attach_details).data
@@ -2393,6 +2598,17 @@ def provision_oci(job, plan):
             'lifecycle_state',
             'ATTACHED',
         )
+        attached_volume = compute.get_volume_attachment(attachment.id).data
+        attached_device = str(
+            getattr(attached_volume, 'device', '')
+            or getattr(attachment, 'device', '')
+            or ''
+        ).strip()
+        if attached_device and attached_device != data_volume_device:
+            raise RuntimeError(
+                'OCI attached the /data Block Volume at a device path other '
+                'than the recorded request; refusing guest disk discovery.'
+            )
     if uses_load_generator:
         loadgen_shape = load_generator_shape(available_shapes)
         loadgen_image = latest_oracle_linux_image(
@@ -2524,16 +2740,70 @@ def ssh(
     include_stderr=False,
     transport_attempts=12,
     transport_retry_delay_seconds=10,
+    secret_stdin=None,
+    stdin_text=None,
+    jump_host_key=None,
+    sensitive_output=False,
 ):
+    """Run one SSH command, optionally supplying bounded standard input.
+
+    ``secret_stdin`` is written only to the SSH process pipe. It is never
+    added to argv, the environment, an event, or an exception message.
+    ``stdin_text`` provides the same argv-safe transport for larger,
+    non-secret declarative payloads such as a Kubernetes manifest. The two
+    inputs are mutually exclusive so a caller cannot accidentally weaken the
+    smaller secret boundary.
+    ``sensitive_output`` prevents stdout and stderr from being copied into an
+    exception when the remote command itself returns a secret.
+    """
     transport_attempts = int(transport_attempts)
     transport_retry_delay_seconds = float(transport_retry_delay_seconds)
     if transport_attempts < 1:
         raise ValueError('SSH transport attempts must be at least one.')
     if transport_retry_delay_seconds < 0:
         raise ValueError('SSH transport retry delay cannot be negative.')
-    target = job.get('resources', {}).get(host_key)
+    if not isinstance(sensitive_output, bool):
+        raise ValueError('SSH sensitive_output must be a boolean.')
+    if secret_stdin is not None and stdin_text is not None:
+        raise ValueError(
+            'SSH secret_stdin and stdin_text are mutually exclusive.'
+        )
+    if secret_stdin is not None:
+        if (
+            not isinstance(secret_stdin, str)
+            or not secret_stdin
+            or '\x00' in secret_stdin
+            or len(secret_stdin.encode('utf-8')) > 4096
+        ):
+            raise ValueError(
+                'SSH secret standard input must be non-empty UTF-8 text of '
+                'at most 4096 bytes without NUL characters.'
+            )
+    if stdin_text is not None:
+        if (
+            not isinstance(stdin_text, str)
+            or not stdin_text
+            or '\x00' in stdin_text
+            or len(stdin_text.encode('utf-8')) > 1024 * 1024
+        ):
+            raise ValueError(
+                'SSH non-secret standard input must be non-empty UTF-8 text '
+                'of at most 1 MiB without NUL characters.'
+            )
+    has_standard_input = secret_stdin is not None or stdin_text is not None
+    resources = job.get('resources', {})
+    target = resources.get(host_key)
     if not target:
         raise RuntimeError(f'SSH target {host_key!r} is not available for this run.')
+    jump_target = None
+    if jump_host_key is not None:
+        if not isinstance(jump_host_key, str) or not jump_host_key:
+            raise ValueError('SSH jump_host_key must be a non-empty resource key.')
+        jump_target = resources.get(jump_host_key)
+        if not jump_target:
+            raise RuntimeError(
+                f'SSH jump target {jump_host_key!r} is not available for this run.'
+            )
     with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
         f.write(job['_key'])
         path = f.name
@@ -2559,8 +2829,7 @@ def ssh(
     known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
     known_hosts_path.touch(exist_ok=True)
     os.chmod(known_hosts_path, 0o600)
-    args = [
-        'ssh',
+    transport_options = [
         '-F', '/dev/null',
         '-o', 'ForwardAgent=no',
         '-o', 'ClearAllForwardings=yes',
@@ -2577,25 +2846,58 @@ def ssh(
         '-o', 'PreferredAuthentications=publickey',
         '-o', 'IdentitiesOnly=yes',
         '-i', path,
+    ]
+    args = ['ssh', *transport_options]
+    if jump_target is not None:
+        # Keep the private key on the orchestrator.  The local proxy SSH uses
+        # the same isolated identity and run-owned host-key database as the
+        # destination connection, then forwards only the SSH byte stream to
+        # the manifest-selected private address.
+        proxy_args = [
+            'ssh',
+            *transport_options,
+            '-W', '%h:%p',
+            f'{ssh_user}@{jump_target}',
+        ]
+        args.extend(('-o', f'ProxyCommand={shlex.join(proxy_args)}'))
+    args.extend((
         f'{ssh_user}@{target}',
         command,
-    ]
+    ))
     try:
         for attempt in range(transport_attempts):
             raise_if_cancelled(job)
             process = subprocess.Popen(
                 args,
-                stdin=subprocess.DEVNULL,
+                stdin=(
+                    subprocess.PIPE
+                    if has_standard_input
+                    else subprocess.DEVNULL
+                ),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding='utf-8',
                 env=ssh_env,
                 start_new_session=os.name == 'posix',
             )
             register_job_process(job, process)
+            if secret_stdin is not None:
+                try:
+                    process.stdin.write(secret_stdin)
+                    process.stdin.close()
+                    # ``communicate`` must not try to flush an already closed
+                    # pipe during the cancellable polling loop below.
+                    process.stdin = None
+                except Exception:
+                    if process.poll() is None:
+                        terminate_process_and_collect(process)
+                    unregister_job_process(job, process)
+                    raise
             deadline = time.monotonic() + timeout
             stdout = ''
             stderr = ''
+            communicate_input = stdin_text
             try:
                 while True:
                     if cancellation_requested(job):
@@ -2608,14 +2910,28 @@ def ssh(
                         stdout, stderr = terminate_process_and_collect(process)
                         raise SSHCommandError(
                             f'SSH command timed out after {timeout} seconds.',
-                            output=command_output(stdout, stderr),
+                            output=(
+                                '' if sensitive_output
+                                else command_output(stdout, stderr)
+                            ),
                         )
                     try:
+                        communicate_kwargs = {
+                            'timeout': min(0.25, remaining),
+                        }
+                        if communicate_input is not None:
+                            communicate_kwargs['input'] = communicate_input
                         stdout, stderr = process.communicate(
-                            timeout=min(0.25, remaining)
+                            **communicate_kwargs
                         )
+                        communicate_input = None
                         break
                     except subprocess.TimeoutExpired:
+                        # ``Popen.communicate`` retains its internal write
+                        # buffer after a timeout. Subsequent calls must omit
+                        # ``input`` while it finishes streaming the same
+                        # bounded payload.
+                        communicate_input = None
                         continue
             finally:
                 try:
@@ -2636,6 +2952,12 @@ def ssh(
                 or attempt == transport_attempts - 1
             ):
                 output = command_output(stdout, stderr)
+                if sensitive_output:
+                    raise SSHCommandError(
+                        'SSH command failed with exit status '
+                        f'{process.returncode}; remote output was redacted.',
+                        returncode=process.returncode,
+                    )
                 raise SSHCommandError(
                     f'SSH command failed with exit status '
                     f'{process.returncode}: {output[-2000:]}',
@@ -3209,6 +3531,68 @@ def aws_data_volume_mount_command(volume_id, hypervisor):
     )
 
 
+def oci_data_volume_mount_command(device):
+    """Mount the exact OCI Block Volume device reported by its attachment."""
+
+    device = str(device or '').strip()
+    if (
+        not re.fullmatch(r'/dev/(?:[A-Za-z0-9._+-]+/)*[A-Za-z0-9._+-]+', device)
+        or '..' in device.split('/')
+    ):
+        raise ValueError('The recorded OCI data-volume device path is invalid.')
+    expected_device = shlex.quote(device)
+    return (
+        'set -euo pipefail; '
+        f'EXPECTED_DEVICE={expected_device}; '
+        'sudo mkdir -p /data; '
+        'DATA_DEVICE=""; '
+        'for attempt in $(seq 1 36); do '
+        'if test -b "$EXPECTED_DEVICE"; then '
+        'DATA_DEVICE="$(readlink -f "$EXPECTED_DEVICE")"; break; fi; '
+        'sleep 5; done; '
+        'test -b "$DATA_DEVICE" || '
+        '{ echo "The recorded OCI Block Volume device did not appear in the '
+        'guest." >&2; exit 1; }; '
+        'test "$(lsblk -dnro TYPE "$DATA_DEVICE")" = disk || '
+        '{ echo "The recorded OCI data-volume path is not a whole disk." '
+        '>&2; exit 1; }; '
+        'ROOT_SOURCE="$(findmnt -rn -o SOURCE /)"; '
+        'if lsblk -srnpo NAME "$ROOT_SOURCE" 2>/dev/null '
+        '| grep -Fxq "$DATA_DEVICE"; then '
+        'echo "The recorded OCI data volume resolves to the root disk; '
+        'refusing to continue." >&2; exit 1; fi; '
+        'if findmnt -rn /data >/dev/null; then '
+        'MOUNTED_SOURCE="$(findmnt -rn -o SOURCE /data)"; '
+        'MOUNTED_DEVICE="$(readlink -f "$MOUNTED_SOURCE")"; '
+        'if test "$MOUNTED_DEVICE" = "$DATA_DEVICE"; then '
+        'findmnt /data; exit 0; fi; '
+        'echo "/data is mounted from a device other than the recorded OCI '
+        'Block Volume; refusing to continue." >&2; exit 1; fi; '
+        'if lsblk -nro MOUNTPOINT "$DATA_DEVICE" '
+        "| grep -q '[^[:space:]]'; then "
+        'echo "The recorded OCI Block Volume is already mounted somewhere '
+        'other than /data; refusing to format it." >&2; exit 1; fi; '
+        'CHILD_COUNT="$(lsblk -nrpo NAME "$DATA_DEVICE" | tail -n +2 '
+        '| grep -c . || true)"; '
+        'test "$CHILD_COUNT" -eq 0 || '
+        '{ echo "The recorded OCI Block Volume already has partitions; '
+        'refusing to format it." >&2; exit 1; }; '
+        'FSTYPE="$(lsblk -dnro FSTYPE "$DATA_DEVICE" | head -n 1)"; '
+        'if test -z "$FSTYPE"; then sudo mkfs.xfs -f "$DATA_DEVICE"; '
+        'elif test "$FSTYPE" != xfs; then '
+        'echo "The recorded OCI Block Volume has an unexpected filesystem; '
+        'refusing to mount it." >&2; exit 1; fi; '
+        'sudo mount "$DATA_DEVICE" /data; '
+        'sudo chmod 0777 /data; '
+        'FILESYSTEM_UUID="$(sudo blkid -s UUID -o value "$DATA_DEVICE")"; '
+        'test -n "$FILESYSTEM_UUID"; '
+        'if ! grep -Fq "UUID=$FILESYSTEM_UUID /data " /etc/fstab; then '
+        'printf "UUID=%s /data xfs defaults,nofail 0 2\\n" '
+        '"$FILESYSTEM_UUID" | sudo tee -a /etc/fstab >/dev/null; fi; '
+        'findmnt /data'
+    )
+
+
 def mount_data_volume(job):
     event(job, 'Storage', 'Discovering, formatting, and mounting the data volume.')
     resources = job.get('resources', {})
@@ -3246,32 +3630,129 @@ def mount_data_volume(job):
             owner=resources.get('ssh_user') or rocky_linux.SSH_USER,
         )
     else:
-        command = (
-            'sudo mkdir -p /data; '
-            'if findmnt -rn /data >/dev/null; then findmnt /data; exit 0; fi; '
-            'DATA_DEVICE=""; '
-            'for attempt in $(seq 1 36); do '
-            'for device in $(lsblk -dnpo NAME,TYPE | '
-            """awk '$2=="disk" {print $1}'); do """
-            'if ! lsblk -npo MOUNTPOINT "$device" | grep -q "^/$"; then '
-            'DATA_DEVICE="$device"; break; '
-            'fi; '
-            'done; '
-            'test -n "$DATA_DEVICE" && break; '
-            'sleep 5; '
-            'done; '
-            'test -b "$DATA_DEVICE" || '
-            '{ echo "Attached data volume did not appear in the guest." >&2; '
-            'exit 1; }; '
-            'echo "Using data device $DATA_DEVICE"; '
-            'FSTYPE="$(lsblk -dnro FSTYPE "$DATA_DEVICE" | head -n 1)"; '
-            'if test -z "$FSTYPE"; then sudo mkfs.xfs -f "$DATA_DEVICE"; fi; '
-            'sudo mount "$DATA_DEVICE" /data; '
-            'sudo chmod 0777 /data; '
-            'findmnt /data'
-        )
+        device = resources.get('oci_data_volume_device')
+        if not device:
+            raise RuntimeError(
+                'The OCI /data Block Volume device is missing from the '
+                'persisted run manifest; refusing to inspect or format '
+                'arbitrary guest disks.'
+            )
+        command = oci_data_volume_mount_command(device)
     output = ssh(job, command, timeout=300)
     event(job, 'Storage', f'Data volume mounted successfully: {output.strip()}')
+    return output
+
+def _verified_local_nvme_profile(resources):
+    """Return a control-plane-attested local-NVMe profile or ``None``."""
+
+    if resources.get('local_nvme_supported') is not True:
+        return None
+    count = resources.get('local_nvme_disk_count')
+    total_size_gb = resources.get('local_nvme_total_size_gb')
+    if (
+        isinstance(count, bool)
+        or not isinstance(count, int)
+        or count <= 0
+        or isinstance(total_size_gb, bool)
+        or not isinstance(total_size_gb, (int, float))
+        or not math.isfinite(float(total_size_gb))
+        or float(total_size_gb) <= 0
+    ):
+        return None
+    return count, float(total_size_gb)
+
+
+def prepare_storage_benchmark_target(job, plan, selected):
+    """Prefer one verified local NVMe disk, with exact ``/data`` fallback."""
+
+    if not STORAGE_BENCHMARK_RESULT_IDS.intersection(selected):
+        return '/data', None
+
+    resources = job.get('resources', {})
+    provider = str(getattr(plan, 'provider', 'oci') or 'oci').lower()
+    local_profile = _verified_local_nvme_profile(resources)
+    if local_profile is not None:
+        expected_count, expected_total_size_gb = local_profile
+        event(
+            job,
+            'Storage',
+            f'Verifying {expected_count} provider-reported instance-local '
+            f'NVMe device{"s" if expected_count != 1 else ""} before '
+            'selecting benchmark storage.',
+        )
+        output = ssh(
+            job,
+            storage_target.local_nvme_prepare_command(
+                provider,
+                expected_count,
+                expected_total_size_gb,
+            ),
+            timeout=300,
+            transport_attempts=1,
+        )
+        (
+            selected_target,
+            fallback_reason,
+        ) = storage_target.parse_local_nvme_prepare_result(
+            output,
+        )
+        if selected_target is not None:
+            record_resource(
+                job,
+                'benchmark_storage_target',
+                selected_target,
+            )
+            capacity_gib = (
+                selected_target['storage_target_capacity_bytes'] / 1024**3
+            )
+            event(
+                job,
+                'Storage',
+                'Selected verified instance-local NVMe at '
+                f'{selected_target["storage_target_mount_point"]} '
+                f'({capacity_gib:.2f} GiB, '
+                f'{selected_target["storage_target_model"]}). The '
+                'provisioned /data volume remains attached as an unused '
+                'fallback and will be cleaned up with the run.',
+            )
+            return (
+                selected_target['storage_target_mount_point'],
+                selected_target,
+            )
+        event(
+            job,
+            'Storage',
+            'Provider-reported local NVMe did not pass the fail-closed '
+            'guest identity and blank-device checks '
+            f'(guest_reason={fallback_reason}); using the exact '
+            'provisioned /data volume instead.',
+        )
+
+    if not plan.storage.additional_volume:
+        raise RuntimeError(
+            'No verified instance-local NVMe target was available and the '
+            'plan has no additional /data fallback volume.'
+        )
+    mount_data_volume(job)
+    observation = ssh(
+        job,
+        storage_target.mounted_storage_descriptor_command('/data'),
+        timeout=60,
+    )
+    selected_target = (
+        storage_target.parse_mounted_storage_descriptor_output(observation)
+    )
+    record_resource(job, 'benchmark_storage_target', selected_target)
+    capacity_gib = selected_target['storage_target_capacity_bytes'] / 1024**3
+    event(
+        job,
+        'Storage',
+        'Selected the manifest-bound /data fallback volume '
+        f'({capacity_gib:.2f} GiB, '
+        f'{selected_target["storage_target_model"]}).',
+    )
+    return selected_target['storage_target_mount_point'], selected_target
+
 
 def execute_benchmark(
     job,
@@ -3509,6 +3990,40 @@ def oci_runtime_environment(
         'portable_result_contract': 'v1',
         'image_id': resources.get('image_id'),
         'image_name': resources.get('image_name'),
+        'data_volume_type': (
+            'OCI Block Volume'
+            if plan.storage.additional_volume
+            else None
+        ),
+        'data_volume_size_gb': (
+            plan.storage.additional_size_gb
+            if plan.storage.additional_volume
+            else None
+        ),
+        'data_volume_vpus_per_gb': (
+            plan.storage.additional_performance
+            if plan.storage.additional_volume
+            else None
+        ),
+        'data_volume_attachment': (
+            (
+                'iscsi'
+                if plan.storage.mount_style == 'iscsi'
+                else 'paravirtualized'
+            )
+            if plan.storage.additional_volume
+            else None
+        ),
+        'local_nvme_disk_count': (
+            resources.get('local_nvme_disk_count')
+            if resources.get('local_nvme_supported') is True
+            else None
+        ),
+        'local_nvme_total_size_gb': (
+            resources.get('local_nvme_total_size_gb')
+            if resources.get('local_nvme_supported') is True
+            else None
+        ),
     }
     return {
         key: value for key, value in environment.items() if value is not None
@@ -3580,6 +4095,16 @@ def azure_runtime_environment(job, plan, architecture=None):
         ),
         'data_volume_provisioned_throughput_mibps': resources.get(
             'azure_data_disk_throughput_mibps'
+        ),
+        'local_nvme_available_disk_count': (
+            resources.get('local_nvme_disk_count')
+            if resources.get('local_nvme_supported') is True
+            else None
+        ),
+        'local_nvme_available_total_size_gb': (
+            resources.get('local_nvme_total_size_gb')
+            if resources.get('local_nvme_supported') is True
+            else None
         ),
         'iperf3_peer_vm_size': resources.get('azure_peer_vm_size'),
         'iperf3_peer_image_id': resources.get('azure_peer_image_id'),
@@ -4097,6 +4622,25 @@ def run_apachebench(job, plan):
 
 def run_deathstarbench(job, plan):
     options = plan.deathstarbench
+    topology_id = getattr(
+        options,
+        'topology_id',
+        SINGLE_HOST_TOPOLOGY_ID,
+    )
+    runtime_id = getattr(
+        options,
+        'runtime_id',
+        PODMAN_COMPOSE_RUNTIME_ID,
+    )
+    if (
+        topology_id != SINGLE_HOST_TOPOLOGY_ID
+        or runtime_id != PODMAN_COMPOSE_RUNTIME_ID
+    ):
+        raise RuntimeError(
+            'The compact DeathStarBench runner only accepts the exact '
+            'single_host_v1/podman_compose_v1 contract. Distributed K3s '
+            'remains available only through its internal qualification path.'
+        )
     settings = deathstarbench_workload(options.workload)
     resources = job.get('resources', {})
     diagnostics = []
@@ -4378,6 +4922,86 @@ def run_deathstarbench(job, plan):
         raise RuntimeError(f'DeathStarBench failed. {exc}') from exc
 
 
+def _validate_azure_distributed_deathstarbench_candidate_plan(plan):
+    """Validate the exact internal plan shared by candidate-only hooks."""
+
+    provider = (
+        plan.get('provider')
+        if isinstance(plan, dict)
+        else getattr(plan, 'provider', None)
+    )
+    benchmarks = (
+        plan.get('benchmarks', ())
+        if isinstance(plan, dict)
+        else getattr(plan, 'benchmarks', ())
+    ) or ()
+    options = (
+        plan.get('deathstarbench')
+        if isinstance(plan, dict)
+        else getattr(plan, 'deathstarbench', None)
+    )
+
+    def option_value(key, default=None):
+        if isinstance(options, dict):
+            return options.get(key, default)
+        return getattr(options, key, default)
+
+    if str(provider or '').casefold() != 'azure':
+        raise ValueError('The distributed runtime candidate requires Azure.')
+    if tuple(benchmarks) != ('deathstarbench',):
+        raise ValueError(
+            'The distributed runtime candidate requires DeathStarBench alone.'
+        )
+    if (
+        option_value('topology_id') != DISTRIBUTED_TIERED_TOPOLOGY_ID
+        or option_value('runtime_id') != K3S_RUNTIME_ID
+        or option_value('workload') != 'social_network'
+    ):
+        raise ValueError(
+            'The distributed runtime candidate requires the exact Social '
+            'Network distributed_tiered_v1/k3s_v1 contract.'
+        )
+
+
+def prepare_azure_distributed_deathstarbench_candidate_runtime(job, plan):
+    """Internal live-qualification hook for the unreleased Azure candidate.
+
+    This is intentionally not called by ``run_benchmarks``. It stops after
+    K3s cluster attestation and does not create benchmark results or deploy a
+    DeathStarBench workload.
+    """
+
+    _validate_azure_distributed_deathstarbench_candidate_plan(plan)
+    return prepare_azure_distributed_k3s_candidate(
+        job,
+        execute=ssh,
+        emit=event,
+        persist=persist_job_state,
+    )
+
+
+def prepare_azure_distributed_deathstarbench_candidate_workload(
+    job,
+    plan,
+    image_lock,
+):
+    """Internal hook that deploys but does not initialize the Social workload.
+
+    The caller supplies the artifact emitted by the manual image-publication
+    workflow. This hook remains outside ``run_benchmarks`` and stops at the
+    attested ``workload_ready`` boundary without producing a result.
+    """
+
+    _validate_azure_distributed_deathstarbench_candidate_plan(plan)
+    return prepare_azure_distributed_social_network_candidate(
+        job,
+        image_lock,
+        execute=ssh,
+        emit=event,
+        persist=persist_job_state,
+    )
+
+
 def run_aws_benchmarks(job, plan):
     """Run the selected supported benchmarks on Amazon Linux 2023."""
     selected = expanded_benchmark_ids(plan)
@@ -4440,10 +5064,19 @@ def run_aws_benchmarks(job, plan):
             verify_tcp_udp=True,
         )
 
-    if plan.storage.additional_volume:
+    storage_directory = '/data'
+    storage_metadata = None
+    if STORAGE_BENCHMARK_RESULT_IDS.intersection(selected):
+        storage_directory, storage_metadata = (
+            prepare_storage_benchmark_target(job, plan, selected)
+        )
+    elif plan.storage.additional_volume:
         mount_data_volume(job)
 
-    commands = amazon_linux.benchmark_commands(plan.ocpus)
+    commands = amazon_linux.benchmark_commands(
+        plan.ocpus,
+        storage_directory=storage_directory,
+    )
     resources = job.get('resources', {})
     environment = {
         'provider': 'AWS',
@@ -4461,6 +5094,16 @@ def run_aws_benchmarks(job, plan):
         'data_volume_iops': resources.get('aws_data_volume_iops'),
         'data_volume_throughput_mibps': resources.get(
             'aws_data_volume_throughput_mibps'
+        ),
+        'local_nvme_available_disk_count': (
+            resources.get('local_nvme_disk_count')
+            if resources.get('local_nvme_supported') is True
+            else None
+        ),
+        'local_nvme_available_total_size_gb': (
+            resources.get('local_nvme_total_size_gb')
+            if resources.get('local_nvme_supported') is True
+            else None
         ),
         'iperf3_peer_instance_type': resources.get(
             'aws_peer_instance_type'
@@ -4499,7 +5142,11 @@ def run_aws_benchmarks(job, plan):
                 name,
                 command,
                 parser=parser,
-                metadata=environment,
+                metadata=(
+                    {**environment, **(storage_metadata or {})}
+                    if key in STORAGE_BENCHMARK_RESULT_IDS
+                    else environment
+                ),
                 output_limit=None if key == 'fio' else 20000,
             )
 
@@ -4657,10 +5304,19 @@ def run_rocky_linux_benchmarks(
             verify_tcp_udp=True,
         )
 
-    if plan.storage.additional_volume:
+    storage_directory = '/data'
+    storage_metadata = None
+    if STORAGE_BENCHMARK_RESULT_IDS.intersection(selected):
+        storage_directory, storage_metadata = (
+            prepare_storage_benchmark_target(job, plan, selected)
+        )
+    elif plan.storage.additional_volume:
         mount_data_volume(job)
 
-    commands = rocky_linux.benchmark_commands(plan.ocpus)
+    commands = rocky_linux.benchmark_commands(
+        plan.ocpus,
+        storage_directory=storage_directory,
+    )
     parser_by_id = {
         'sysbench_cpu': rocky_linux.parse_sysbench_cpu_output,
         'sysbench_memory': rocky_linux.parse_sysbench_memory_output,
@@ -4689,7 +5345,11 @@ def run_rocky_linux_benchmarks(
             name,
             command,
             parser=parser,
-            metadata=environment,
+            metadata=(
+                {**environment, **(storage_metadata or {})}
+                if key in STORAGE_BENCHMARK_RESULT_IDS
+                else environment
+            ),
             output_limit=None if key == 'fio' else 20000,
         )
 
@@ -4820,7 +5480,13 @@ def run_oci_benchmarks(job, plan):
     iperf3_protocols = selected_iperf3_protocols(plan)
     if iperf3_protocols:
         wait_for_iperf_peer(job, iperf3_protocols)
-    if plan.storage.additional_volume:
+    storage_directory = '/data'
+    storage_metadata = None
+    if STORAGE_BENCHMARK_RESULT_IDS.intersection(selected):
+        storage_directory, storage_metadata = (
+            prepare_storage_benchmark_target(job, plan, selected)
+        )
+    elif plan.storage.additional_volume:
         mount_data_volume(job)
     environment = None
     logical_cpu_count = None
@@ -4868,7 +5534,10 @@ def run_oci_benchmarks(job, plan):
             f'{logical_cpu_count} logical CPUs across {plan.ocpus:g} OCPUs.',
         )
 
-    commands = amazon_linux.benchmark_commands(logical_cpu_count or 1)
+    commands = amazon_linux.benchmark_commands(
+        logical_cpu_count or 1,
+        storage_directory=storage_directory,
+    )
     parser_by_id = {
         'sysbench_cpu': amazon_linux.parse_sysbench_cpu_output,
         'sysbench_memory': amazon_linux.parse_sysbench_memory_output,
@@ -4897,7 +5566,11 @@ def run_oci_benchmarks(job, plan):
             name,
             command,
             parser=parser,
-            metadata=environment,
+            metadata=(
+                {**environment, **(storage_metadata or {})}
+                if key in STORAGE_BENCHMARK_RESULT_IDS
+                else environment
+            ),
             output_limit=None if key == 'fio' else 20000,
         )
     phoronix_failures = (

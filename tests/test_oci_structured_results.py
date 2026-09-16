@@ -42,6 +42,24 @@ class OciStructuredResultParityTests(unittest.TestCase):
     def test_core_workloads_use_observed_cpu_and_shared_strict_contracts(self):
         plan = oci_plan()
         job = oci_job()
+        target_metadata = {
+            'storage_target_contract': 'v1',
+            'storage_target_policy': (
+                'prefer_verified_instance_local_nvme_'
+                'else_additional_volume_v1'
+            ),
+            'storage_target_kind': 'instance_local_nvme',
+            'storage_target_verification': (
+                'provider_attested_guest_verified_v1'
+            ),
+            'storage_target_transport': 'nvme',
+            'storage_target_model': 'OCI local NVMe',
+            'storage_target_capacity_bytes': 1_900_000_000_000,
+            'storage_target_device_count': 1,
+            'storage_target_layout': 'single_device_v1',
+            'storage_target_filesystem': 'xfs',
+            'storage_target_mount_point': '/benchmark-local',
+        }
 
         def probe(_job, command, **kwargs):
             self.assertEqual(kwargs['timeout'], 60)
@@ -55,6 +73,11 @@ class OciStructuredResultParityTests(unittest.TestCase):
             patch.object(main, 'wait_for_guest_readiness') as readiness,
             patch.object(main, 'install_benchmark_tools'),
             patch.object(main, 'mount_data_volume') as mount,
+            patch.object(
+                main,
+                'prepare_storage_benchmark_target',
+                return_value=('/benchmark-local', target_metadata),
+            ) as prepare_target,
             patch.object(main, 'ssh', side_effect=probe) as ssh,
             patch.object(main, 'execute_benchmark') as execute,
         ):
@@ -65,7 +88,10 @@ class OciStructuredResultParityTests(unittest.TestCase):
         self.assertIn('github.com', readiness_hosts)
         self.assertIn('codeload.github.com', readiness_hosts)
         self.assertIn('raw.githubusercontent.com', readiness_hosts)
-        mount.assert_called_once_with(job)
+        mount.assert_not_called()
+        prepare_target.assert_called_once()
+        self.assertIs(prepare_target.call_args.args[0], job)
+        self.assertIs(prepare_target.call_args.args[1], plan)
         self.assertEqual(
             [call.args[1] for call in ssh.call_args_list],
             ['uname -m', 'nproc'],
@@ -82,27 +108,38 @@ class OciStructuredResultParityTests(unittest.TestCase):
                 'fio',
             },
         )
-        expected_commands = main.amazon_linux.benchmark_commands(4)
+        expected_commands = main.amazon_linux.benchmark_commands(
+            4,
+            storage_directory='/benchmark-local',
+        )
+        base_metadata = {
+            'provider': 'OCI',
+            'region': 'us-ashburn-1',
+            'shape': 'VM.Standard.A1.Flex',
+            'ocpus': 2.0,
+            'memory_gb': 16.0,
+            'architecture': 'aarch64',
+            'logical_cpu_count': 4,
+            'portable_result_contract': 'v1',
+            'image_id': 'ocid1.image.oc1..oraclelinux9',
+            'image_name': 'Oracle-Linux-9.6-2026.08.01-0',
+            'data_volume_type': 'OCI Block Volume',
+            'data_volume_size_gb': 100,
+            'data_volume_vpus_per_gb': 10,
+            'data_volume_attachment': 'paravirtualized',
+        }
         for benchmark_id, call in calls.items():
             with self.subTest(benchmark_id=benchmark_id):
                 self.assertEqual(
                     call.args[2:4],
                     expected_commands[benchmark_id],
                 )
+                expected_metadata = dict(base_metadata)
+                if benchmark_id in {'fio', 'sysbench_fileio'}:
+                    expected_metadata.update(target_metadata)
                 self.assertEqual(
                     call.kwargs['metadata'],
-                    {
-                        'provider': 'OCI',
-                        'region': 'us-ashburn-1',
-                        'shape': 'VM.Standard.A1.Flex',
-                        'ocpus': 2.0,
-                        'memory_gb': 16.0,
-                        'architecture': 'aarch64',
-                        'logical_cpu_count': 4,
-                        'portable_result_contract': 'v1',
-                        'image_id': 'ocid1.image.oc1..oraclelinux9',
-                        'image_name': 'Oracle-Linux-9.6-2026.08.01-0',
-                    },
+                    expected_metadata,
                 )
 
         self.assertIs(

@@ -3,6 +3,12 @@ import json
 import re
 from ipaddress import ip_address
 
+from .deathstarbench_contract import (
+    PODMAN_COMPOSE_RUNTIME_ID,
+    SINGLE_HOST_TOPOLOGY_ID,
+    runtime_profile,
+)
+
 
 REPOSITORY = 'https://github.com/delimitrou/DeathStarBench.git'
 REVISION = '6ecb09706140f8730b5385c08f1386c654c3c526'
@@ -1220,10 +1226,15 @@ def metadata(
     loadgen_architecture=None,
 ):
     settings = workload(workload_id)
+    profile = runtime_profile(
+        getattr(options, 'topology_id', SINGLE_HOST_TOPOLOGY_ID),
+        getattr(options, 'runtime_id', PODMAN_COMPOSE_RUNTIME_ID),
+    )
     values = {
+        **profile.metadata(),
         'workload': settings['name'],
         'upstream_revision': REVISION,
-        'container_runtime': 'Podman with podman-compose',
+        'container_runtime': profile.orchestrator,
         'warmup_seconds': int(options.warmup_seconds),
         'duration_seconds': int(options.duration_seconds),
         'threads': int(options.threads),

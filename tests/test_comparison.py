@@ -57,6 +57,33 @@ def apache_result(value=1000.0, *, status='completed'):
     }
 
 
+def storage_target_metadata(kind='instance_local_nvme', **overrides):
+    local = kind == 'instance_local_nvme'
+    metadata = {
+        'storage_target_contract': comparison.STORAGE_TARGET_CONTRACT,
+        'storage_target_policy': comparison.STORAGE_TARGET_POLICY,
+        'storage_target_kind': kind,
+        'storage_target_verification': (
+            comparison.STORAGE_TARGET_VERIFICATION[kind]
+        ),
+        'storage_target_transport': 'nvme',
+        'storage_target_model': (
+            'Local NVMe SSD' if local else 'gp3'
+        ),
+        'storage_target_capacity_bytes': (
+            1_750_000_000_000 if local else 1_099_511_627_776
+        ),
+        'storage_target_device_count': 1,
+        'storage_target_layout': comparison.STORAGE_TARGET_LAYOUT,
+        'storage_target_filesystem': 'xfs',
+        'storage_target_mount_point': (
+            '/benchmark-local' if local else '/data'
+        ),
+    }
+    metadata.update(overrides)
+    return metadata
+
+
 def artifact(run_id, value, *, plan=None):
     return comparison.build_results_artifact({
         'id': run_id,
@@ -214,6 +241,224 @@ class MetricRegistryTests(unittest.TestCase):
 
 
 class WorkloadContractTests(unittest.TestCase):
+    def test_legacy_storage_contract_fingerprints_remain_stable(self):
+        sysbench = comparison.workload_fingerprint(
+            'sysbench_fileio',
+            aws_plan(benchmarks=['sysbench']),
+            {},
+        )
+        fio = comparison.workload_fingerprint(
+            'fio',
+            aws_plan(benchmarks=['fio']),
+            {},
+        )
+
+        self.assertEqual(comparison.WORKLOAD_CONTRACT_VERSION, 3)
+        self.assertEqual(
+            sysbench['contract']['settings'],
+            {
+                'tool': 'sysbench',
+                'workload': 'fileio_random_read_write',
+                'duration_seconds': 60,
+                'file_total_size_gib': 4,
+                'data_path': 'additional_volume',
+            },
+        )
+        self.assertEqual(
+            sysbench['fingerprint'],
+            '59bfb65757004f486913990e94eec0b7540b0f97b478dadc07f9a21c0e6b126a',
+        )
+        self.assertEqual(
+            fio['fingerprint'],
+            '0a03b5c33351b0c9b6f5f53e185e8b072b5f9c86008f8c9da96298279d93bd89',
+        )
+        self.assertNotIn('provenance', sysbench)
+        self.assertNotIn('provenance', fio)
+
+    def test_new_storage_policy_separates_from_legacy(self):
+        plan = aws_plan(benchmarks=['fio'])
+        legacy = comparison.workload_fingerprint('fio', plan, {})
+        selected = comparison.workload_fingerprint(
+            'fio',
+            plan,
+            storage_target_metadata(),
+        )
+
+        differences = comparison.explain_workload_mismatch(legacy, selected)
+
+        self.assertFalse(selected['contract_unknown'])
+        self.assertNotEqual(legacy['fingerprint'], selected['fingerprint'])
+        paths = {difference['path'] for difference in differences}
+        self.assertIn('settings.data_path', paths)
+        self.assertIn('settings.storage_target_policy', paths)
+
+    def test_actual_storage_hardware_is_provenance_not_workload(self):
+        plan = aws_plan(benchmarks=['fio'])
+        local = comparison.workload_fingerprint(
+            'fio',
+            plan,
+            storage_target_metadata(),
+        )
+        fallback = comparison.workload_fingerprint(
+            'fio',
+            plan,
+            storage_target_metadata('provisioned_data_volume'),
+        )
+
+        self.assertEqual(local['fingerprint'], fallback['fingerprint'])
+        self.assertEqual(local['contract'], fallback['contract'])
+        self.assertEqual(
+            local['contract']['settings']['data_path'],
+            'selected_benchmark_storage',
+        )
+        self.assertEqual(
+            local['provenance']['storage_target']['kind'],
+            'instance_local_nvme',
+        )
+        self.assertEqual(
+            fallback['provenance']['storage_target']['kind'],
+            'provisioned_data_volume',
+        )
+
+    def test_new_storage_metadata_fails_closed(self):
+        valid = storage_target_metadata()
+        invalid_records = {
+            'unknown marker': {
+                **valid,
+                'storage_target_contract': 'v2',
+            },
+            'missing policy': {
+                key: value for key, value in valid.items()
+                if key != 'storage_target_policy'
+            },
+            'unknown kind': {
+                **valid,
+                'storage_target_kind': 'mystery_disk',
+            },
+            'structured kind': {
+                **valid,
+                'storage_target_kind': ['instance_local_nvme'],
+            },
+            'wrong verification': {
+                **valid,
+                'storage_target_verification': (
+                    'manifest_bound_guest_verified_v1'
+                ),
+            },
+            'unsupported layout': {
+                **valid,
+                'storage_target_layout': 'raid0_v1',
+            },
+            'multiple devices': {
+                **valid,
+                'storage_target_device_count': 2,
+            },
+            'boolean device count': {
+                **valid,
+                'storage_target_device_count': True,
+            },
+            'wrong filesystem': {
+                **valid,
+                'storage_target_filesystem': 'ext4',
+            },
+            'unsafe mount point': {
+                **valid,
+                'storage_target_mount_point': '/tmp/benchmark',
+            },
+            'structured mount point': {
+                **valid,
+                'storage_target_mount_point': {'path': '/benchmark-local'},
+            },
+            'mount inconsistent with kind': {
+                **valid,
+                'storage_target_mount_point': '/data',
+            },
+            'invalid capacity': {
+                **valid,
+                'storage_target_capacity_bytes': 0,
+            },
+            'non-NVMe local transport': {
+                **valid,
+                'storage_target_transport': 'scsi',
+            },
+            'structured transport': {
+                **valid,
+                'storage_target_transport': ['nvme'],
+            },
+            'missing model': {
+                key: value for key, value in valid.items()
+                if key != 'storage_target_model'
+            },
+            'invalid model': {
+                **valid,
+                'storage_target_model': ['not', 'text'],
+            },
+            'empty sanitized model': {
+                **valid,
+                'storage_target_model': '\x00\x01',
+            },
+        }
+
+        for label, metadata in invalid_records.items():
+            with self.subTest(label=label):
+                contract = comparison.workload_fingerprint(
+                    'fio',
+                    aws_plan(benchmarks=['fio']),
+                    metadata,
+                )
+                self.assertTrue(contract['contract_unknown'])
+                self.assertIsNone(contract['fingerprint'])
+                self.assertTrue(contract['issues'])
+                self.assertTrue(any(
+                    'storage target' in issue.lower()
+                    for issue in contract['issues']
+                ))
+
+    def test_orphaned_storage_target_metadata_fails_closed(self):
+        valid = storage_target_metadata()
+        plan = aws_plan(benchmarks=['fio'])
+
+        for key, value in valid.items():
+            if key == 'storage_target_contract':
+                continue
+            with self.subTest(key=key):
+                contract = comparison.workload_fingerprint(
+                    'fio',
+                    plan,
+                    {key: value},
+                )
+                self.assertTrue(contract['contract_unknown'])
+                self.assertIsNone(contract['fingerprint'])
+                self.assertTrue(any(
+                    'contract marker is missing' in issue.lower()
+                    for issue in contract['issues']
+                ))
+
+        for metadata in (
+            {'storage_target_contract': None},
+            {'storage_target_future_field': 'value'},
+        ):
+            with self.subTest(metadata=metadata):
+                contract = comparison.workload_fingerprint(
+                    'fio',
+                    plan,
+                    metadata,
+                )
+                self.assertTrue(contract['contract_unknown'])
+                self.assertIsNone(contract['fingerprint'])
+
+    def test_new_storage_metadata_survives_result_sanitization(self):
+        metadata = storage_target_metadata()
+        sanitized = comparison.sanitize_result({
+            'id': 'fio',
+            'name': 'fio storage suite',
+            'status': 'completed',
+            'metadata': metadata,
+            'metrics': {'read_iops': 1000.0},
+        })
+
+        self.assertEqual(sanitized['metadata'], metadata)
+
     def test_hardware_dimensions_do_not_change_apachebench_fingerprint(self):
         left = comparison.workload_fingerprint(
             'apachebench_new_connections',
@@ -510,6 +755,109 @@ class WorkloadContractTests(unittest.TestCase):
 
 
 class ComparisonPayloadTests(unittest.TestCase):
+    def test_mixed_storage_targets_warn_and_preserve_value_provenance(self):
+        plan = aws_plan(benchmarks=['fio'])
+
+        def document(run_id, value, metadata):
+            return comparison.build_results_artifact({
+                'id': run_id,
+                'status': 'destroyed',
+                'benchmark_status': 'complete',
+                'plan': plan,
+                'results': [{
+                    'id': 'fio',
+                    'name': 'fio storage suite',
+                    'status': 'completed',
+                    'metadata': metadata,
+                    'metrics': {'read_iops': value},
+                }],
+            })
+
+        payload = comparison.build_comparison_payload([
+            document('local-run', 1000.0, storage_target_metadata()),
+            document(
+                'fallback-run',
+                500.0,
+                storage_target_metadata('provisioned_data_volume'),
+            ),
+        ])
+
+        self.assertEqual(payload['excluded'], [])
+        self.assertEqual(payload['mismatches'], [])
+        self.assertEqual(len(payload['charts']), 1)
+        chart = payload['charts'][0]
+        self.assertIn(
+            'different storage target classes',
+            chart['provenance_warnings'][0],
+        )
+        values = {value['run_id']: value for value in chart['values']}
+        self.assertEqual(
+            values['local-run']['provenance']['storage_target']['kind'],
+            'instance_local_nvme',
+        )
+        self.assertEqual(
+            values['fallback-run']['provenance']['storage_target']['kind'],
+            'provisioned_data_volume',
+        )
+        self.assertIn(
+            'Storage target: instance-local NVMe',
+            values['local-run']['warnings'][0],
+        )
+        self.assertIn(
+            'Storage target: provisioned data volume',
+            values['fallback-run']['warnings'][0],
+        )
+        group_values = payload['groups'][0]['metrics'][0]['values']
+        self.assertTrue(all('provenance' in value for value in group_values))
+
+    def test_storage_model_and_capacity_differences_are_disclosed(self):
+        plan = aws_plan(benchmarks=['fio'])
+
+        def document(run_id, metadata):
+            return comparison.build_results_artifact({
+                'id': run_id,
+                'status': 'destroyed',
+                'benchmark_status': 'complete',
+                'plan': plan,
+                'results': [{
+                    'id': 'fio',
+                    'name': 'fio storage suite',
+                    'status': 'completed',
+                    'metadata': metadata,
+                    'metrics': {'read_iops': 1000.0},
+                }],
+            })
+
+        variants = {
+            'model': storage_target_metadata(
+                storage_target_model='OCI local NVMe',
+            ),
+            'capacity': storage_target_metadata(
+                storage_target_capacity_bytes=6_800_000_000_000,
+            ),
+        }
+        for label, changed in variants.items():
+            with self.subTest(label=label):
+                payload = comparison.build_comparison_payload([
+                    document('baseline-run', storage_target_metadata()),
+                    document('changed-run', changed),
+                ])
+
+                chart = payload['charts'][0]
+                self.assertIn(
+                    'device models, or capacities',
+                    chart['provenance_warnings'][0],
+                )
+                values = {item['run_id']: item for item in chart['values']}
+                self.assertIn(
+                    'Storage target: instance-local NVMe',
+                    values['baseline-run']['warnings'][0],
+                )
+                self.assertIn(
+                    'Storage target: instance-local NVMe',
+                    values['changed-run']['warnings'][0],
+                )
+
     def test_portable_llama_toolchains_are_comparable_with_provenance_warning(self):
         plan = aws_plan(benchmarks=[], llm_benchmarks=['llama_bench'])
         base_metadata = {

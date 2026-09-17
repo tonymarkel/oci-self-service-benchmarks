@@ -156,15 +156,124 @@ class K3sRuntimeCommandTests(unittest.TestCase):
             )
             self.assertIn('for COMMAND in curl', command)
             self.assertIn(
-                'lsmod modprobe; do command -v "$COMMAND"',
+                'lsmod modprobe; do if ! command -v "$COMMAND"',
                 command,
             )
+            self.assertIn(
+                'Required K3s host command is unavailable: $COMMAND',
+                command,
+            )
+            self.assertIn(
+                'K3S_SELINUX_VERIFY_OUTPUT=$(sudo rpm -V '
+                'k3s-selinux 2>&1)',
+                command,
+            )
+            self.assertIn(
+                'K3s SELinux RPM verification failed:',
+                command,
+            )
+            self.assertNotIn('rpm -V k3s-selinux >/dev/null', command)
             self.assertNotIn('rpm.rancher.io/k3s/latest', command)
             self.assertNotRegex(command, r'curl[^;]*\|\s*(?:ba)?sh')
         self.assertNotIn('xfsprogs', control)
         self.assertIn('xfsprogs', database)
         self.assertNotIn('policycoreutils-python-utils', control)
         self.assertIn('policycoreutils-python-utils', database)
+
+    def test_host_commands_set_a_deterministic_system_path(self):
+        expected = f'PATH={runtime._SYSTEM_COMMAND_PATH}; export PATH;'
+
+        self.assertIn('/usr/sbin', runtime._SYSTEM_COMMAND_PATH.split(':'))
+
+        for command in (
+            rocky_host_prepare_command('control'),
+            host_preflight_command(selinux_enabled=False),
+            host_preflight_command(selinux_enabled=True),
+        ):
+            with self.subTest(command=command[:80]):
+                self.assertIn(expected, command)
+
+    def test_selinux_rpm_verification_reports_root_verification_output(self):
+        command = runtime._k3s_selinux_rpm_verification_command()
+
+        with tempfile.TemporaryDirectory() as directory:
+            fake_sudo = Path(directory) / 'sudo'
+            fake_sudo.write_text(
+                '#!/bin/sh\n'
+                'test "$*" = "rpm -V k3s-selinux" || exit 99\n'
+                'printf "unreadable root-only policy\\n" >&2\n'
+                'exit 23\n'
+            )
+            fake_sudo.chmod(0o755)
+            environment = os.environ.copy()
+            environment['PATH'] = (
+                f'{directory}{os.pathsep}{environment["PATH"]}'
+            )
+            completed = subprocess.run(
+                ['bash', '-c', command],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn(
+            'K3s SELinux RPM verification failed:', completed.stderr
+        )
+        self.assertIn('unreadable root-only policy', completed.stderr)
+        self.assertNotIn('unreadable root-only policy', completed.stdout)
+
+    def test_selinux_rpm_verification_uses_privileged_success_path(self):
+        command = runtime._k3s_selinux_rpm_verification_command()
+
+        with tempfile.TemporaryDirectory() as directory:
+            fake_sudo = Path(directory) / 'sudo'
+            success_marker = Path(directory) / 'verified'
+            fake_sudo.write_text(
+                '#!/bin/sh\n'
+                'test "$*" = "rpm -V k3s-selinux" || exit 99\n'
+                f': > {success_marker}\n'
+                'exit 0\n'
+            )
+            fake_sudo.chmod(0o755)
+            environment = os.environ.copy()
+            environment['PATH'] = (
+                f'{directory}{os.pathsep}{environment["PATH"]}'
+            )
+            completed = subprocess.run(
+                ['bash', '-c', command],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(success_marker.is_file())
+
+    def test_required_command_check_names_the_missing_utility(self):
+        command = runtime._required_command_check(('alpha', 'beta'))
+
+        with tempfile.TemporaryDirectory() as directory:
+            alpha = Path(directory) / 'alpha'
+            alpha.write_text('#!/bin/sh\nexit 0\n')
+            alpha.chmod(0o755)
+            environment = os.environ.copy()
+            environment['PATH'] = directory
+            completed = subprocess.run(
+                ['/bin/bash', '-c', command],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn(
+            'Required K3s host command is unavailable: beta',
+            completed.stderr,
+        )
 
     def test_control_tokens_are_idempotent_and_agents_use_ca_bound_token(self):
         initializer = token_initialize_command('agent')

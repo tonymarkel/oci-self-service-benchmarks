@@ -127,6 +127,101 @@ OPENRESTY_ROCKS_PINNED = (
     "'assert(require \"resty.jwt\")'"
 )
 
+# LuaRocks' root manifest eventually grew beyond Lua 5.1/LuaJIT's limit of
+# 65,536 constants. The pinned media frontend previously resolved four rocks
+# by name, so an otherwise unchanged image stopped building when that mutable
+# manifest crossed the parser limit. Fetch exact source artifacts directly,
+# verify every byte, and disable dependency resolution so no manifest is read.
+MEDIA_RESTY_MONGOL_REVISION = "697adfe5e63a3a1493b45102a987dc374e3e7560"
+MEDIA_RESTY_MONGOL_ARCHIVE = (
+    f"resty-mongol-{MEDIA_RESTY_MONGOL_REVISION}.tar.gz"
+)
+MEDIA_RESTY_MONGOL_URL = (
+    "https://codeload.github.com/Olivine-Labs/resty-mongol/tar.gz/"
+    f"{MEDIA_RESTY_MONGOL_REVISION}"
+)
+MEDIA_RESTY_MONGOL_SHA256 = (
+    "85ac911d5d0fe2c8073d49cba63158989af7d768c6c789331e59b5d4594172ea"
+)
+MEDIA_RESTY_MONGOL_ROCKSPEC = "resty-mongol-0.8-4.rockspec"
+MEDIA_RESTY_MONGOL_ROCKSPEC_TEXT = '''package = "resty-mongol"
+version = "0.8-4"
+source = {
+  url = "https://github.com/Olivine-Labs/resty-mongol/archive/v0.8.tar.gz",
+  dir = "resty-mongol-0.8"
+}
+description = {
+  summary = "Mongo driver for openresty.",
+  detailed = [[
+  ]],
+  homepage = "",
+  license = "MIT <http://opensource.org/licenses/MIT>"
+}
+dependencies = {
+  "lua >= 5.1",
+  "luacrypto >= 0.3.2"
+}
+build = {
+  type = "builtin",
+  modules = {
+    ["resty-mongol.init"]        = "src/init.lua",
+    ["resty-mongol.colmt"]       = "src/colmt.lua",
+    ["resty-mongol.cursor"]      = "src/cursor.lua",
+    ["resty-mongol.dbmt"]        = "src/dbmt.lua",
+    ["resty-mongol.get"]         = "src/get.lua",
+    ["resty-mongol.gridfs"]      = "src/gridfs.lua",
+    ["resty-mongol.gridfs_file"] = "src/gridfs_file.lua",
+    ["resty-mongol.ll"]          = "src/ll.lua",
+    ["resty-mongol.misc"]        = "src/misc.lua",
+    ["resty-mongol.object_id"]   = "src/object_id.lua",
+    ["resty-mongol.bson"]        = "src/bson.lua",
+  }
+}
+'''
+
+MEDIA_LUACRYPTO_FILENAME = "luacrypto-0.3.2-1.src.rock"
+MEDIA_LUACRYPTO_URL = (
+    "https://luarocks.org/manifests/luarocks/"
+    f"{MEDIA_LUACRYPTO_FILENAME}"
+)
+MEDIA_LUACRYPTO_SHA256 = (
+    "dc935c923b8851208d5d504b343448a9d5bd3e537bb8657875f12d72155600b8"
+)
+
+MEDIA_ROCKS_ORIGINAL = (
+    "RUN luarocks install resty-mongol --server=http://rocks.moonscript.org \\\n"
+    "    && luarocks install luasocket \\\n"
+    "    && luarocks install chronos \\\n"
+    "    && luarocks install magick"
+)
+
+
+def _media_rocks_pinned() -> str:
+    return (
+        f"COPY {MEDIA_RESTY_MONGOL_ROCKSPEC} "
+        f"/tmp/{MEDIA_RESTY_MONGOL_ROCKSPEC}\n"
+        "RUN set -eux; \\\n"
+        f"    curl -fSL --retry 5 --retry-delay 5 {MEDIA_RESTY_MONGOL_URL} \\\n"
+        f"        -o /tmp/{MEDIA_RESTY_MONGOL_ARCHIVE}; \\\n"
+        f"    curl -fSL --retry 5 --retry-delay 5 {MEDIA_LUACRYPTO_URL} \\\n"
+        f"        -o /tmp/{MEDIA_LUACRYPTO_FILENAME}; \\\n"
+        f'    echo "{MEDIA_RESTY_MONGOL_SHA256}  '
+        f'/tmp/{MEDIA_RESTY_MONGOL_ARCHIVE}" | sha256sum -c -; \\\n'
+        f'    echo "{MEDIA_LUACRYPTO_SHA256}  '
+        f'/tmp/{MEDIA_LUACRYPTO_FILENAME}" | sha256sum -c -; \\\n'
+        f"    luarocks install --deps-mode=none /tmp/{MEDIA_LUACRYPTO_FILENAME}; \\\n"
+        f"    tar xzf /tmp/{MEDIA_RESTY_MONGOL_ARCHIVE} -C /tmp; \\\n"
+        f"    cd /tmp/resty-mongol-{MEDIA_RESTY_MONGOL_REVISION}; \\\n"
+        "    luarocks make --deps-mode=none "
+        f"/tmp/{MEDIA_RESTY_MONGOL_ROCKSPEC}; \\\n"
+        "    ldconfig; \\\n"
+        "    /usr/local/openresty/bin/resty -e "
+        "'assert(require \"crypto\"); assert(require \"resty-mongol\")'; \\\n"
+        f"    rm -rf /tmp/resty-mongol-{MEDIA_RESTY_MONGOL_REVISION} "
+        f"/tmp/{MEDIA_RESTY_MONGOL_ARCHIVE} "
+        f"/tmp/{MEDIA_RESTY_MONGOL_ROCKSPEC} /tmp/{MEDIA_LUACRYPTO_FILENAME}"
+    )
+
 OCI_LABELS = (
     '\nARG OCI_SOURCE_REPOSITORY\n'
     'ARG OCI_SOURCE_REVISION\n'
@@ -460,7 +555,17 @@ def _write_media_frontend_context(upstream: Path, destination: Path) -> None:
         "FROM docker.io/library/ubuntu:xenial",
         label="media frontend base image",
     )
+    source = _replace_once(
+        source,
+        MEDIA_ROCKS_ORIGINAL,
+        _media_rocks_pinned(),
+        label="media frontend LuaRocks installation",
+    )
     source = _patch_legacy_downloads(source)
+    (destination / MEDIA_RESTY_MONGOL_ROCKSPEC).write_text(
+        MEDIA_RESTY_MONGOL_ROCKSPEC_TEXT,
+        encoding="utf-8",
+    )
     source += (
         "\n# Bake the exact runtime assets formerly fetched by an init container.\n"
         "COPY runtime/lua-scripts /usr/local/openresty/nginx/lua-scripts\n"

@@ -93,6 +93,20 @@ OPENRESTY_JWT_SHA256 = (
     "8a6bc8a12679953e345da55fe1653f2c581301140a90245e2af971c978e49ca8"
 )
 
+# Ubuntu Xenial's Python is 3.5.  An unversioned PyPI install eventually began
+# resolving to a PyYAML release whose setup.py uses Python 3.6 syntax.  Use the
+# architecture-native package at the exact version published for both Xenial
+# amd64 and arm64, then verify the imported module before continuing.
+XENIAL_PYYAML_PACKAGE_VERSION = "3.11-3build1"
+XENIAL_PYYAML_MODULE_VERSION = "3.11"
+PYYAML_INSTALL_ORIGINAL = "  && pip3 install PyYAML \\\n"
+PYYAML_INSTALL_PINNED = (
+    "  && apt-get install -y --no-install-recommends "
+    f"python3-yaml={XENIAL_PYYAML_PACKAGE_VERSION} \\\n"
+    f"  && python3 -c 'import yaml; assert yaml.__version__ == "
+    f'"{XENIAL_PYYAML_MODULE_VERSION}"\' \\\n'
+)
+
 OPENRESTY_ROCKS_ORIGINAL = (
     "RUN luarocks install long \\\n"
     "    && luarocks install lua-resty-jwt \\\n"
@@ -312,6 +326,12 @@ def _write_app_context(upstream: Path, destination: Path) -> None:
         "FROM ubuntu:16.04",
         "FROM docker.io/library/ubuntu:16.04 AS social-dependencies",
         label="Social Network dependency base image",
+    )
+    dependency_source = _replace_once(
+        dependency_source,
+        PYYAML_INSTALL_ORIGINAL,
+        PYYAML_INSTALL_PINNED,
+        label="unversioned PyYAML installation",
     )
 
     application_source = (social / "Dockerfile").read_text(encoding="utf-8")

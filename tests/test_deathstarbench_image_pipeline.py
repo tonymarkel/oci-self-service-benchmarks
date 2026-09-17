@@ -81,7 +81,9 @@ def minimal_upstream(root):
         "FROM ubuntu:xenial\n"
         "ARG RESTY_PCRE_VERSION=8.41\n"
         "RUN curl http://ftp.cs.stanford.edu/pub/exim/pcre/"
-        "pcre-${RESTY_PCRE_VERSION}.tar.gz\n",
+        "pcre-${RESTY_PCRE_VERSION}.tar.gz\n"
+        + prepare.MEDIA_ROCKS_ORIGINAL
+        + "\n",
     )
     write(social / "docker/media-frontend/lualongnumber/source.c")
     write(social / "gen-lua/service.lua")
@@ -192,6 +194,37 @@ class DeathStarBenchContextPreparationTests(unittest.TestCase):
                 "COPY runtime/lua-scripts /usr/local/openresty/nginx/lua-scripts",
                 media,
             )
+            self.assertNotIn(
+                "luarocks install resty-mongol --server=http://rocks.moonscript.org",
+                media,
+            )
+            self.assertNotIn("rocks.moonscript.org", media)
+            self.assertIn(prepare.MEDIA_RESTY_MONGOL_REVISION, media)
+            self.assertIn(prepare.MEDIA_RESTY_MONGOL_SHA256, media)
+            self.assertIn(
+                "luarocks make --deps-mode=none "
+                f"/tmp/{prepare.MEDIA_RESTY_MONGOL_ROCKSPEC}",
+                media,
+            )
+            self.assertIn(prepare.MEDIA_LUACRYPTO_URL, media)
+            self.assertIn(prepare.MEDIA_LUACRYPTO_SHA256, media)
+            self.assertIn(
+                "luarocks install --deps-mode=none "
+                f"/tmp/{prepare.MEDIA_LUACRYPTO_FILENAME}",
+                media,
+            )
+            for unneeded_rock in ("luasocket", "chronos", "magick"):
+                self.assertNotIn(f"luarocks install {unneeded_rock}", media)
+            for module in ("crypto", "resty-mongol"):
+                self.assertIn(f'assert(require "{module}")', media)
+            self.assertEqual(
+                (
+                    output
+                    / "media_frontend"
+                    / prepare.MEDIA_RESTY_MONGOL_ROCKSPEC
+                ).read_text(),
+                prepare.MEDIA_RESTY_MONGOL_ROCKSPEC_TEXT,
+            )
             self.assertNotIn("dimoibiehg", frontend + media)
             self.assertEqual(prepare.K3S_CLUSTER_DNS_IP, K3S_CLUSTER_DNS_IP)
             for nginx_config in (frontend_nginx, media_nginx):
@@ -283,6 +316,28 @@ class DeathStarBenchContextPreparationTests(unittest.TestCase):
             ROOT / ".github/workflows/deathstarbench-social-images.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("platforms: linux/amd64,linux/arm64", workflow)
+
+    def test_media_luarocks_anchor_drift_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            upstream = temporary_path / "upstream"
+            output = temporary_path / "contexts"
+            social = minimal_upstream(upstream)
+            dockerfile = social / "docker/media-frontend/xenial/Dockerfile"
+            dockerfile.write_text(
+                dockerfile.read_text().replace(
+                    prepare.MEDIA_ROCKS_ORIGINAL,
+                    "RUN echo changed",
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(prepare, "_validate_upstream"):
+                with self.assertRaisesRegex(
+                    prepare.PreparationError,
+                    "media frontend LuaRocks installation anchor",
+                ):
+                    prepare.prepare_contexts(upstream, output)
 
     def test_anchor_drift_fails_closed(self):
         with tempfile.TemporaryDirectory() as temporary:

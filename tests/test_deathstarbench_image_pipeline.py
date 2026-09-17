@@ -60,7 +60,10 @@ def minimal_upstream(root):
     )
     write(
         social / "docker/thrift-microservice-deps/cpp/Dockerfile",
-        "FROM ubuntu:16.04\nRUN echo get_shards_pool\n",
+        "FROM ubuntu:16.04\n"
+        "RUN echo get_shards_pool \\\n"
+        "  && pip3 install PyYAML \\\n"
+        "  && true\n",
     )
     write(
         social / "docker/openresty-thrift/xenial/Dockerfile",
@@ -159,6 +162,16 @@ class DeathStarBenchContextPreparationTests(unittest.TestCase):
             self.assertIn("FROM social-dependencies AS builder", application)
             self.assertNotIn("yg397/thrift-microservice-deps", application)
             self.assertEqual(application.count("get_shards_pool"), 1)
+            self.assertNotIn("pip3 install PyYAML", application)
+            self.assertIn(
+                "apt-get install -y --no-install-recommends "
+                "python3-yaml=3.11-3build1",
+                application,
+            )
+            self.assertIn(
+                'assert yaml.__version__ == "3.11"',
+                application,
+            )
             self.assertIn(
                 "COPY ./config/service-config.json "
                 "/social-network-microservices/config/service-config.json",
@@ -258,6 +271,18 @@ class DeathStarBenchContextPreparationTests(unittest.TestCase):
             prepare.UPSTREAM_ANCHORS["LICENSE"],
             "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
         )
+
+    def test_xenial_pyyaml_package_is_pinned_for_both_platform_builds(self):
+        self.assertEqual(
+            prepare.XENIAL_PYYAML_PACKAGE_VERSION,
+            "3.11-3build1",
+        )
+        self.assertEqual(prepare.XENIAL_PYYAML_MODULE_VERSION, "3.11")
+
+        workflow = (
+            ROOT / ".github/workflows/deathstarbench-social-images.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("platforms: linux/amd64,linux/arm64", workflow)
 
     def test_anchor_drift_fails_closed(self):
         with tempfile.TemporaryDirectory() as temporary:

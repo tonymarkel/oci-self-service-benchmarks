@@ -68,6 +68,9 @@ DOWNLOAD_CONNECT_TIMEOUT_SECONDS = 20
 DOWNLOAD_MAX_TIME_SECONDS = 600
 SERVICE_START_TIMEOUT_SECONDS = 600
 READINESS_TIMEOUT_SECONDS = 300
+_SYSTEM_COMMAND_PATH = (
+    '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+)
 
 _VERSION_RE = re.compile(r'^v\d+\.\d+\.\d+\+k3s\d+$')
 _NODE_NAME_RE = re.compile(
@@ -249,6 +252,29 @@ def validated_token(value: str) -> str:
     return token
 
 
+def _k3s_selinux_rpm_verification_command() -> str:
+    """Verify the root-readable K3s policy package without hiding failures."""
+
+    return (
+        'K3S_SELINUX_VERIFY_OUTPUT=; '
+        'if ! K3S_SELINUX_VERIFY_OUTPUT=$(sudo rpm -V k3s-selinux 2>&1); '
+        'then printf "K3s SELinux RPM verification failed:\\n%s\\n" '
+        '"$K3S_SELINUX_VERIFY_OUTPUT" >&2; exit 1; fi'
+    )
+
+
+def _required_command_check(commands: Iterable[str]) -> str:
+    """Return a fail-closed shell check that names a missing host utility."""
+
+    command_names = ' '.join(commands)
+    return (
+        f'for COMMAND in {command_names}; do '
+        'if ! command -v "$COMMAND" >/dev/null; then '
+        'echo "Required K3s host command is unavailable: $COMMAND" >&2; '
+        'exit 1; fi; done'
+    )
+
+
 def rocky_host_prepare_command(role: str) -> str:
     """Prepare one Rocky Linux 9 guest for the pinned K3s runtime.
 
@@ -284,9 +310,20 @@ def rocky_host_prepare_command(role: str) -> str:
     if role == 'database':
         package_names.extend(('policycoreutils-python-utils', 'xfsprogs'))
     packages = ' '.join(package_names)
+    required_commands = _required_command_check((
+        'curl',
+        'sha256sum',
+        'base64',
+        'systemctl',
+        'timeout',
+        'findmnt',
+        'lsmod',
+        'modprobe',
+    ))
     expected_rpm_identity = f'{K3S_SELINUX_VERSION_RELEASE}.noarch'
     return (
         'set -euo pipefail; '
+        f'PATH={shlex.quote(_SYSTEM_COMMAND_PATH)}; export PATH; '
         'test -r /etc/os-release; source /etc/os-release; '
         'test "$ID" = rocky; case "$VERSION_ID" in 9|9.*) ;; *) '
         'echo "The distributed K3s candidate requires Rocky Linux 9." >&2; '
@@ -303,6 +340,7 @@ def rocky_host_prepare_command(role: str) -> str:
         'sudo dnf clean expire-cache >/dev/null 2>&1 || true; '
         'if [ "$attempt" -lt 3 ]; then sleep 10; fi; done; '
         'test "$DNF_READY" = true; '
+        f'{required_commands}; '
         f'EXPECTED_SELINUX_RPM={shlex.quote(expected_rpm_identity)}; '
         'CURRENT_SELINUX_RPM=$(rpm -q --qf '
         "'%{VERSION}-%{RELEASE}.%{ARCH}' k3s-selinux 2>/dev/null || true); "
@@ -321,7 +359,7 @@ def rocky_host_prepare_command(role: str) -> str:
         "test \"$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}' "
         'k3s-selinux)" '
         '= "$EXPECTED_SELINUX_RPM"; '
-        'rpm -V k3s-selinux >/dev/null; '
+        f'{_k3s_selinux_rpm_verification_command()}; '
         f'printf "%s" {shlex.quote(modules_payload)} | base64 --decode '
         '> /tmp/deathstarbench-k3s-modules; '
         f'sudo install -o root -g root -m 0644 '
@@ -342,9 +380,7 @@ def rocky_host_prepare_command(role: str) -> str:
         'firewalld.service >/dev/null; fi; '
         'if sudo systemctl is-active --quiet firewalld.service 2>/dev/null; '
         'then echo "firewalld remained active after disable." >&2; exit 1; fi; '
-        'rpm -q container-selinux k3s-selinux >/dev/null; '
-        'for COMMAND in curl sha256sum base64 systemctl timeout findmnt '
-        'lsmod modprobe; do command -v "$COMMAND" >/dev/null; done'
+        'rpm -q container-selinux k3s-selinux >/dev/null'
     )
 
 
@@ -367,10 +403,21 @@ def host_preflight_command(*, selinux_enabled: bool) -> str:
         if selinux_enabled
         else 'test "$(getenforce 2>/dev/null || echo Disabled)" != Enforcing; '
     )
+    required_commands = _required_command_check((
+        'curl',
+        'sha256sum',
+        'base64',
+        'systemctl',
+        'timeout',
+        'findmnt',
+        'lsmod',
+        'modprobe',
+        'swapon',
+    ))
     return (
         'set -euo pipefail; '
-        'for COMMAND in curl sha256sum base64 systemctl timeout findmnt '
-        'lsmod modprobe swapon; do command -v "$COMMAND" >/dev/null; done; '
+        f'PATH={shlex.quote(_SYSTEM_COMMAND_PATH)}; export PATH; '
+        f'{required_commands}; '
         'test -d /sys/fs/cgroup; '
         'test "$(findmnt -rn -o FSTYPE --mountpoint /sys/fs/cgroup)" '
         '= cgroup2; '

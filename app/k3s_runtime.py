@@ -45,7 +45,12 @@ K3S_CONFIG_DIRECTORY = '/etc/rancher/k3s'
 K3S_CLUSTER_CIDR = '10.42.0.0/16'
 K3S_SERVICE_CIDR = '10.43.0.0/16'
 K3S_CLUSTER_DNS_IP = '10.43.0.10'
-K3S_SERVICE_NODE_PORT_RANGE = '8080-8080'
+# K3s's bundled kube-router NetworkPolicy controller validates the NodePort
+# allocation range as two strictly ordered, inclusive endpoints. Keep the
+# smallest valid range containing the one explicitly assigned DeathStarBench
+# NodePort; the companion port is never exposed by the provider firewall or
+# selected by the rendered Service.
+K3S_SERVICE_NODE_PORT_RANGE = '8080-8081'
 
 # K3s's SELinux policy is released independently from the K3s binary.  Keep
 # the exact EL9 package and checksum beside the runtime pins so a guest never

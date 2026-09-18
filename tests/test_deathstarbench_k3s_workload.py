@@ -827,6 +827,105 @@ class WorkloadAttestationTests(unittest.TestCase):
                 self.bundle,
             )
 
+    def _containerd_23_attestation(self):
+        attestation = copy.deepcopy(self.attestation)
+        for item in attestation['items']:
+            if item['kind'] != 'Pod':
+                continue
+            component = item['metadata']['labels'][
+                'app.kubernetes.io/component'
+            ]
+            config_digest = (
+                'sha256:'
+                + hashlib.sha256(component.encode('utf-8')).hexdigest()
+            )
+            container_status = item['status']['containerStatuses'][0]
+            container_status['image'] = config_digest
+            container_status['imageID'] = item['spec']['containers'][0]['image']
+        return attestation
+
+    def test_containerd_23_config_digest_presentation_is_accepted(self):
+        result = parse_workload_attestation(
+            json.dumps(self._containerd_23_attestation()),
+            self.bundle,
+        )
+
+        self.assertEqual(result['component_count'], 27)
+
+    def test_runtime_image_identity_remains_fail_closed(self):
+        baseline = self._containerd_23_attestation()
+        pod = next(item for item in baseline['items'] if item['kind'] == 'Pod')
+        expected_image = pod['spec']['containers'][0]['image']
+
+        mutations = []
+        local_config_as_public_id = copy.deepcopy(baseline)
+        local_status = next(
+            item for item in local_config_as_public_id['items']
+            if item['kind'] == 'Pod'
+        )['status']['containerStatuses'][0]
+        local_status['imageID'] = local_status['image']
+        mutations.append((
+            'local config digest as public identity',
+            local_config_as_public_id,
+        ))
+
+        missing = copy.deepcopy(baseline)
+        missing_status = next(
+            item for item in missing['items'] if item['kind'] == 'Pod'
+        )['status']['containerStatuses'][0]
+        missing_status['imageID'] = ''
+        mutations.append(('missing public identity', missing))
+
+        wrong_type = copy.deepcopy(baseline)
+        wrong_type_status = next(
+            item for item in wrong_type['items'] if item['kind'] == 'Pod'
+        )['status']['containerStatuses'][0]
+        wrong_type_status['imageID'] = []
+        mutations.append(('non-string public identity', wrong_type))
+
+        blank_image = copy.deepcopy(baseline)
+        blank_status = next(
+            item for item in blank_image['items'] if item['kind'] == 'Pod'
+        )['status']['containerStatuses'][0]
+        blank_status['image'] = ''
+        mutations.append(('blank presentation image', blank_image))
+
+        foreign_pullable = copy.deepcopy(self.attestation)
+        foreign_status = next(
+            item for item in foreign_pullable['items'] if item['kind'] == 'Pod'
+        )['status']['containerStatuses'][0]
+        foreign_status['imageID'] = (
+            'docker-pullable://registry.example/foreign/image@'
+            + expected_image.rsplit('@', 1)[1]
+        )
+        mutations.append(('foreign pullable identity', foreign_pullable))
+
+        for name, mutation in mutations:
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(
+                    WorkloadBundleError,
+                    'runtime image identity',
+                ):
+                    parse_workload_attestation(
+                        json.dumps(mutation),
+                        self.bundle,
+                    )
+
+    def test_pod_spec_and_readiness_remain_fail_closed_with_config_presentation(self):
+        wrong_spec = self._containerd_23_attestation()
+        pod = next(item for item in wrong_spec['items'] if item['kind'] == 'Pod')
+        pod['spec']['containers'][0]['image'] = (
+            'registry.example/foreign/image@sha256:' + 'f' * 64
+        )
+        with self.assertRaisesRegex(WorkloadBundleError, 'image drifted'):
+            parse_workload_attestation(json.dumps(wrong_spec), self.bundle)
+
+        unready = self._containerd_23_attestation()
+        pod = next(item for item in unready['items'] if item['kind'] == 'Pod')
+        pod['status']['containerStatuses'][0]['ready'] = False
+        with self.assertRaisesRegex(WorkloadBundleError, 'Pod readiness'):
+            parse_workload_attestation(json.dumps(unready), self.bundle)
+
     def test_attestation_rejects_image_storage_policy_and_pod_drift(self):
         mutations = []
 

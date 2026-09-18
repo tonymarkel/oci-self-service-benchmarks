@@ -214,7 +214,7 @@ class DeathStarBenchTopologyManifestTests(unittest.TestCase):
         )
         self.assertEqual(
             distributed.fingerprint,
-            'sha256:a370d8c9b4f3f019b8df0cbf92a35d33e876f16938122fbf2fef143b7863c253',
+            'sha256:1687ad84d1fe7e8748727604f5ce7607d820e2cd3d3b675b603f724b61a14a1e',
         )
 
     def test_plan_builder_accepts_models_and_persisted_mappings(self):

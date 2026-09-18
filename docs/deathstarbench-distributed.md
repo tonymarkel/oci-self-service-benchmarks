@@ -170,7 +170,7 @@ standard `node-role.kubernetes.io/control-plane=true:NoSchedule` taint so the
 CoreDNS deployment can tolerate it. Before workers join, the orchestrator
 patches CoreDNS with an exact control-host selector and verifies that selector,
 so replacement replicas also remain off measured workers. Runtime revision
-`k3s-v1.36.4-k3s1-tiered-runtime-v4` also fixes K3s's service NodePort range to
+`k3s-v1.36.4-k3s1-tiered-runtime-v5` also fixes K3s's service NodePort range to
 the smallest valid range containing the required NodePort, `8080-8081`.
 Only 8080 is assigned by the rendered Service and allowed through the
 provider firewall and NetworkPolicy; 8081 is not exposed. This avoids K3s's
@@ -183,6 +183,15 @@ still rejects non-empty replacements and environment sources, requires the
 PVC's explicit empty storage class, rejects legacy storage-class annotations,
 and requires security-significant empty mappings such as the default-deny
 policy's `podSelector: {}`.
+K3s's pinned containerd can report a node-local OCI config digest, rather than
+the registry platform-manifest reference, in the Pod status `image`
+presentation field. Kubernetes separately maps the runtime's pullable
+repository digest into public Pod `imageID`. The attestor therefore requires a
+non-empty presentation value and binds `imageID` exactly to the locked
+platform-manifest reference, allowing only the historical
+`docker-pullable://` prefix. The Pod and Deployment specs remain independently
+bound to that exact image-lock reference, and the Pod must still be Running
+and Ready.
 Readiness verifies exactly four nodes and no extras, including each node's
 name, private IP, architecture, K3s version, role label, control label/taint,
 and Ready condition; it separately proves CoreDNS is ready only on control.

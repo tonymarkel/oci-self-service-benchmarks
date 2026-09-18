@@ -1598,6 +1598,31 @@ def _require_expected_subset(actual: Any, expected: Any, label: str):
         raise WorkloadBundleError(f'{label} drifted.')
 
 
+def _runtime_image_identity_matches(
+    image: Any,
+    image_id: Any,
+    expected_image: str,
+) -> bool:
+    """Bind public image identity while tolerating CRI presentation drift.
+
+    Containerd 2.3 can expose its node-local OCI config digest in the
+    presentation-only ``image`` field. Kubelet deliberately maps CRI's
+    pullable ``ImageRef`` into the public Pod ``imageID`` field, so that field
+    must remain bound to the exact locked platform manifest. Older runtimes
+    can add the historical ``docker-pullable://`` prefix.
+    """
+
+    return (
+        isinstance(image, str)
+        and bool(image)
+        and isinstance(image_id, str)
+        and image_id in {
+            expected_image,
+            f'docker-pullable://{expected_image}',
+        }
+    )
+
+
 def parse_workload_attestation(
     value: str | bytes,
     bundle: RenderedSocialNetworkBundle,
@@ -1779,7 +1804,6 @@ def parse_workload_attestation(
             f'Pod {component} container statuses',
         )
         expected_image = expected_images[component]
-        expected_digest = expected_image.rsplit('@', 1)[1]
         expected_container = expected_by_kind['Deployment'][component][
             'spec'
         ]['template']['spec']['containers'][0]
@@ -1811,12 +1835,16 @@ def parse_workload_attestation(
             or ready[0].get('status') != 'True'
             or len(container_statuses) != 1
             or container_statuses[0].get('ready') is not True
-            or container_statuses[0].get('image') != expected_image
-            or not str(container_statuses[0].get('imageID', '')).endswith(
-                '@' + expected_digest
-            )
         ):
-            raise WorkloadBundleError(f'Pod image/readiness for {component} drifted.')
+            raise WorkloadBundleError(f'Pod readiness for {component} drifted.')
+        if not _runtime_image_identity_matches(
+            container_statuses[0].get('image'),
+            container_statuses[0].get('imageID'),
+            expected_image,
+        ):
+            raise WorkloadBundleError(
+                f'Pod runtime image identity for {component} drifted.'
+            )
         pods_by_component[component] = pod
     if set(pods_by_component) != EXPECTED_COMPONENTS:
         raise WorkloadBundleError('The live pod inventory is incomplete.')

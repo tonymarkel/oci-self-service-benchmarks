@@ -170,9 +170,12 @@ standard `node-role.kubernetes.io/control-plane=true:NoSchedule` taint so the
 CoreDNS deployment can tolerate it. Before workers join, the orchestrator
 patches CoreDNS with an exact control-host selector and verifies that selector,
 so replacement replicas also remain off measured workers. Runtime revision
-`k3s-v1.36.4-k3s1-tiered-runtime-v2` also fixes K3s's service NodePort range to
-the single required port, `8080-8080`; it does not expose the default broad
-NodePort range.
+`k3s-v1.36.4-k3s1-tiered-runtime-v3` also fixes K3s's service NodePort range to
+the smallest valid range containing the required NodePort, `8080-8081`.
+Only 8080 is assigned by the rendered Service and allowed through the
+provider firewall and NetworkPolicy; 8081 is not exposed. This avoids K3s's
+rejection of a range whose endpoints are equal without enabling the default
+broad NodePort range.
 Readiness verifies exactly four nodes and no extras, including each node's
 name, private IP, architecture, K3s version, role label, control label/taint,
 and Ready condition; it separately proves CoreDNS is ready only on control.

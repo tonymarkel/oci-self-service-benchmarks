@@ -17,6 +17,7 @@ from app.deathstarbench_k3s_workload import (
     EXPECTED_COMPONENTS,
     EXPECTED_NETWORK_POLICIES,
     FRONTEND_COMPONENT,
+    FRONTEND_NODE_PORT,
     IMAGE_LOCK_SCHEMA_VERSION,
     MEMCACHED_COMPONENTS,
     MONGODB_COMPONENTS,
@@ -502,6 +503,10 @@ class WorkloadRenderTests(unittest.TestCase):
         self.assertEqual(
             ingress['ingress'][0]['from'],
             [{'ipBlock': {'cidr': '10.240.2.10/32'}}],
+        )
+        self.assertEqual(
+            ingress['ingress'][0]['ports'],
+            [{'port': FRONTEND_NODE_PORT, 'protocol': 'TCP'}],
         )
         observed_egress = set()
         for source, _, _, _ in AUDITED_COMPONENT_EDGES:

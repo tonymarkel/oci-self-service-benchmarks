@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from app import k3s_runtime as runtime
 from app.deathstarbench_contract import K3S_VERSION
+from app.deathstarbench_k3s_workload import FRONTEND_NODE_PORT
 from app.k3s_runtime import (
     ExpectedK3sNode,
     K3S_AGENT_UNIT,
@@ -20,6 +21,7 @@ from app.k3s_runtime import (
     K3S_SELINUX_URL,
     K3S_SERVER_UNIT,
     K3S_SERVER_TOKEN_FILE,
+    K3S_SERVICE_NODE_PORT_RANGE,
     agent_join_command,
     agent_readiness_command,
     agent_unit,
@@ -482,7 +484,8 @@ class K3sRuntimeCommandTests(unittest.TestCase):
         self.assertIn('--disable=local-storage', unit)
         self.assertIn('--cluster-cidr=10.42.0.0/16', unit)
         self.assertIn('--service-cidr=10.43.0.0/16', unit)
-        self.assertIn('--service-node-port-range=8080-8080', unit)
+        self.assertIn('--service-node-port-range=8080-8081', unit)
+        self.assertNotIn('--service-node-port-range=8080-8080', unit)
         self.assertIn('--flannel-backend=vxlan', unit)
         self.assertIn(
             'node-role.kubernetes.io/control-plane=true:NoSchedule',
@@ -493,6 +496,15 @@ class K3sRuntimeCommandTests(unittest.TestCase):
         self.assertNotIn('KillMode=control-group', unit)
         self.assertIn('TimeoutStartSec=9min', unit)
         self.assertNotIn('TimeoutStartSec=10min', unit)
+
+    def test_node_port_range_is_minimal_valid_and_contains_frontend(self):
+        lower, upper = (
+            int(value) for value in K3S_SERVICE_NODE_PORT_RANGE.split('-')
+        )
+
+        self.assertLess(lower, upper)
+        self.assertEqual(upper - lower, 1)
+        self.assertEqual(lower, FRONTEND_NODE_PORT)
 
     def test_agent_unit_joins_private_server_and_has_one_role(self):
         unit = agent_unit(

@@ -30,7 +30,7 @@ SINGLE_HOST_RUNTIME_REVISION = 'legacy-podman-compose-runtime-v1'
 # it out of cloud provisioning until the multi-node lifecycle is complete and
 # qualified on every provider.
 K3S_VERSION = 'v1.36.4+k3s1'
-DISTRIBUTED_RUNTIME_REVISION = 'k3s-v1.36.4-k3s1-tiered-runtime-v2'
+DISTRIBUTED_RUNTIME_REVISION = 'k3s-v1.36.4-k3s1-tiered-runtime-v3'
 DISTRIBUTED_WORKLOAD_REVISION = 'social-network-6ecb097-workload-v1'
 DISTRIBUTED_IMAGE_SET_REVISION = 'social-network-images-v1'
 

@@ -1,0 +1,31 @@
+{
+  "image_set_revision": "social-network-images-v1",
+  "platforms": {
+    "linux/amd64": {
+      "images": {
+        "jaeger": "docker.io/jaegertracing/all-in-one@sha256:f1f9682412cfca7a2d4c3f612f8eb79216222ca791589b04485d71a0b6bc80b9",
+        "media-frontend": "ghcr.io/tonymarkel/deathstarbench-social-media-frontend@sha256:264401a49a6c9f07a3b5baa8fe04b3bf6d27752bbd3ee6fb787e84c3be21c5ae",
+        "memcached": "docker.io/library/memcached@sha256:405390d9c38a0e3d59f34088c2265a710da10e5e9f3cdeb4fb5264c829509aa5",
+        "mongodb": "docker.io/library/mongo@sha256:d9ddf3df31941d30ee486ad5d2337283f0a02f68dbc5092319e24d3a541dbddd",
+        "nginx-thrift": "ghcr.io/tonymarkel/deathstarbench-social-frontend@sha256:f22e8954038396113ac0a7b831d4c64bcda66af1c2adc45e586b4362f630ebff",
+        "redis": "docker.io/library/redis@sha256:9341b6548cc35b64a6de0085555264336e2f570e17ecff20190bf62222f2bd64",
+        "social-network-microservices": "ghcr.io/tonymarkel/deathstarbench-social-app@sha256:80e4df8870a9d37c9c561439695e0a743f0f5944a7d7d625c32d4f4643d11867"
+      }
+    },
+    "linux/arm64": {
+      "images": {
+        "jaeger": "docker.io/jaegertracing/all-in-one@sha256:84d2b9664cea496af47fb58077319b55569542804884041a87b175475e183628",
+        "media-frontend": "ghcr.io/tonymarkel/deathstarbench-social-media-frontend@sha256:768ed7fdd110ccb078481ad5c72a189001ac0c3565a104ffc9a9dc18d34e6e3d",
+        "memcached": "docker.io/library/memcached@sha256:d848ec0e7fd016c877f5c7b2441741e363f47b4657f611e29260174fb7f5906f",
+        "mongodb": "docker.io/library/mongo@sha256:aa3f99f22e195adee9071152b4c87536f795c21ca233eeb3a28ca33af72ec1d6",
+        "nginx-thrift": "ghcr.io/tonymarkel/deathstarbench-social-frontend@sha256:18b0c1cde4445d55ad58a0f97c59bab013108d1e07b83c99ed79025ff053901e",
+        "redis": "docker.io/library/redis@sha256:4da694ba727afad9a027c075a3e32356affea4db13482d489822107dcf09d4ed",
+        "social-network-microservices": "ghcr.io/tonymarkel/deathstarbench-social-app@sha256:8958d567764ab8ea681d2b5219a280bd26f2eb00ecdaac8d9d178de038c58fee"
+      }
+    }
+  },
+  "released": false,
+  "schema_version": 1,
+  "upstream_revision": "6ecb09706140f8730b5385c08f1386c654c3c526",
+  "workload_revision": "social-network-6ecb097-workload-v1"
+}

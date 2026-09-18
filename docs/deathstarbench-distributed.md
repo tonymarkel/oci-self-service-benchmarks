@@ -1,13 +1,13 @@
 # Distributed DeathStarBench design
 
-Status: the foundation, Azure synthetic-infrastructure pilot, internal
-four-node K3s bootstrap, and deterministic Social Network workload deployment
-are implemented. `distributed_tiered_v1` is modeled but is not yet released
-for cloud provisioning. The UI does not offer it, and the normal API/provider
-path rejects it before creating a run or making a cloud write. The K3s and
-workload paths have synthetic orchestration coverage but have not yet been
-exercised against billable Azure resources. The image publication workflow
-has not been run, and no candidate images have been published by this work.
+Status: the foundation, Azure five-node infrastructure, internal four-node
+K3s bootstrap, deterministic Social Network deployment, candidate-image
+publication, and exact Azure `workload_ready` qualification are implemented.
+`distributed_tiered_v1` is still unreleased for normal cloud provisioning.
+The UI does not offer it, and the normal API/provider path rejects it before
+creating a run or making a cloud write. Dataset initialization, benchmark
+traffic, representative negative network probes, and qualification on the
+other providers remain release gates.
 
 ## Benchmark modes
 
@@ -53,8 +53,10 @@ exact release URL and verified against a source-recorded SHA-256. Workload
 revision `social-network-6ecb097-workload-v1` is generated from checked-in
 component and policy assets audited against DeathStarBench commit
 `6ecb09706140f8730b5385c08f1386c654c3c526`. Its image-lock schema requires an
-exact per-platform digest for every custom and supporting image; a real lock
-still must be produced and qualified before release.
+exact per-platform digest for every custom and supporting image; the candidate
+lock was published and qualified in Azure, but deliberately remains marked
+unreleased. The exact candidate is checked in at
+`docs/qualification/deathstarbench-social-network-images-v1.json`.
 Provider guest preparation is an explicit qualification item: SELinux must be
 enforcing with the expected policies and labels, cgroup v2 and swap state must
 match the contract, and the required kernel modules and sysctls must pass the
@@ -140,9 +142,9 @@ reconciliation before reusing or deleting resources.
 SKU and disk capability discovery validates the requested per-resource
 placement, but it does not guarantee aggregate subscription quota or live
 regional capacity. Those conditions can still fail after partial creation;
-the persisted contract makes that state recoverable. The candidate currently
-has synthetic lifecycle and failure-injection coverage only. It has not yet
-been qualified by provisioning resources in a live Azure subscription.
+the persisted contract makes that state recoverable. In addition to synthetic
+lifecycle and failure-injection coverage, runtime v5 has now completed the
+internal live Azure qualification described below.
 
 ## Internal Azure K3s bootstrap
 
@@ -259,13 +261,48 @@ The manual `deathstarbench-social-images.yml` GitHub Actions workflow prepares
 drift-checked build contexts, builds the three custom Social Network images
 for `linux/amd64` and `linux/arm64`, resolves exact platform digests for those
 and the pinned supporting images, and uploads the candidate image lock as a
-workflow artifact. The workflow and lock-generation validation are
-implemented, but the workflow has not been run and no images were published
-or tested in Azure as part of this phase. New GHCR packages are private by
-default; all three `deathstarbench-social-*` packages must be made public
-before the anonymous Azure K3s pulls used by this candidate can succeed. A
-workflow run and public pulls are qualification inputs, not permission to open
-the UI release gate.
+workflow artifact. Workflow run 35257311111 published the three candidate
+indexes, produced the exact checked-in lock, and completed successfully. The
+three GHCR packages are public, and all six locked custom platform manifests
+were anonymously resolvable for the Azure qualification. Publication and
+public pulls are qualification evidence, not permission to open the UI release
+gate.
+
+## Azure live qualification evidence
+
+The first exact `workload_ready` qualification completed on 2026-09-18. This
+is deployment evidence, not a benchmark result.
+
+- Image publication used workflow run
+  [35257311111](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/35257311111),
+  attempt 1, from commit `4f6832eca9881acfbd4b46aa4041ad88a1e9436e`.
+  The custom images used candidate tag
+  `dsb-6ecb09706140-35257311111-1` before the workflow resolved their exact
+  per-platform manifests.
+- The checked-in lock is byte-for-byte the workflow artifact: file SHA-256
+  `663e0bfaefa3d7ae19eae2430e0cc5bdcf1ccfe6c858927c2b0d4b1f5ab472e5`
+  and validated lock fingerprint
+  `sha256:e5435057d7813e563f6c4f40e7d877660326d83a87ce1df805f9440e161487d4`.
+  Its `released` field remains `false`.
+- Qualification job `25cad0331731` ran merged runtime-v5 commit
+  `ecf5e03474c5b5df2541d9a21f5e2516da94923f` in Azure `eastus2`, zone 1.
+  Control, cache, and load generator used `Standard_D2as_v7`; database used
+  `Standard_D4as_v7` plus the contracted data disk; and the Arm application
+  role used `Standard_D8ps_v6` with 8 vCPUs and 32 GiB.
+- The candidate proved the exact four-node K3s membership, architectures,
+  role labels, control taint, CoreDNS placement, and Ready state. It then
+  applied all five workload phases and attested all 27 Deployments and Pods,
+  six bound MongoDB PV/PVC pairs, exact images, placements, Services, and
+  NetworkPolicies at `workload_ready`.
+- The qualification intentionally stopped before dataset initialization and
+  emitted no performance result. Automatic cleanup reached persisted
+  `destroyed` state with no recoverable ownership keys, and an independent
+  Azure resource-group lookup returned `false`.
+
+The release and UI gates remain closed. A single positive Azure deployment
+does not replace representative forbidden-path probes, dataset and load-driver
+qualification, interruption/recovery exercises at the new phases, or the same
+qualification on AWS, GCP, and OCI.
 
 ## Network and access policy
 
@@ -324,22 +361,25 @@ are proven for AWS, GCP, Azure, and OCI.
 2. **In progress:** dual-write the existing compact lifecycle into the role
    inventory and add failure-injection coverage. Azure compact dual-write is
    implemented; the other providers remain.
-3. **In progress:** exercise an unreleased synthetic five-node lifecycle on
-   Azure first, using its run-owned resource group as the cleanup boundary,
-   then qualify the same lifecycle on every provider. The Azure candidate and
-   synthetic tests are implemented; live-cloud qualification and the other
-   providers remain.
-4. **In progress:** the internal Azure K3s bootstrap, OS preparation, exact
-   database mount, secure node joining, and cluster placement attestation are
-   implemented with synthetic coverage. Runtime v2 restricts NodePort to the
-   exact frontend port. Live Azure qualification remains.
+3. **In progress:** exercise an unreleased five-node lifecycle on Azure first,
+   using its run-owned resource group as the cleanup boundary, then qualify the
+   same lifecycle on every provider. Azure synthetic coverage and the positive
+   live `workload_ready` qualification are complete; the other providers and
+   additional live failure paths remain.
+4. **Implemented for the Azure candidate:** the internal K3s bootstrap, OS
+   preparation, exact database mount, secure node joining, and cluster
+   placement attestation are covered synthetically and passed live
+   qualification. Runtime v5 uses the smallest valid NodePort range,
+   normalizes only audited Kubernetes API round trips, and attests the
+   runtime's exact public image identities.
 5. **In progress:** the checked-in, pinned Social Network manifest and
    component-policy bundle, MongoDB storage preparation, role- and
    architecture-aware image selection, phased retry journal, and exact live
    attestation are implemented with synthetic coverage. The manual GHCR image
-   workflow is implemented, but it has not published images; public package
-   access, a real digest lock, and positive/negative live Azure qualification
-   remain. The release and UI gates stay closed.
+   workflow published the candidate, the exact digest lock is checked in, and
+   positive Azure qualification passed. Representative negative live network
+   probes, dataset/load qualification, and the other providers remain. The
+   release and UI gates stay closed.
 6. **Next:** deterministically initialize the Social Network dataset, warm up,
    drive and measure load, and gather the first result. Initialization is not
    resumable after partial dataset mutation: an interrupted initialization
@@ -354,6 +394,6 @@ are proven for AWS, GCP, Azure, and OCI.
 10. **Planned:** advanced per-role shape selection and later topology
    revisions.
 
-The UI exposes only released profiles. Until workload measurement, live-cloud
-qualification, and all cleanup gates pass, the existing compact mode remains
-the only runnable option.
+The UI exposes only released profiles. Until workload measurement, remaining
+provider qualification, and all release cleanup gates pass, the existing
+compact mode remains the only runnable option.

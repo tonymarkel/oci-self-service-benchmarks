@@ -18,6 +18,18 @@ from app.k3s_runtime import K3S_CLUSTER_DNS_IP
 
 
 ROOT = Path(__file__).resolve().parents[1]
+QUALIFIED_IMAGE_LOCK = (
+    ROOT
+    / "docs"
+    / "qualification"
+    / "deathstarbench-social-network-images-v1.json"
+)
+QUALIFIED_IMAGE_LOCK_SHA256 = (
+    "663e0bfaefa3d7ae19eae2430e0cc5bdcf1ccfe6c858927c2b0d4b1f5ab472e5"
+)
+QUALIFIED_IMAGE_LOCK_FINGERPRINT = (
+    "sha256:e5435057d7813e563f6c4f40e7d877660326d83a87ce1df805f9440e161487d4"
+)
 
 
 def load_script(name, relative_path):
@@ -417,6 +429,32 @@ def raw_index(include_arm64=True):
 
 
 class DeathStarBenchImageLockTests(unittest.TestCase):
+    def test_checked_in_azure_qualification_lock_is_exact_and_unreleased(self):
+        payload = QUALIFIED_IMAGE_LOCK.read_bytes()
+        self.assertEqual(
+            hashlib.sha256(payload).hexdigest(),
+            QUALIFIED_IMAGE_LOCK_SHA256,
+        )
+
+        lock = json.loads(payload)
+        validated = validate_image_lock(lock)
+        self.assertEqual(
+            validated.fingerprint,
+            QUALIFIED_IMAGE_LOCK_FINGERPRINT,
+        )
+        self.assertIs(lock["released"], False)
+        references = [
+            reference
+            for platform in lock["platforms"].values()
+            for reference in platform["images"].values()
+        ]
+        self.assertEqual(len(references), 14)
+        self.assertEqual(
+            sum(reference.startswith("ghcr.io/") for reference in references),
+            6,
+        )
+        self.assertTrue(all("@sha256:" in reference for reference in references))
+
     def test_lock_records_exact_platform_digests_for_all_images(self):
         with tempfile.TemporaryDirectory() as temporary:
             manifest_path = Path(temporary) / "context.json"

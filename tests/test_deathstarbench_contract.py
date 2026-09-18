@@ -62,7 +62,7 @@ class DeathStarBenchRuntimeContractTests(unittest.TestCase):
         self.assertFalse(profile.released)
         self.assertRegex(K3S_VERSION, r'^v\d+\.\d+\.\d+\+k3s\d+$')
         self.assertIn(K3S_VERSION.removeprefix('v').replace('+', '-'), DISTRIBUTED_RUNTIME_REVISION)
-        self.assertTrue(DISTRIBUTED_RUNTIME_REVISION.endswith('-v3'))
+        self.assertTrue(DISTRIBUTED_RUNTIME_REVISION.endswith('-v4'))
         self.assertEqual(
             DISTRIBUTED_WORKLOAD_REVISION,
             'social-network-6ecb097-workload-v1',

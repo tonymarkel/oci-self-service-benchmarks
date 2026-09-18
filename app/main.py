@@ -82,6 +82,9 @@ from .deathstarbench_distributed import (
     prepare_azure_distributed_k3s_candidate,
     prepare_azure_distributed_social_network_candidate,
 )
+from .deathstarbench_distributed_measurement import (
+    run_azure_distributed_social_network_measurement,
+)
 from .models import (
     BenchmarkPlan,
     ClearSavedRunsRequest,
@@ -4996,6 +4999,35 @@ def prepare_azure_distributed_deathstarbench_candidate_workload(
     return prepare_azure_distributed_social_network_candidate(
         job,
         image_lock,
+        execute=ssh,
+        emit=event,
+        persist=persist_job_state,
+    )
+
+
+def run_azure_distributed_deathstarbench_candidate_measurement(
+    job,
+    plan,
+    image_lock,
+):
+    """Internal one-shot measurement hook for the unreleased candidate.
+
+    The operator-only qualification harness is the sole caller.  Keeping this
+    outside ``run_benchmarks`` prevents the distributed candidate from being
+    selected through the public UI before its provider qualification and
+    immutable load-driver gates are complete.
+    """
+
+    _validate_azure_distributed_deathstarbench_candidate_plan(plan)
+    options = (
+        plan.get('deathstarbench')
+        if isinstance(plan, dict)
+        else getattr(plan, 'deathstarbench', None)
+    )
+    return run_azure_distributed_social_network_measurement(
+        job,
+        image_lock,
+        options,
         execute=ssh,
         emit=event,
         persist=persist_job_state,

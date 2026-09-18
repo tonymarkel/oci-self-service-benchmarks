@@ -28,6 +28,7 @@ from app.deathstarbench_k3s_workload import (
     UPSTREAM_REVISION,
     RenderedSocialNetworkBundle,
     WorkloadBundleError,
+    parse_workload_execution_attestation,
     parse_workload_attestation,
     render_social_network_bundle,
     render_workload_bundle,
@@ -108,6 +109,7 @@ def fake_attestation(bundle):
                 'labels': copy.deepcopy(template['metadata']['labels']),
                 'name': f'{name}-candidate-pod',
                 'namespace': NAMESPACE,
+                'uid': f'uid-{name}',
             },
             'spec': {
                 'containers': copy.deepcopy(template['spec']['containers']),
@@ -121,6 +123,7 @@ def fake_attestation(bundle):
                     'imageID': f'docker-pullable://{image}',
                     'name': name,
                     'ready': True,
+                    'restartCount': 0,
                 }],
                 'phase': 'Running',
             },
@@ -616,6 +619,41 @@ class WorkloadAttestationTests(unittest.TestCase):
             result['pod_nodes'],
             ('dsb-application', 'dsb-cache', 'dsb-control', 'dsb-database'),
         )
+
+    def test_execution_attestation_binds_zero_restart_pod_identities(self):
+        result = parse_workload_execution_attestation(
+            json.dumps(self.attestation),
+            self.bundle,
+        )
+
+        self.assertEqual(result['schema_version'], 1)
+        self.assertEqual(len(result['pods']), 27)
+        self.assertEqual(
+            [pod['component'] for pod in result['pods']],
+            sorted(EXPECTED_COMPONENTS),
+        )
+        self.assertTrue(all(
+            pod['restart_count'] == 0 and pod['uid'].startswith('uid-')
+            for pod in result['pods']
+        ))
+
+        restarted = copy.deepcopy(self.attestation)
+        pod = next(item for item in restarted['items'] if item['kind'] == 'Pod')
+        pod['status']['containerStatuses'][0]['restartCount'] = 1
+        with self.assertRaisesRegex(WorkloadBundleError, 'restarted'):
+            parse_workload_execution_attestation(
+                json.dumps(restarted),
+                self.bundle,
+            )
+
+        missing_uid = copy.deepcopy(self.attestation)
+        pod = next(item for item in missing_uid['items'] if item['kind'] == 'Pod')
+        del pod['metadata']['uid']
+        with self.assertRaisesRegex(WorkloadBundleError, 'identity is invalid'):
+            parse_workload_execution_attestation(
+                json.dumps(missing_uid),
+                self.bundle,
+            )
 
     def _api_round_tripped_attestation(self):
         round_tripped = copy.deepcopy(self.attestation)

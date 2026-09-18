@@ -2,6 +2,7 @@ import copy
 import unittest
 
 from app.deathstarbench_contract import (
+    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
     DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
     DISTRIBUTED_TIERED_TOPOLOGY_ID,
     K3S_RUNTIME_ID,
@@ -352,9 +353,44 @@ class AzureDeathStarBenchLifecycleTests(unittest.TestCase):
         job['resources'][DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY] = {
             'state': 'workload_ready',
         }
+        job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
+            'state': 'measurement_started',
+        }
+        mutation_order = []
+        virtual_machines = clients['virtual_machines']
+        virtual_machines.deallocate_calls = []
+
+        def begin_deallocate(group, name):
+            virtual_machines.deallocate_calls.append((group, name))
+            mutation_order.append(('deallocate', group, name))
+            return Operation()
+
+        virtual_machines.begin_deallocate = begin_deallocate
+        original_begin_delete = clients['resource_groups'].begin_delete
+
+        def begin_delete(name):
+            mutation_order.append(('delete-group', name))
+            return original_begin_delete(name)
+
+        clients['resource_groups'].begin_delete = begin_delete
 
         azure.destroy_resources(job, clients=clients)
 
+        self.assertEqual(
+            virtual_machines.deallocate_calls,
+            [('benchmark-dsbcleanup', 'benchmark-dsbcleanup-loadgen')],
+        )
+        self.assertEqual(
+            mutation_order,
+            [
+                (
+                    'deallocate',
+                    'benchmark-dsbcleanup',
+                    'benchmark-dsbcleanup-loadgen',
+                ),
+                ('delete-group', 'benchmark-dsbcleanup'),
+            ],
+        )
         self.assertEqual(
             clients['resource_groups'].delete_calls,
             ['benchmark-dsbcleanup'],
@@ -370,6 +406,10 @@ class AzureDeathStarBenchLifecycleTests(unittest.TestCase):
         self.assertNotIn(K3S_RUNTIME_JOURNAL_KEY, job['resources'])
         self.assertNotIn(
             DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
+            job['resources'],
+        )
+        self.assertNotIn(
+            DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
             job['resources'],
         )
         self.assertFalse(any(
@@ -393,6 +433,9 @@ class AzureDeathStarBenchLifecycleTests(unittest.TestCase):
                 DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY: {
                     'state': 'workload_ready',
                 },
+                DEATHSTARBENCH_EXECUTION_JOURNAL_KEY: {
+                    'state': 'measurement_started',
+                },
             },
         }
 
@@ -400,6 +443,152 @@ class AzureDeathStarBenchLifecycleTests(unittest.TestCase):
 
         self.assertEqual(job['resources'], {})
         self.assertEqual(job['status'], 'destroyed')
+
+    def test_load_generator_deallocation_failure_does_not_block_group_delete(self):
+        clients, job = self._provision_distributed('dsbdeallocatefailure')
+        job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
+            'state': 'measurement_started',
+        }
+        virtual_machines = clients['virtual_machines']
+        virtual_machines.deallocate_calls = []
+
+        def begin_deallocate(group, name):
+            virtual_machines.deallocate_calls.append((group, name))
+            return Operation(error=ApiError(503, 'deallocation response lost'))
+
+        virtual_machines.begin_deallocate = begin_deallocate
+
+        azure.destroy_resources(job, clients=clients)
+
+        self.assertEqual(
+            virtual_machines.deallocate_calls,
+            [(
+                'benchmark-dsbdeallocatefailure',
+                'benchmark-dsbdeallocatefailure-loadgen',
+            )],
+        )
+        self.assertEqual(
+            clients['resource_groups'].delete_calls,
+            ['benchmark-dsbdeallocatefailure'],
+        )
+        self.assertEqual(job['status'], 'destroyed')
+        self.assertNotIn(
+            DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+            job['resources'],
+        )
+
+    def test_load_generator_is_deallocated_before_inventory_refuses_group_delete(self):
+        clients, job = self._provision_distributed('dsbforeignsibling')
+        job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
+            'state': 'measurement_started',
+        }
+        group_name = job['resources']['azure_resource_group_name']
+        clients['resources'].foreign.append({
+            'id': (
+                f'/subscriptions/{SUBSCRIPTION_ID}/resourceGroups/{group_name}/'
+                'providers/Microsoft.Storage/storageAccounts/manualdata'
+            ),
+            'name': 'manualdata',
+        })
+        virtual_machines = clients['virtual_machines']
+        virtual_machines.deallocate_calls = []
+
+        def begin_deallocate(group, name):
+            virtual_machines.deallocate_calls.append((group, name))
+            return Operation()
+
+        virtual_machines.begin_deallocate = begin_deallocate
+
+        with self.assertRaisesRegex(RuntimeError, 'outside this run'):
+            azure.destroy_resources(job, clients=clients)
+
+        self.assertEqual(
+            virtual_machines.deallocate_calls,
+            [(group_name, f'{group_name}-loadgen')],
+        )
+        self.assertEqual(clients['resource_groups'].delete_calls, [])
+        self.assertIn(
+            DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+            job['resources'],
+        )
+        self.assertIn('azure_resource_group_name', job['resources'])
+
+    def test_load_generator_deallocation_rejects_tampered_exact_name(self):
+        clients, job = self._provision_distributed('dsbdeallocatetamper')
+        job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
+            'state': 'measurement_started',
+        }
+        job['resources'][
+            'azure_dsb_load_generator_instance_name'
+        ] = 'benchmark-other-loadgen'
+        virtual_machines = clients['virtual_machines']
+        virtual_machines.deallocate_calls = []
+        virtual_machines.begin_deallocate = lambda group, name: (
+            virtual_machines.deallocate_calls.append((group, name))
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            'exact deterministic name',
+        ):
+            azure.destroy_resources(job, clients=clients)
+
+        self.assertEqual(virtual_machines.deallocate_calls, [])
+        self.assertEqual(clients['resource_groups'].delete_calls, [])
+        self.assertIn(
+            DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+            job['resources'],
+        )
+
+    def test_load_generator_deallocation_rejects_changed_live_identity(self):
+        clients, job = self._provision_distributed('dsbdeallocateliveid')
+        job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
+            'state': 'measurement_started',
+        }
+        group_name = job['resources']['azure_resource_group_name']
+        vm_name = f'{group_name}-loadgen'
+        virtual_machines = clients['virtual_machines']
+        virtual_machines.items[(group_name, vm_name)]['id'] += '-replacement'
+        virtual_machines.deallocate_calls = []
+        virtual_machines.begin_deallocate = lambda group, name: (
+            virtual_machines.deallocate_calls.append((group, name))
+        )
+
+        with self.assertRaisesRegex(RuntimeError, 'live VM identity'):
+            azure.destroy_resources(job, clients=clients)
+
+        self.assertEqual(virtual_machines.deallocate_calls, [])
+        self.assertEqual(clients['resource_groups'].delete_calls, [])
+        self.assertIn(
+            DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+            job['resources'],
+        )
+
+    def test_load_generator_deallocation_rejects_changed_live_tags(self):
+        clients, job = self._provision_distributed('dsbdeallocatelivetags')
+        job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
+            'state': 'measurement_started',
+        }
+        group_name = job['resources']['azure_resource_group_name']
+        vm_name = f'{group_name}-loadgen'
+        virtual_machines = clients['virtual_machines']
+        virtual_machines.items[(group_name, vm_name)]['tags'][
+            'benchmark-job'
+        ] = 'foreign-job'
+        virtual_machines.deallocate_calls = []
+        virtual_machines.begin_deallocate = lambda group, name: (
+            virtual_machines.deallocate_calls.append((group, name))
+        )
+
+        with self.assertRaisesRegex(RuntimeError, 'ownership tags'):
+            azure.destroy_resources(job, clients=clients)
+
+        self.assertEqual(virtual_machines.deallocate_calls, [])
+        self.assertEqual(clients['resource_groups'].delete_calls, [])
+        self.assertIn(
+            DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+            job['resources'],
+        )
 
     def test_provider_candidate_is_accepted_by_runtime_plan_contract(self):
         _clients, job = self._provision_distributed('dsbruntimeplan')

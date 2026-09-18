@@ -108,6 +108,7 @@ _SSH_ROUTES = {
         'azure_dsb_application_private_ip',
         'azure_dsb_control_public_ip',
     ),
+    'load-generator': ('azure_dsb_load_generator_public_ip', None),
 }
 _STATES = frozenset({
     'preparing_hosts',
@@ -164,6 +165,7 @@ class AzureK3sCandidatePlan:
 
     topology_fingerprint: str
     hosts: tuple[RuntimeHost, ...]
+    load_generator: RuntimeHost
     load_generator_private_ip: str
 
     def host(self, key: str) -> RuntimeHost:
@@ -268,6 +270,7 @@ def azure_k3s_candidate_plan(
 
     hosts: list[RuntimeHost] = []
     load_generator_private_ip = None
+    load_generator_host = None
     manifest_nodes = {node.key: node for node in manifest.nodes}
     for node_key in manifest.creation_order:
         node = inventory.node(node_key)
@@ -461,18 +464,34 @@ def azure_k3s_candidate_plan(
                 host_key=host_key,
                 jump_host_key=jump_host_key,
             ))
+        elif node_key == 'load-generator':
+            host_key, jump_host_key = _SSH_ROUTES[node_key]
+            _required_text(
+                resources.get(host_key),
+                f'{node_key} SSH target',
+            )
+            load_generator_host = RuntimeHost(
+                key=node_key,
+                role=node.role,
+                node_name=node_name,
+                private_ip=private_ip,
+                architecture=architecture,
+                host_key=host_key,
+                jump_host_key=jump_host_key,
+            )
 
     if tuple(host.key for host in hosts) != _CLUSTER_KEYS:
         raise DistributedRuntimeError(
             'The candidate cluster host order conflicts with its manifest.'
         )
-    if load_generator_private_ip is None:
+    if load_generator_private_ip is None or load_generator_host is None:
         raise DistributedRuntimeError(
             'The candidate load-generator address is missing.'
         )
     return AzureK3sCandidatePlan(
         topology_fingerprint=manifest.fingerprint,
         hosts=tuple(hosts),
+        load_generator=load_generator_host,
         load_generator_private_ip=load_generator_private_ip,
     )
 

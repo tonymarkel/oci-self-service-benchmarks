@@ -234,6 +234,14 @@ class DistributedRuntimePlanTests(unittest.TestCase):
             plan.load_generator_private_ip,
             PRIVATE_ADDRESSES['load-generator'],
         )
+        self.assertEqual(plan.load_generator.key, 'load-generator')
+        self.assertEqual(plan.load_generator.role, 'load_generator')
+        self.assertEqual(plan.load_generator.architecture, 'x86_64')
+        self.assertEqual(
+            plan.load_generator.host_key,
+            'azure_dsb_load_generator_public_ip',
+        )
+        self.assertIsNone(plan.load_generator.jump_host_key)
         for key in ('database', 'cache', 'application'):
             with self.subTest(key=key):
                 self.assertEqual(

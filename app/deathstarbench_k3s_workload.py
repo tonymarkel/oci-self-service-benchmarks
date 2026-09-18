@@ -1866,6 +1866,83 @@ def parse_workload_attestation(
     })
 
 
+def parse_workload_execution_attestation(
+    value: str | bytes,
+    bundle: RenderedSocialNetworkBundle,
+) -> Mapping[str, Any]:
+    """Return the exact live pod identities that bound one measured run.
+
+    The normal workload attestation proves the desired Kubernetes objects,
+    placement, readiness, and locked runtime image identities.  A benchmark
+    additionally needs to prove that no pod was replaced or restarted between
+    warm-up and the end of measurement.  Keep this execution identity out of
+    the replayable workload journal: it is captured immediately around the
+    one-shot dataset/load phase instead.
+    """
+
+    parse_workload_attestation(value, bundle)
+    pods: list[dict[str, Any]] = []
+    for item in _attestation_items(value):
+        if item.get('kind') != 'Pod':
+            continue
+        metadata = _mapping(item.get('metadata'), 'Execution Pod metadata')
+        labels = _mapping(metadata.get('labels'), 'Execution Pod labels')
+        component = labels.get('app.kubernetes.io/component')
+        uid = metadata.get('uid')
+        name = metadata.get('name')
+        spec = _mapping(item.get('spec'), f'Execution Pod {name} spec')
+        status = _mapping(item.get('status'), f'Execution Pod {name} status')
+        statuses = _sequence(
+            status.get('containerStatuses'),
+            f'Execution Pod {name} container statuses',
+        )
+        if (
+            component not in EXPECTED_COMPONENTS
+            or not isinstance(name, str)
+            or not name
+            or not isinstance(uid, str)
+            or uid != uid.strip()
+            or not 1 <= len(uid) <= 128
+            or len(statuses) != 1
+        ):
+            raise WorkloadBundleError(
+                'The workload execution pod identity is invalid.'
+            )
+        restart_count = statuses[0].get('restartCount')
+        image_id = statuses[0].get('imageID')
+        node_name = spec.get('nodeName')
+        if (
+            type(restart_count) is not int
+            or restart_count != 0
+            or not isinstance(image_id, str)
+            or not image_id
+            or not isinstance(node_name, str)
+            or not node_name
+        ):
+            raise WorkloadBundleError(
+                f'Pod execution identity for {component} drifted or restarted.'
+            )
+        pods.append({
+            'component': component,
+            'name': name,
+            'uid': uid,
+            'node_name': node_name,
+            'restart_count': restart_count,
+            'image_id': image_id,
+        })
+    pods.sort(key=lambda item: item['component'])
+    if [item['component'] for item in pods] != sorted(EXPECTED_COMPONENTS):
+        raise WorkloadBundleError(
+            'The workload execution pod inventory is incomplete.'
+        )
+    return MappingProxyType({
+        'schema_version': 1,
+        'workload_revision': DISTRIBUTED_WORKLOAD_REVISION,
+        'bundle_fingerprint': bundle.rendered_manifest_sha256,
+        'pods': tuple(pods),
+    })
+
+
 def _component_role(name: str) -> str:
     if name in CPP_ENTRYPOINTS or name in FRONTEND_COMPONENTS:
         return 'application'

@@ -25,6 +25,7 @@ from typing import Any
 
 from .catalog import PHORONIX_PROFILES
 from .deathstarbench_contract import (
+    DISTRIBUTED_TIERED_TOPOLOGY_ID,
     SINGLE_HOST_RUNTIME_REVISION,
     runtime_profile,
 )
@@ -488,6 +489,12 @@ _UNSAFE_KEY_PARTS = (
 _IP_KEY_RE = re.compile(r'(?:^|_)(?:ip|ip_address)(?:$|_)')
 _CONTROL_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
 _DROP = object()
+_SAFE_ATTESTATION_KEYS = frozenset({
+    # A digest of the pinned, public workload driver is execution provenance,
+    # not executable source.  Preserve this exact key while continuing to
+    # reject arbitrary script-bearing metadata.
+    'load_script_sha256',
+})
 
 
 def _mapping(value: object) -> dict[str, Any]:
@@ -498,6 +505,8 @@ def _mapping(value: object) -> dict[str, Any]:
 
 def _unsafe_key(key: object) -> bool:
     normalized = str(key).strip().lower().replace('-', '_')
+    if normalized in _SAFE_ATTESTATION_KEYS:
+        return False
     return (
         any(part in normalized for part in _UNSAFE_KEY_PARTS)
         or normalized == 'token'
@@ -825,6 +834,54 @@ def _deathstarbench_execution_context(
             'registered.'
         )
 
+    distributed_identity: dict[str, Any] = {}
+    if topology_id == DISTRIBUTED_TIERED_TOPOLOGY_ID:
+        identity_keys = (
+            'workload_revision',
+            'image_set_revision',
+            'image_lock_fingerprint',
+            'rendered_manifest_sha256',
+            'dataset_revision',
+            'load_driver_revision',
+            'measurement_revision',
+            'initializer_sha256',
+            'dataset_nodes_sha256',
+            'dataset_edges_sha256',
+            'load_script_sha256',
+        )
+        for key in identity_keys:
+            raw = metadata.get(key)
+            value = (
+                _clean_text(raw, 256).strip()
+                if isinstance(raw, str)
+                else ''
+            )
+            distributed_identity[key] = value or None
+            if not value:
+                issues.append(
+                    'DeathStarBench distributed execution identity is '
+                    f'missing or invalid: {key}.'
+                )
+                continue
+            if key in {
+                'image_lock_fingerprint',
+                'rendered_manifest_sha256',
+            } and not re.fullmatch(r'sha256:[0-9a-f]{64}', value):
+                issues.append(
+                    'DeathStarBench distributed execution identity has an '
+                    f'invalid prefixed SHA-256: {key}.'
+                )
+            if key in {
+                'initializer_sha256',
+                'dataset_nodes_sha256',
+                'dataset_edges_sha256',
+                'load_script_sha256',
+            } and not re.fullmatch(r'[0-9a-f]{64}', value):
+                issues.append(
+                    'DeathStarBench distributed execution identity has an '
+                    f'invalid SHA-256: {key}.'
+                )
+
     if not present_marker_keys:
         if (
             topology_id == DEATHSTARBENCH_DEFAULT_TOPOLOGY_ID
@@ -848,6 +905,7 @@ def _deathstarbench_execution_context(
             'runtime_id': runtime_id,
             'runtime_revision': runtime_revision,
             'service_placement_revision': placement_revision,
+            **distributed_identity,
         }
 
     if len(present_marker_keys) != len(marker_keys):
@@ -933,6 +991,7 @@ def _deathstarbench_execution_context(
         'runtime_id': runtime_id,
         'runtime_revision': runtime_revision or None,
         'service_placement_revision': placement_revision or None,
+        **distributed_identity,
     }
 
 

@@ -2,10 +2,10 @@
 """Run the unreleased distributed DeathStarBench Azure qualification safely.
 
 This is an operator-only harness.  It persists the complete ownership
-contract before Azure writes, deploys only the candidate topology/runtime,
-stops at the attested ``workload_ready`` boundary, and always attempts exact
-resource-group cleanup.  It does not initialize a dataset or produce a
-benchmark result.
+contract before Azure writes, deploys the candidate topology/runtime, and by
+default stops at the attested ``workload_ready`` boundary.  ``--measure``
+additionally runs the one-shot dataset and load qualification, writes its
+report, and only then attempts exact resource-group cleanup.
 """
 
 from __future__ import annotations
@@ -15,8 +15,10 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import re
 import sys
 import threading
 import uuid
@@ -37,6 +39,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app import main as application
 from app.deathstarbench_contract import (
+    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
     DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
     DISTRIBUTED_TIERED_TOPOLOGY_ID,
     K3S_RUNTIME_ID,
@@ -83,6 +86,18 @@ CLEANUP_OWNERSHIP_KEYS = frozenset({
     azure.DEATHSTARBENCH_TOPOLOGY_FINGERPRINT_KEY,
     K3S_RUNTIME_JOURNAL_KEY,
     DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
+    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+})
+WORKLOAD_OPTION_DEFAULTS = {
+    'warmup_seconds': 30,
+    'duration_seconds': 60,
+    'threads': 4,
+    'connections': 64,
+    'request_rate': 100,
+}
+SAFE_MEASUREMENT_RESUME_STATES = frozenset({
+    'preparing_load_generator',
+    'load_generator_ready',
 })
 
 
@@ -121,6 +136,39 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument('--application-size', default='Standard_D8ps_v6')
     parser.add_argument('--application-vcpus', type=int, default=8)
     parser.add_argument('--application-memory-gib', type=float, default=32)
+    parser.add_argument(
+        '--measure',
+        action='store_true',
+        help=(
+            'After workload readiness, initialize the one-shot dataset, run '
+            'wrk2, and require a complete saved report before cleanup.'
+        ),
+    )
+    parser.add_argument(
+        '--warmup-seconds',
+        type=int,
+        default=WORKLOAD_OPTION_DEFAULTS['warmup_seconds'],
+    )
+    parser.add_argument(
+        '--duration-seconds',
+        type=int,
+        default=WORKLOAD_OPTION_DEFAULTS['duration_seconds'],
+    )
+    parser.add_argument(
+        '--threads',
+        type=int,
+        default=WORKLOAD_OPTION_DEFAULTS['threads'],
+    )
+    parser.add_argument(
+        '--connections',
+        type=int,
+        default=WORKLOAD_OPTION_DEFAULTS['connections'],
+    )
+    parser.add_argument(
+        '--request-rate',
+        type=int,
+        default=WORKLOAD_OPTION_DEFAULTS['request_rate'],
+    )
     return parser
 
 
@@ -391,6 +439,19 @@ def _plan(
         raise QualificationError(
             'Pass --subscription-id or set AZURE_SUBSCRIPTION_ID.'
         )
+    threads = args.threads
+    connections = args.connections
+    request_rate = args.request_rate
+    if threads > 0 and (
+        connections < threads
+        or request_rate < threads
+        or connections % threads
+        or request_rate % threads
+    ):
+        raise QualificationError(
+            'Qualification connections and request rate must each be at least '
+            'and evenly divisible by the wrk2 thread count.'
+        )
     return BenchmarkPlan(
         provider='azure',
         azure_subscription_id=subscription_id,
@@ -409,6 +470,11 @@ def _plan(
             'topology_id': DISTRIBUTED_TIERED_TOPOLOGY_ID,
             'runtime_id': K3S_RUNTIME_ID,
             'workload': 'social_network',
+            'warmup_seconds': args.warmup_seconds,
+            'duration_seconds': args.duration_seconds,
+            'threads': args.threads,
+            'connections': args.connections,
+            'request_rate': args.request_rate,
         },
         benchmarks=['deathstarbench'],
         destroy_after_completion=True,
@@ -561,7 +627,11 @@ def _resume_job(
     return job, plan
 
 
-def _require_resumable(job: Mapping[str, Any]) -> None:
+def _require_resumable(
+    job: Mapping[str, Any],
+    *,
+    measure: bool = False,
+) -> None:
     job_id = str(job['id'])
     if job.get('status') in RESUME_TEARDOWN_STATUSES:
         raise QualificationError(
@@ -571,6 +641,241 @@ def _require_resumable(job: Mapping[str, Any]) -> None:
     if not job.get('resources'):
         raise QualificationError(
             f'Qualification job {job_id} has no recoverable Azure resources.'
+        )
+    resources = job.get('resources')
+    execution = (
+        resources.get(DEATHSTARBENCH_EXECUTION_JOURNAL_KEY)
+        if isinstance(resources, Mapping)
+        else None
+    )
+    if execution is None:
+        return
+    if not measure:
+        raise QualificationError(
+            f'Qualification job {job_id} already has a one-shot measurement '
+            'journal; refusing to resume it as workload-only.'
+        )
+    state = execution.get('state') if isinstance(execution, Mapping) else None
+    if state not in SAFE_MEASUREMENT_RESUME_STATES:
+        raise QualificationError(
+            f'Qualification job {job_id} measurement state {state!r} is not '
+            'safe to resume; use --cleanup-only instead.'
+        )
+
+
+def _require_resume_workload_settings(
+    job: Mapping[str, Any],
+    args: argparse.Namespace,
+) -> None:
+    """Require the resume CLI to repeat the exact persisted load contract."""
+
+    plan = job.get('plan')
+    options = plan.get('deathstarbench') if isinstance(plan, Mapping) else None
+    if not isinstance(options, Mapping):
+        raise QualificationError('Saved qualification plan has no workload options.')
+    mismatches = []
+    for name, default in WORKLOAD_OPTION_DEFAULTS.items():
+        saved = options.get(name, default)
+        requested = getattr(args, name, default)
+        if requested != saved:
+            mismatches.append(
+                f'{name.replace("_", "-")} saved={saved!r} requested={requested!r}'
+            )
+    if mismatches:
+        raise QualificationError(
+            'Resume workload settings differ from the persisted plan: '
+            + '; '.join(mismatches)
+        )
+
+
+def _finite_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
+def _require_qualified_metrics(
+    metrics: Mapping[str, Any] | object,
+    *,
+    requested_duration: int,
+    max_uncompleted_requests: int,
+    label: str,
+) -> None:
+    if not isinstance(metrics, Mapping):
+        raise QualificationError(f'The qualification {label} metrics are missing.')
+    zero_metrics = ('errors', 'socket_errors')
+    if any(metrics.get(name) != 0 for name in zero_metrics):
+        raise QualificationError(
+            f'Qualification {label} requires zero request and socket errors.'
+        )
+    uncompleted = metrics.get('uncompleted_requests')
+    if (
+        type(uncompleted) is not int
+        or uncompleted < 0
+        or uncompleted > max_uncompleted_requests
+    ):
+        raise QualificationError(
+            f'Qualification {label} permits at most one in-flight request '
+            'per connection at the fixed-duration cutoff.'
+        )
+    for name in ('successful_requests', 'total_requests'):
+        value = metrics.get(name)
+        if not _finite_number(value) or float(value) <= 0:
+            raise QualificationError(
+                f'Qualification {label} metric {name} must be greater than zero.'
+            )
+    sent_requests = metrics.get('sent_requests')
+    if (
+        type(sent_requests) is not int
+        or sent_requests
+        != int(metrics['total_requests']) + uncompleted
+    ):
+        raise QualificationError(
+            f'Qualification {label} sent/completed request accounting is invalid.'
+        )
+    completion_rate = metrics.get('completion_rate_percent')
+    if (
+        not _finite_number(completion_rate)
+        or not 99.0 <= float(completion_rate) <= 100.0
+    ):
+        raise QualificationError(
+            f'Qualification {label} completion rate must be 99%-100%.'
+        )
+
+    measured_duration = metrics.get('duration_seconds')
+    if (
+        not _finite_number(measured_duration)
+        or not 0.9 * requested_duration
+        <= float(measured_duration)
+        <= 1.1 * requested_duration
+    ):
+        raise QualificationError(
+            f'Qualification {label} duration is outside 90%-110% of the '
+            'requested interval.'
+        )
+
+    positive_capacity = (
+        'load_generator_peak_rss_kb',
+        'load_generator_logical_cpus',
+    )
+    for name in positive_capacity:
+        value = metrics.get(name)
+        if not _finite_number(value) or float(value) <= 0:
+            raise QualificationError(
+                f'Qualification {label} metric {name} is missing or invalid.'
+            )
+    nonnegative_capacity = (
+        'load_generator_cpu_percent',
+        'load_generator_capacity_used_percent',
+    )
+    for name in nonnegative_capacity:
+        value = metrics.get(name)
+        # GNU time reports CPU as an integer percentage, so a valid lightly
+        # loaded run can round down to zero.  Zero is evidence, not absence.
+        if not _finite_number(value) or float(value) < 0:
+            raise QualificationError(
+                f'Qualification {label} metric {name} is missing or invalid.'
+            )
+    if 'load_generator_saturation_warning' in metrics:
+        raise QualificationError(
+            f'The {label} load generator reported a saturation warning.'
+        )
+    if float(metrics['load_generator_capacity_used_percent']) >= 95:
+        raise QualificationError(
+            f'The {label} load generator used at least 95% of aggregate CPU '
+            'capacity.'
+        )
+
+
+def _require_qualified_measurement_result(
+    job: Mapping[str, Any],
+    plan: BenchmarkPlan,
+    runner_result: Mapping[str, Any] | object,
+) -> None:
+    """Apply qualification-only gates stricter than the general parser."""
+
+    resources = job.get('resources')
+    journal = (
+        resources.get(DEATHSTARBENCH_EXECUTION_JOURNAL_KEY)
+        if isinstance(resources, Mapping)
+        else None
+    )
+    if not isinstance(journal, Mapping) or journal.get('state') != 'measurement_complete':
+        raise QualificationError(
+            'Distributed measurement did not persist measurement_complete.'
+        )
+    warmup_seconds = plan.deathstarbench.warmup_seconds
+    if warmup_seconds:
+        _require_qualified_metrics(
+            journal.get('warmup_metrics'),
+            requested_duration=warmup_seconds,
+            max_uncompleted_requests=plan.deathstarbench.connections,
+            label='warm-up',
+        )
+    results = job.get('results')
+    if not isinstance(results, list) or len(results) != 1:
+        raise QualificationError(
+            'Qualification requires exactly one benchmark result.'
+        )
+    result = results[0]
+    if (
+        not isinstance(result, Mapping)
+        or result.get('id') != 'deathstarbench'
+        or result.get('status') != 'completed'
+    ):
+        raise QualificationError(
+            'Qualification requires one completed DeathStarBench result.'
+        )
+    if runner_result is not result and runner_result != result:
+        raise QualificationError(
+            'The measurement runner returned a result different from the '
+            'persisted result.'
+        )
+
+    output = result.get('output')
+    if not isinstance(output, str):
+        raise QualificationError('The qualification result output is missing.')
+    lines = output.splitlines()
+    metrics_line_count = sum(
+        line.startswith('OCI_DSB_METRICS ') for line in lines
+    )
+    sent_line_count = sum(
+        re.fullmatch(r'Sent [0-9]+ requests', line) is not None for line in lines
+    )
+    if metrics_line_count != 1 or sent_line_count != 1:
+        raise QualificationError(
+            'Qualification output must contain exactly one OCI_DSB_METRICS '
+            'line and one Sent line.'
+        )
+
+    _require_qualified_metrics(
+        result.get('metrics'),
+        requested_duration=plan.deathstarbench.duration_seconds,
+        max_uncompleted_requests=plan.deathstarbench.connections,
+        label='measurement',
+    )
+
+    try:
+        application.require_complete_benchmark_results(job)
+    except RuntimeError as exc:
+        raise QualificationError(str(exc)) from exc
+
+
+def _write_and_require_report(job: dict[str, Any]) -> None:
+    _set_status(job, 'reporting')
+    _event(job, 'Report', 'Generating the qualification result and report artifacts.')
+    application.make_report(job)
+    run_directory = application.RUNS / str(job['id'])
+    missing = [
+        name
+        for name in ('results.json', 'report.html')
+        if not (run_directory / name).is_file()
+    ]
+    if missing:
+        raise QualificationError(
+            'Qualification report generation did not create: ' + ', '.join(missing)
         )
 
 
@@ -642,11 +947,15 @@ def _run_qualification(
         [],
         tuple[BenchmarkPlan, Mapping[str, str | None], Mapping[str, Any]],
     ],
+    *,
+    measure: bool = False,
 ) -> int:
     failure: BaseException | None = None
     qualified = False
     try:
         plan, ssh, image_lock = setup()
+        if measure:
+            job['_persist_results_artifact'] = True
         _set_status(job, 'provisioning')
         azure.provision_distributed_deathstarbench_candidate(
             job,
@@ -679,11 +988,27 @@ def _run_qualification(
             raise QualificationError(
                 'Azure candidate did not reach both exact readiness boundaries.'
             )
+        if measure:
+            result = (
+                application.run_azure_distributed_deathstarbench_candidate_measurement(
+                    job,
+                    plan,
+                    image_lock,
+                )
+            )
+            _require_qualified_measurement_result(job, plan, result)
+            _write_and_require_report(job)
         qualified = True
         _event(
             job,
             'Qualified',
-            'Azure K3s and Social Network workload reached exact workload_ready.',
+            (
+                'Azure K3s, Social Network workload, one-shot measurement, and '
+                'saved report passed qualification.'
+                if measure
+                else 'Azure K3s and Social Network workload reached exact '
+                'workload_ready.'
+            ),
         )
     except BaseException as exc:  # cleanup must also run for Ctrl-C
         failure = exc
@@ -716,7 +1041,8 @@ def _qualify(args: argparse.Namespace) -> int:
         print(f'Azure qualification job: {job["id"]}', flush=True)
 
         def resume_setup():
-            _require_resumable(job)
+            _require_resumable(job, measure=args.measure)
+            _require_resume_workload_settings(job, args)
             ssh = _ssh_material()
             _job, plan = _resume_job(job, ssh)
             image_lock = _lock_for_run(args.image_lock, job)
@@ -724,7 +1050,7 @@ def _qualify(args: argparse.Namespace) -> int:
             return plan, ssh, image_lock
 
         with _exclusive_job_lock(str(job['id'])):
-            return _run_qualification(job, resume_setup)
+            return _run_qualification(job, resume_setup, measure=args.measure)
 
     # A new run performs every local/registry validation before its ownership
     # journal exists. No Azure write is possible until the job is persisted and
@@ -740,7 +1066,7 @@ def _qualify(args: argparse.Namespace) -> int:
         return plan, ssh, image_lock
 
     with _exclusive_job_lock(str(job['id'])):
-        return _run_qualification(job, new_setup)
+        return _run_qualification(job, new_setup, measure=args.measure)
 
 
 def main(argv: list[str] | None = None) -> int:

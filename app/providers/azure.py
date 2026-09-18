@@ -27,6 +27,7 @@ from types import MappingProxyType
 from typing import Any
 
 from ..deathstarbench_contract import (
+    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
     DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
     DISTRIBUTED_TIERED_TOPOLOGY_ID,
     K3S_RUNTIME_ID,
@@ -4267,6 +4268,7 @@ def _azure_contract_keys(resources: Mapping[str, Any]) -> list[str]:
         DEATHSTARBENCH_TOPOLOGY_FINGERPRINT_KEY,
         K3S_RUNTIME_JOURNAL_KEY,
         DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
+        DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
     ]
     return cloud_keys + [key for key in canonical if key in resources]
 
@@ -4349,6 +4351,89 @@ def _verify_resource_group_inventory(
         )
 
 
+def _best_effort_deallocate_distributed_load_generator(
+    clients: Mapping[str, Any],
+    resources: Mapping[str, Any],
+    *,
+    subscription_id: str,
+    resource_group: str,
+    manifest: DeathStarBenchTopologyManifest | None,
+):
+    """Stop measured load generation without weakening group cleanup.
+
+    The execution journal means a load command may still be running even when
+    guest SSH is unavailable.  Use Azure's control plane to deallocate only
+    the exact, live-owned load-generator VM already bound to the persisted
+    topology.  A failed or ambiguous deallocation is deliberately ignored:
+    deletion of the verified resource group remains the authoritative cleanup
+    operation.
+    """
+
+    if DEATHSTARBENCH_EXECUTION_JOURNAL_KEY not in resources:
+        return
+    if (
+        manifest is None
+        or manifest.topology_id != DISTRIBUTED_TIERED_TOPOLOGY_ID
+    ):
+        return
+
+    prefix = 'azure_dsb_load_generator_instance'
+    expected_name = f'{resource_group}-loadgen'
+    expected_id = _expected_id(
+        subscription_id,
+        resource_group,
+        f'Microsoft.Compute/virtualMachines/{expected_name}',
+    )
+    if (
+        resources.get(f'{prefix}_name') != expected_name
+        or _normalize_id(resources.get(f'{prefix}_expected_id'))
+        != _normalize_id(expected_id)
+    ):
+        raise RuntimeError(
+            'Refusing Azure load-generator deallocation because its '
+            'persisted resource-group/name contract is inconsistent.'
+        )
+
+    service = _compute_service(clients, 'virtual_machines')
+    live_vm = _get_or_none(service, resource_group, expected_name)
+    if live_vm is None:
+        return
+    live_id = str(_value(live_vm, 'id', '') or '')
+    if not live_id or _normalize_id(live_id) != _normalize_id(expected_id):
+        raise RuntimeError(
+            'Refusing Azure load-generator deallocation because the live VM '
+            'identity does not match this run\'s exact ownership contract.'
+        )
+    group_tags = resources.get('azure_resource_group_tags')
+    expected_job_id = (
+        str(group_tags.get('benchmark-job') or '')
+        if isinstance(group_tags, Mapping) else ''
+    )
+    expected_tags = {
+        'managed-by': MANAGED_BY,
+        'benchmark-job': expected_job_id,
+        'benchmark-role': 'load-generator',
+    }
+    live_tags = dict(_value(live_vm, 'tags', {}) or {})
+    if not expected_job_id or any(
+        live_tags.get(key) != value for key, value in expected_tags.items()
+    ):
+        raise RuntimeError(
+            'Refusing Azure load-generator deallocation because the live VM '
+            'ownership tags do not match this run.'
+        )
+    begin_deallocate = getattr(service, 'begin_deallocate', None)
+    if not callable(begin_deallocate):
+        return
+    try:
+        _wait(begin_deallocate(resource_group, expected_name))
+    except Exception:
+        # The exact resource-group delete below is both broader and
+        # authoritative. Retrying or failing cleanup here would leave more
+        # infrastructure behind after an ambiguous control-plane response.
+        return
+
+
 def destroy_resources(
     job: dict[str, Any],
     *,
@@ -4381,6 +4466,8 @@ def destroy_resources(
             _forget(job, persist, K3S_RUNTIME_JOURNAL_KEY)
         if DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY in resources:
             _forget(job, persist, DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY)
+        if DEATHSTARBENCH_EXECUTION_JOURNAL_KEY in resources:
+            _forget(job, persist, DEATHSTARBENCH_EXECUTION_JOURNAL_KEY)
         if not preserve_status:
             job['status'] = 'destroyed'
             job['cleanup_error'] = None
@@ -4463,6 +4550,18 @@ def destroy_resources(
                 region=region,
                 required_tags=required_tags,
                 saved_id=expected_id,
+            )
+            # Stop a possibly orphaned benchmark command before the broader
+            # inventory gate.  This mutation is limited to the exact persisted
+            # load-generator VM; an unexpected sibling resource must still
+            # prevent the subsequent resource-group deletion, but must not
+            # leave measured traffic running while cleanup is refused.
+            _best_effort_deallocate_distributed_load_generator(
+                clients,
+                resources,
+                subscription_id=subscription_id,
+                resource_group=group_name,
+                manifest=manifest,
             )
             # This is intentionally the final read before begin_delete. It
             # catches manually added or cross-workload resources instead of

@@ -18,6 +18,7 @@ PODMAN_COMPOSE_RUNTIME_ID = 'podman_compose_v1'
 K3S_RUNTIME_ID = 'k3s_v1'
 K3S_RUNTIME_JOURNAL_KEY = 'k3s_runtime_state_v1'
 DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY = 'deathstarbench_workload_state_v1'
+DEATHSTARBENCH_EXECUTION_JOURNAL_KEY = 'deathstarbench_execution_state_v1'
 
 # The current Podman implementation intentionally uses provider-packaged
 # Podman on Oracle/Rocky Linux and a separately qualified package set on Amazon
@@ -33,6 +34,9 @@ K3S_VERSION = 'v1.36.4+k3s1'
 DISTRIBUTED_RUNTIME_REVISION = 'k3s-v1.36.4-k3s1-tiered-runtime-v5'
 DISTRIBUTED_WORKLOAD_REVISION = 'social-network-6ecb097-workload-v1'
 DISTRIBUTED_IMAGE_SET_REVISION = 'social-network-images-v1'
+DISTRIBUTED_DATASET_REVISION = 'social-network-socfb-reed98-compose-seed1-v1'
+DISTRIBUTED_LOAD_DRIVER_REVISION = 'wrk2-6ecb097-native-v1'
+DISTRIBUTED_MEASUREMENT_REVISION = 'social-network-distributed-measurement-v1'
 
 
 @dataclass(frozen=True)

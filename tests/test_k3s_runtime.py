@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -154,7 +155,7 @@ class K3sRuntimeCommandTests(unittest.TestCase):
                 command,
                 r'dnf[^;]*\binstall\b[^;]*\bcurl\b',
             )
-            self.assertIn('for COMMAND in curl', command)
+            self.assertIn('for COMMAND in awk curl', command)
             self.assertIn(
                 'lsmod modprobe; do if ! command -v "$COMMAND"',
                 command,
@@ -192,6 +193,24 @@ class K3sRuntimeCommandTests(unittest.TestCase):
         ):
             with self.subTest(command=command[:80]):
                 self.assertIn(expected, command)
+
+    def test_host_commands_require_service_diagnostic_utilities(self):
+        for command in (
+            rocky_host_prepare_command('control'),
+            host_preflight_command(selinux_enabled=True),
+        ):
+            with self.subTest(command=command[:80]):
+                for utility in (
+                    'awk',
+                    'journalctl',
+                    'matchpathcon',
+                    'stat',
+                    'tail',
+                ):
+                    self.assertRegex(
+                        command,
+                        rf'for COMMAND in [^;]*\b{utility}\b',
+                    )
 
     def test_selinux_rpm_verification_reports_root_verification_output(self):
         command = runtime._k3s_selinux_rpm_verification_command()
@@ -470,7 +489,10 @@ class K3sRuntimeCommandTests(unittest.TestCase):
             unit,
         )
         self.assertIn('--selinux', unit)
-        self.assertIn('KillMode=control-group', unit)
+        self.assertIn('KillMode=process', unit)
+        self.assertNotIn('KillMode=control-group', unit)
+        self.assertIn('TimeoutStartSec=9min', unit)
+        self.assertNotIn('TimeoutStartSec=10min', unit)
 
     def test_agent_unit_joins_private_server_and_has_one_role(self):
         unit = agent_unit(
@@ -512,6 +534,192 @@ class K3sRuntimeCommandTests(unittest.TestCase):
             self.assertIn('systemctl is-active --quiet', command)
             self.assertIn('timeout --signal=TERM 600s', command)
             self.assertIn('600:0:0', command)
+            self.assertIn('SERVICE_STATUS=$?', command)
+            self.assertIn('systemctl show --no-pager', command)
+            self.assertIn('--property=ExecMainStatus', command)
+            self.assertNotIn('--property=ExecStart', command)
+            self.assertIn('journalctl --boot --unit "$SERVICE"', command)
+            self.assertIn('--lines=40', command)
+            self.assertIn('tail -c 1024', command)
+            self.assertIn('stat -c "%C"', command)
+            self.assertIn('matchpathcon -n', command)
+            self.assertNotIn('systemctl status --no-pager --full', command)
+
+    @staticmethod
+    def _service_failure_fixture(root: Path, token_paths: tuple[Path, ...]):
+        tools = root / 'bin'
+        tools.mkdir()
+        argument_log = root / 'arguments.log'
+
+        def executable(name, body):
+            path = tools / name
+            path.write_text('#!/bin/sh\n' + body)
+            path.chmod(0o755)
+
+        executable(
+            'sudo',
+            '{\n'
+            '  printf "sudo"\n'
+            '  for argument in "$@"; do printf " <%s>" "$argument"; done\n'
+            '  printf "\\n"\n'
+            '} >> "$DIAGNOSTIC_ARGUMENT_LOG"\n'
+            'exec "$@"\n',
+        )
+        executable(
+            'timeout',
+            'if [ "$1" = "--signal=TERM" ]; then shift; fi\n'
+            'shift\n'
+            'exec "$@"\n',
+        )
+        executable(
+            'systemctl',
+            'printf "systemctl <%s>\\n" "$*" '
+            '>> "$DIAGNOSTIC_ARGUMENT_LOG"\n'
+            'case "$1" in\n'
+            '  is-active) exit 3;;\n'
+            '  start) printf "generic systemctl start failure\\n" >&2; exit 23;;\n'
+            '  restart) exit 24;;\n'
+            '  show)\n'
+            '    printf "Id=k3s-agent.service\\nLoadState=loaded\\n"\n'
+            '    printf "ActiveState=failed\\nSubState=failed\\n"\n'
+            '    printf "Result=exit-code\\nExecMainCode=1\\n"\n'
+            '    printf "ExecMainStatus=1\\nStatusErrno=0\\nNRestarts=0\\n"\n'
+            '    exit 0;;\n'
+            '  *) exit 99;;\n'
+            'esac\n',
+        )
+        executable(
+            'stat',
+            'format=\n'
+            'while [ "$#" -gt 0 ]; do\n'
+            '  case "$1" in\n'
+            '    -c) format="$2"; shift 2;;\n'
+            '    --) shift; target="$1"; break;;\n'
+            '    *) shift;;\n'
+            '  esac\n'
+            'done\n'
+            '[ -f "$target" ] || exit 1\n'
+            'case "$format" in\n'
+            '  "%F") printf "regular file\\n";;\n'
+            '  "%a:%u:%g") printf "600:0:0\\n";;\n'
+            '  "%C") printf "system_u:object_r:k3s_conf_t:s0\\n";;\n'
+            '  *) exit 98;;\n'
+            'esac\n',
+        )
+        executable(
+            'matchpathcon',
+            'test "$1" = "-n" || exit 97\n'
+            'printf "system_u:object_r:k3s_conf_t:s0\\n"\n',
+        )
+        tokens = tuple(
+            path.read_text().strip() for path in token_paths if path.exists()
+        )
+        journal_message = (
+            'fatal tokens=' + ' and '.join(tokens) + ' ' + ('z' * 5000)
+        )
+        executable(
+            'journalctl',
+            'printf "journalctl <%s>\\n" "$*" '
+            '>> "$DIAGNOSTIC_ARGUMENT_LOG"\n'
+            'index=0\n'
+            'while [ "$index" -lt 60 ]; do\n'
+            '  printf "filler-%s-%0500d\\n" "$index" 0\n'
+            '  index=$((index + 1))\n'
+            'done\n'
+            f'printf "%s\\n" {shlex.quote(journal_message)}\n',
+        )
+
+        environment = os.environ.copy()
+        environment['PATH'] = f'{tools}:/usr/bin:/bin'
+        environment['DIAGNOSTIC_ARGUMENT_LOG'] = str(argument_log)
+        restart_marker = root / 'restart-required'
+        restart_marker.write_text('keep-on-failure\n')
+        command = (
+            'set -euo pipefail; '
+            'SERVICE=k3s-agent.service; CHANGED=0; '
+            f'RESTART_MARKER={shlex.quote(str(restart_marker))}; '
+            + runtime._service_start_fragment(
+                tuple(str(path) for path in token_paths)
+            )
+        )
+        completed = subprocess.run(
+            ['/bin/bash', '-c', command],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=environment,
+        )
+        return completed, argument_log, restart_marker, command
+
+    def test_service_failure_diagnostics_redact_bound_and_preserve_status(self):
+        secrets = (
+            'K10' + ('a' * 64) + '::agent-secret-value',
+            'b' * 64,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            token_paths = (root / 'server-token', root / 'agent-token')
+            for token_path, secret in zip(token_paths, secrets, strict=True):
+                token_path.write_text(secret + '\n')
+                token_path.chmod(0o600)
+
+            completed, argument_log, restart_marker, command = (
+                self._service_failure_fixture(root, token_paths)
+            )
+            arguments = argument_log.read_text()
+            restart_marker_retained = restart_marker.exists()
+
+        self.assertEqual(completed.returncode, 23, completed.stderr)
+        self.assertTrue(restart_marker_retained)
+        for secret in secrets:
+            self.assertNotIn(secret, completed.stderr)
+            self.assertNotIn(secret, arguments)
+            self.assertNotIn(secret, command)
+        self.assertIn('[REDACTED_K3S_TOKEN]', completed.stderr)
+        self.assertIn(
+            'exists=yes type=regular file mode=600 uid=0 gid=0',
+            completed.stderr,
+        )
+        self.assertIn(
+            'selinux_actual=system_u:object_r:k3s_conf_t:s0',
+            completed.stderr,
+        )
+        self.assertIn(
+            'selinux_expected=system_u:object_r:k3s_conf_t:s0',
+            completed.stderr,
+        )
+        self.assertIn('ExecMainStatus=1', completed.stderr)
+        self.assertIn('--lines=40', arguments)
+        self.assertNotIn('ExecStart', arguments)
+        journal = completed.stderr.split(
+            'K3s journal diagnostics (redacted, last 40 lines, max 1024 bytes):\n',
+            1,
+        )[1]
+        self.assertLessEqual(len(journal.rstrip('\n').encode()), 1024)
+        self.assertLessEqual(journal.count('\n'), 40)
+
+    def test_service_failure_diagnostics_omit_journal_for_missing_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            token_path = root / 'missing-agent-token'
+            completed, argument_log, restart_marker, _command = (
+                self._service_failure_fixture(root, (token_path,))
+            )
+            arguments = argument_log.read_text()
+            restart_marker_retained = restart_marker.exists()
+
+        self.assertEqual(completed.returncode, 23, completed.stderr)
+        self.assertTrue(restart_marker_retained)
+        self.assertIn('exists=no type=unavailable', completed.stderr)
+        self.assertIn(
+            'selinux_expected=system_u:object_r:k3s_conf_t:s0',
+            completed.stderr,
+        )
+        self.assertIn(
+            'K3s journal diagnostics unavailable: token redaction could not be proven.',
+            completed.stderr,
+        )
+        self.assertNotIn('journalctl', arguments)
 
     def test_readiness_checks_exact_binary_and_have_deadlines(self):
         server = server_readiness_command('x86_64')

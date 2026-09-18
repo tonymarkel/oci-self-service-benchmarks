@@ -68,6 +68,9 @@ DOWNLOAD_CONNECT_TIMEOUT_SECONDS = 20
 DOWNLOAD_MAX_TIME_SECONDS = 600
 SERVICE_START_TIMEOUT_SECONDS = 600
 READINESS_TIMEOUT_SECONDS = 300
+SERVICE_DIAGNOSTIC_TIMEOUT_SECONDS = 10
+SERVICE_DIAGNOSTIC_JOURNAL_LINES = 40
+SERVICE_DIAGNOSTIC_JOURNAL_BYTES = 1024
 _SYSTEM_COMMAND_PATH = (
     '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 )
@@ -311,10 +314,15 @@ def rocky_host_prepare_command(role: str) -> str:
         package_names.extend(('policycoreutils-python-utils', 'xfsprogs'))
     packages = ' '.join(package_names)
     required_commands = _required_command_check((
+        'awk',
         'curl',
         'sha256sum',
         'base64',
+        'journalctl',
+        'matchpathcon',
+        'stat',
         'systemctl',
+        'tail',
         'timeout',
         'findmnt',
         'lsmod',
@@ -404,10 +412,15 @@ def host_preflight_command(*, selinux_enabled: bool) -> str:
         else 'test "$(getenforce 2>/dev/null || echo Disabled)" != Enforcing; '
     )
     required_commands = _required_command_check((
+        'awk',
         'curl',
         'sha256sum',
         'base64',
+        'journalctl',
+        'matchpathcon',
+        'stat',
         'systemctl',
+        'tail',
         'timeout',
         'findmnt',
         'lsmod',
@@ -873,13 +886,13 @@ def _service_unit(
         '',
         '[Service]',
         'Type=notify',
-        'KillMode=control-group',
+        'KillMode=process',
         'Delegate=yes',
         'LimitNOFILE=1048576',
         'LimitNPROC=infinity',
         'LimitCORE=infinity',
         'TasksMax=infinity',
-        'TimeoutStartSec=10min',
+        'TimeoutStartSec=9min',
         'TimeoutStopSec=2min',
         'SendSIGKILL=yes',
         'Restart=always',
@@ -890,6 +903,157 @@ def _service_unit(
         'WantedBy=multi-user.target',
         '',
     ))
+
+
+def _service_start_fragment(token_files: tuple[str, ...]) -> str:
+    """Start one K3s unit and emit bounded, token-redacted diagnostics.
+
+    Token values are read only by a privileged AWK process from the already
+    validated root-only files.  They never enter this command, argv, or the
+    environment.  AWK validates every token before consuming journal input,
+    so an unreadable or malformed credential produces no journal output.
+    """
+
+    if not token_files or any(
+        not isinstance(path, str) or not path.startswith('/')
+        for path in token_files
+    ):
+        raise ValueError('K3s service diagnostics require absolute token files.')
+    token_paths = ' '.join(shlex.quote(path) for path in token_files)
+    awk_arguments = ' '.join(
+        f'-v token_file_{index}={shlex.quote(path)}'
+        for index, path in enumerate(token_files, start=1)
+    )
+    awk_loads = ' '.join(
+        f'load_secret(token_file_{index});'
+        for index in range(1, len(token_files) + 1)
+    )
+    awk_program = (
+        'function load_secret(path, value, extra, status) {'
+        ' status = (getline value < path);'
+        ' if (status != 1 || length(value) < 20 || length(value) > 512'
+        ' || value !~ /^[A-Za-z0-9:._-]+$/) exit 70;'
+        ' status = (getline extra < path); close(path);'
+        ' if (status != 0) exit 70; secrets[++secret_count] = value;'
+        ' }'
+        ' function redact_literal(text, secret, position) {'
+        ' while ((position = index(text, secret)) != 0)'
+        ' text = substr(text, 1, position - 1) "[REDACTED_K3S_TOKEN]"'
+        ' substr(text, position + length(secret));'
+        ' return text;'
+        ' }'
+        f' BEGIN {{ {awk_loads} }}'
+        ' {'
+        ' line = $0;'
+        ' for (index_value = 1; index_value <= secret_count; index_value++)'
+        ' line = redact_literal(line, secrets[index_value]);'
+        ' gsub(/[^[:print:]\t]/, "?", line);'
+        ' line = substr(line, 1, 512);'
+        f' slot = ((NR - 1) % {SERVICE_DIAGNOSTIC_JOURNAL_LINES}) + 1;'
+        ' journal_line[slot] = line; total_lines = NR;'
+        ' }'
+        ' END {'
+        f' line_count = (total_lines < {SERVICE_DIAGNOSTIC_JOURNAL_LINES})'
+        f' ? total_lines : {SERVICE_DIAGNOSTIC_JOURNAL_LINES};'
+        f' start = total_lines > {SERVICE_DIAGNOSTIC_JOURNAL_LINES}'
+        f' ? (total_lines % {SERVICE_DIAGNOSTIC_JOURNAL_LINES}) + 1 : 1;'
+        ' for (offset = 0; offset < line_count; offset++) {'
+        f' slot = ((start + offset - 1) % '
+        f'{SERVICE_DIAGNOSTIC_JOURNAL_LINES}) + 1;'
+        ' print journal_line[slot];'
+        ' }'
+        ' }'
+    )
+    diagnostic_function = (
+        'k3s_service_diagnostics() { LC_ALL=C; SYSTEMD_COLORS=0; '
+        'export LC_ALL SYSTEMD_COLORS; '
+        'printf "K3s service diagnostics for %s:\\n" "$SERVICE" >&2; '
+        'JOURNAL_REDACTION_READY=1; '
+        f'for DIAGNOSTIC_TOKEN_FILE in {token_paths}; do '
+        'TOKEN_EXISTS=no; TOKEN_TYPE=unavailable; '
+        'TOKEN_MODE=unavailable; TOKEN_UID=unavailable; TOKEN_GID=unavailable; '
+        'TOKEN_ACTUAL_CONTEXT=unavailable; '
+        'TOKEN_EXPECTED_CONTEXT=unavailable; '
+        f'if timeout --signal=TERM {SERVICE_DIAGNOSTIC_TIMEOUT_SECONDS}s '
+        'sudo test -e "$DIAGNOSTIC_TOKEN_FILE" '
+        f'|| timeout --signal=TERM {SERVICE_DIAGNOSTIC_TIMEOUT_SECONDS}s '
+        'sudo test -L "$DIAGNOSTIC_TOKEN_FILE"; then '
+        'TOKEN_EXISTS=yes; '
+        f'if ! TOKEN_TYPE=$(timeout --signal=TERM '
+        f'{SERVICE_DIAGNOSTIC_TIMEOUT_SECONDS}s sudo stat -c "%F" -- '
+        '"$DIAGNOSTIC_TOKEN_FILE" 2>/dev/null); then '
+        'TOKEN_TYPE=unavailable; JOURNAL_REDACTION_READY=0; fi; '
+        f'if TOKEN_MODE_OWNER=$(timeout --signal=TERM '
+        f'{SERVICE_DIAGNOSTIC_TIMEOUT_SECONDS}s sudo stat -c "%a:%u:%g" -- '
+        '"$DIAGNOSTIC_TOKEN_FILE" 2>/dev/null); then '
+        'TOKEN_MODE=${TOKEN_MODE_OWNER%%:*}; '
+        'TOKEN_UID_GID=${TOKEN_MODE_OWNER#*:}; '
+        'TOKEN_UID=${TOKEN_UID_GID%%:*}; TOKEN_GID=${TOKEN_UID_GID#*:}; '
+        'else JOURNAL_REDACTION_READY=0; fi; '
+        f'TOKEN_ACTUAL_CONTEXT=$(timeout --signal=TERM '
+        f'{SERVICE_DIAGNOSTIC_TIMEOUT_SECONDS}s sudo stat -c "%C" -- '
+        '"$DIAGNOSTIC_TOKEN_FILE" 2>/dev/null || true); '
+        'if [ -z "$TOKEN_ACTUAL_CONTEXT" ]; then '
+        'TOKEN_ACTUAL_CONTEXT=unavailable; fi; '
+        'else JOURNAL_REDACTION_READY=0; fi; '
+        f'TOKEN_EXPECTED_CONTEXT=$(timeout --signal=TERM '
+        f'{SERVICE_DIAGNOSTIC_TIMEOUT_SECONDS}s sudo matchpathcon -n '
+        '"$DIAGNOSTIC_TOKEN_FILE" 2>/dev/null || true); '
+        'if [ -z "$TOKEN_EXPECTED_CONTEXT" ]; then '
+        'TOKEN_EXPECTED_CONTEXT=unavailable; fi; '
+        'if [ "$TOKEN_TYPE" != "regular file" ] '
+        '|| [ "$TOKEN_MODE:$TOKEN_UID:$TOKEN_GID" != "600:0:0" ]; then '
+        'JOURNAL_REDACTION_READY=0; fi; '
+        'printf "token_file=%s exists=%s type=%s mode=%s uid=%s gid=%s '
+        'selinux_actual=%s selinux_expected=%s\\n" '
+        '"$DIAGNOSTIC_TOKEN_FILE" "$TOKEN_EXISTS" "$TOKEN_TYPE" '
+        '"$TOKEN_MODE" "$TOKEN_UID" "$TOKEN_GID" '
+        '"$TOKEN_ACTUAL_CONTEXT" "$TOKEN_EXPECTED_CONTEXT" >&2; '
+        'done; '
+        f'if ! timeout --signal=TERM {SERVICE_DIAGNOSTIC_TIMEOUT_SECONDS}s '
+        'sudo systemctl show --no-pager '
+        '--property=Id --property=LoadState --property=ActiveState '
+        '--property=SubState --property=Result --property=ExecMainCode '
+        '--property=ExecMainStatus --property=StatusErrno '
+        '--property=NRestarts "$SERVICE" >&2; then '
+        'printf "K3s systemd state diagnostics unavailable.\\n" >&2; fi; '
+        'if [ "$JOURNAL_REDACTION_READY" -ne 1 ]; then '
+        'printf "K3s journal diagnostics unavailable: token redaction '
+        'could not be proven.\\n" >&2; return 0; fi; '
+        'printf "K3s journal diagnostics (redacted, last %s lines, max %s '
+        'bytes):\\n" '
+        f'{SERVICE_DIAGNOSTIC_JOURNAL_LINES} '
+        f'{SERVICE_DIAGNOSTIC_JOURNAL_BYTES} >&2; '
+        f'if timeout --signal=TERM {SERVICE_DIAGNOSTIC_TIMEOUT_SECONDS}s '
+        'sudo journalctl --boot --unit "$SERVICE" --no-pager --quiet '
+        f'--output=short-monotonic --lines={SERVICE_DIAGNOSTIC_JOURNAL_LINES} '
+        f'| timeout --signal=TERM {SERVICE_DIAGNOSTIC_TIMEOUT_SECONDS}s '
+        f'sudo awk {awk_arguments} {shlex.quote(awk_program)} '
+        f'| tail -c {SERVICE_DIAGNOSTIC_JOURNAL_BYTES} >&2; then '
+        'printf "\\n" >&2; else '
+        'printf "K3s journal diagnostics unavailable: token redaction '
+        'could not be proven.\\n" >&2; fi; '
+        '}; '
+    )
+    start_fragment = (
+        'SERVICE_STATUS=0; '
+        'if sudo systemctl is-active --quiet "$SERVICE"; then '
+        'if [ "$CHANGED" -eq 1 ]; then '
+        f'if timeout --signal=TERM {SERVICE_START_TIMEOUT_SECONDS}s '
+        'sudo systemctl restart "$SERVICE"; then :; '
+        'else SERVICE_STATUS=$?; fi; fi; '
+        'else '
+        f'if timeout --signal=TERM {SERVICE_START_TIMEOUT_SECONDS}s '
+        'sudo systemctl start "$SERVICE"; then :; '
+        'else SERVICE_STATUS=$?; fi; fi; '
+        'if [ "$SERVICE_STATUS" -eq 0 ]; then '
+        'if sudo systemctl is-active --quiet "$SERVICE"; then :; '
+        'else SERVICE_STATUS=$?; fi; fi; '
+        'if [ "$SERVICE_STATUS" -ne 0 ]; then '
+        'k3s_service_diagnostics; exit "$SERVICE_STATUS"; fi; '
+        'sudo rm -f -- "$RESTART_MARKER"'
+    )
+    return diagnostic_function + start_fragment
 
 
 def server_unit(
@@ -975,15 +1139,7 @@ def _unit_install_command(
         + 'if sudo test -e "$RESTART_MARKER"; then CHANGED=1; fi; '
         'timeout --signal=TERM 60s sudo systemctl daemon-reload; '
         'timeout --signal=TERM 60s sudo systemctl enable "$SERVICE" >/dev/null; '
-        'if sudo systemctl is-active --quiet "$SERVICE"; then '
-        'if [ "$CHANGED" -eq 1 ]; then '
-        f'timeout --signal=TERM {SERVICE_START_TIMEOUT_SECONDS}s '
-        'sudo systemctl restart "$SERVICE"; fi; '
-        'else '
-        f'timeout --signal=TERM {SERVICE_START_TIMEOUT_SECONDS}s '
-        'sudo systemctl start "$SERVICE"; fi; '
-        'sudo systemctl is-active --quiet "$SERVICE"; '
-        'sudo rm -f -- "$RESTART_MARKER"'
+        + _service_start_fragment(token_files)
     )
 
 

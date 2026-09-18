@@ -19,6 +19,7 @@ from app.deathstarbench_k3s_workload import (
     FRONTEND_COMPONENT,
     FRONTEND_NODE_PORT,
     IMAGE_LOCK_SCHEMA_VERSION,
+    LEGACY_STORAGE_CLASS_ANNOTATION,
     MEMCACHED_COMPONENTS,
     MONGODB_COMPONENTS,
     NAMESPACE,
@@ -615,6 +616,216 @@ class WorkloadAttestationTests(unittest.TestCase):
             result['pod_nodes'],
             ('dsb-application', 'dsb-cache', 'dsb-control', 'dsb-database'),
         )
+
+    def _api_round_tripped_attestation(self):
+        round_tripped = copy.deepcopy(self.attestation)
+        omitted_env_count = 0
+        for item in round_tripped['items']:
+            if item['kind'] not in {'Deployment', 'Pod'}:
+                continue
+            container = (
+                item['spec']['template']['spec']['containers'][0]
+                if item['kind'] == 'Deployment'
+                else item['spec']['containers'][0]
+            )
+            if container.get('env') == []:
+                del container['env']
+                omitted_env_count += 1
+        self.assertEqual(omitted_env_count, 48)
+
+        default_deny = next(
+            item for item in round_tripped['items']
+            if item['kind'] == 'NetworkPolicy'
+            and item['metadata']['name'] == 'default-deny-all'
+        )
+        self.assertEqual(default_deny['spec'].pop('ingress'), [])
+        self.assertEqual(default_deny['spec'].pop('egress'), [])
+
+        persistent_volumes = [
+            item for item in round_tripped['items']
+            if item['kind'] == 'PersistentVolume'
+        ]
+        self.assertEqual(len(persistent_volumes), 6)
+        for volume in persistent_volumes:
+            self.assertEqual(volume['spec'].pop('storageClassName'), '')
+        return round_tripped
+
+    def test_api_omitted_empty_fields_are_narrowly_normalized(self):
+        round_tripped = self._api_round_tripped_attestation()
+        result = parse_workload_attestation(
+            json.dumps(round_tripped),
+            self.bundle,
+        )
+
+        self.assertEqual(result['component_count'], 27)
+
+    def test_api_round_trip_environment_contract_remains_fail_closed(self):
+        mutations = []
+
+        round_tripped = self._api_round_tripped_attestation()
+        injected = copy.deepcopy(round_tripped)
+        deployment = next(
+            item for item in injected['items']
+            if item['kind'] == 'Deployment'
+            and item['metadata']['name'] == 'url-shorten-service'
+        )
+        deployment['spec']['template']['spec']['containers'][0]['env'] = [{
+            'name': 'UNAPPROVED',
+            'value': 'true',
+        }]
+        mutations.append(('deployment direct env', injected, 'env array drifted'))
+
+        injected_pod = copy.deepcopy(round_tripped)
+        pod = next(
+            item for item in injected_pod['items']
+            if item['kind'] == 'Pod'
+            and item['metadata']['labels']['app.kubernetes.io/component']
+            == 'url-shorten-service'
+        )
+        pod['spec']['containers'][0]['env'] = [{
+            'name': 'UNAPPROVED',
+            'value': 'true',
+        }]
+        mutations.append(('pod direct env', injected_pod, 'env array drifted'))
+
+        deployment_env_from = copy.deepcopy(round_tripped)
+        deployment = next(
+            item for item in deployment_env_from['items']
+            if item['kind'] == 'Deployment'
+            and item['metadata']['name'] == 'url-shorten-service'
+        )
+        deployment['spec']['template']['spec']['containers'][0]['envFrom'] = [{
+            'configMapRef': {'name': 'unapproved'},
+        }]
+        mutations.append((
+            'deployment envFrom',
+            deployment_env_from,
+            'unapproved environment source',
+        ))
+
+        pod_env_from = copy.deepcopy(round_tripped)
+        pod = next(
+            item for item in pod_env_from['items']
+            if item['kind'] == 'Pod'
+            and item['metadata']['labels']['app.kubernetes.io/component']
+            == 'url-shorten-service'
+        )
+        pod['spec']['containers'][0]['envFrom'] = [{
+            'configMapRef': {'name': 'unapproved'},
+        }]
+        mutations.append((
+            'pod envFrom',
+            pod_env_from,
+            'unapproved environment source',
+        ))
+
+        missing_nonempty_env = copy.deepcopy(round_tripped)
+        deployment = next(
+            item for item in missing_nonempty_env['items']
+            if item['kind'] == 'Deployment'
+            and item['metadata']['name'] == 'nginx-thrift'
+        )
+        del deployment['spec']['template']['spec']['containers'][0]['env']
+        mutations.append((
+            'deployment missing nonempty env',
+            missing_nonempty_env,
+            'missing env',
+        ))
+
+        missing_pod_nonempty_env = copy.deepcopy(round_tripped)
+        pod = next(
+            item for item in missing_pod_nonempty_env['items']
+            if item['kind'] == 'Pod'
+            and item['metadata']['labels']['app.kubernetes.io/component']
+            == 'nginx-thrift'
+        )
+        del pod['spec']['containers'][0]['env']
+        mutations.append((
+            'pod missing nonempty env',
+            missing_pod_nonempty_env,
+            'missing env',
+        ))
+
+        for name, mutation, error in mutations:
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(WorkloadBundleError, error):
+                    parse_workload_attestation(
+                        json.dumps(mutation),
+                        self.bundle,
+                    )
+
+    def test_api_round_trip_storage_contract_remains_fail_closed(self):
+        round_tripped = self._api_round_tripped_attestation()
+        foreign_pv_class = copy.deepcopy(round_tripped)
+        volume = next(
+            item for item in foreign_pv_class['items']
+            if item['kind'] == 'PersistentVolume'
+        )
+        volume['spec']['storageClassName'] = 'unexpected-default'
+        with self.assertRaisesRegex(WorkloadBundleError, 'storageClassName drifted'):
+            parse_workload_attestation(
+                json.dumps(foreign_pv_class),
+                self.bundle,
+            )
+
+        missing_pvc_class = copy.deepcopy(round_tripped)
+        claim = next(
+            item for item in missing_pvc_class['items']
+            if item['kind'] == 'PersistentVolumeClaim'
+        )
+        self.assertEqual(claim['spec'].pop('storageClassName'), '')
+        with self.assertRaisesRegex(WorkloadBundleError, 'missing storageClassName'):
+            parse_workload_attestation(
+                json.dumps(missing_pvc_class),
+                self.bundle,
+            )
+
+        for kind in ('PersistentVolume', 'PersistentVolumeClaim'):
+            with self.subTest(kind=kind):
+                legacy_class = copy.deepcopy(round_tripped)
+                resource = next(
+                    item for item in legacy_class['items']
+                    if item['kind'] == kind
+                )
+                resource['metadata'].setdefault('annotations', {})[
+                    LEGACY_STORAGE_CLASS_ANNOTATION
+                ] = 'unexpected-default'
+                with self.assertRaisesRegex(
+                    WorkloadBundleError,
+                    'legacy storage-class annotation',
+                ):
+                    parse_workload_attestation(
+                        json.dumps(legacy_class),
+                        self.bundle,
+                    )
+
+    def test_api_round_trip_default_deny_remains_fail_closed(self):
+        round_tripped = self._api_round_tripped_attestation()
+        missing_empty_selector = copy.deepcopy(round_tripped)
+        policy = next(
+            item for item in missing_empty_selector['items']
+            if item['kind'] == 'NetworkPolicy'
+            and item['metadata']['name'] == 'default-deny-all'
+        )
+        del policy['spec']['podSelector']
+        with self.assertRaisesRegex(WorkloadBundleError, 'missing podSelector'):
+            parse_workload_attestation(
+                json.dumps(missing_empty_selector),
+                self.bundle,
+            )
+
+        broadened_default_deny = copy.deepcopy(round_tripped)
+        policy = next(
+            item for item in broadened_default_deny['items']
+            if item['kind'] == 'NetworkPolicy'
+            and item['metadata']['name'] == 'default-deny-all'
+        )
+        policy['spec']['ingress'] = [{}]
+        with self.assertRaisesRegex(WorkloadBundleError, 'ingress array drifted'):
+            parse_workload_attestation(
+                json.dumps(broadened_default_deny),
+                self.bundle,
+            )
 
     def test_attestation_rejects_image_storage_policy_and_pod_drift(self):
         mutations = []

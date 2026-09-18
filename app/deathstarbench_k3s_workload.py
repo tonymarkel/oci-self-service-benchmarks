@@ -38,6 +38,7 @@ IMAGE_LOCK_SCHEMA_VERSION = 1
 WORKLOAD_ASSET_SCHEMA_VERSION = 1
 WORKLOAD_LABEL = 'social-network-v1'
 DATABASE_ROOT = '/var/lib/deathstarbench/database/mongodb'
+LEGACY_STORAGE_CLASS_ANNOTATION = 'volume.beta.kubernetes.io/storage-class'
 FRONTEND_COMPONENT = 'nginx-thrift'
 FRONTEND_NODE_PORT = 8080
 READINESS_TIMEOUT_SECONDS = 900
@@ -1531,6 +1532,49 @@ def _require_expected_subset(actual: Any, expected: Any, label: str):
             raise WorkloadBundleError(f'{label} is not an object.')
         for key, expected_value in expected.items():
             if key not in actual:
+                # Kubernetes omits these exact optional empty lists during
+                # an API round trip. Keep them in the desired contract so a
+                # present non-empty value is still rejected. Do not make
+                # this generic: future empty fields remain fail-closed, and
+                # empty mappings such as podSelector: {} stay mandatory.
+                omitted_empty_container_env = (
+                    key == 'env'
+                    and isinstance(expected_value, list)
+                    and not expected_value
+                    and (
+                        (
+                            label.startswith('Deployment/')
+                            and label.endswith(
+                                ' spec.template.spec.containers[0]'
+                            )
+                        )
+                        or (
+                            label.startswith('Pod ')
+                            and label.endswith(' container')
+                        )
+                    )
+                )
+                omitted_default_deny_rules = (
+                    label == 'NetworkPolicy/default-deny-all spec'
+                    and key in {'ingress', 'egress'}
+                    and isinstance(expected_value, list)
+                    and not expected_value
+                )
+                if omitted_empty_container_env or omitted_default_deny_rules:
+                    continue
+                # PersistentVolume.StorageClassName is a scalar Go string
+                # with ``omitempty``. The API therefore omits the explicit
+                # empty class used by this static PV contract. Keep this
+                # equivalence scoped to PV specs: PVC storageClassName is a
+                # pointer, remains serialized, and prevents default-class
+                # binding.
+                if (
+                    key == 'storageClassName'
+                    and expected_value == ''
+                    and label.startswith('PersistentVolume/')
+                    and label.endswith(' spec')
+                ):
+                    continue
                 raise WorkloadBundleError(f'{label} is missing {key}.')
             _require_expected_subset(
                 actual[key],
@@ -1647,6 +1691,10 @@ def parse_workload_attestation(
             raise WorkloadBundleError(
                 f'Deployment {name} unexpectedly constrains benchmark resources.'
             )
+        if containers[0].get('envFrom') not in (None, []):
+            raise WorkloadBundleError(
+                f'Deployment {name} contains an unapproved environment source.'
+            )
         if template_spec.get('initContainers') not in (None, []):
             raise WorkloadBundleError(
                 f'Deployment {name} contains an unapproved init container.'
@@ -1670,6 +1718,27 @@ def parse_workload_attestation(
     for name in MONGODB_COMPONENTS:
         pv = by_kind['PersistentVolume'][f'dsb-{name}']
         pvc = by_kind['PersistentVolumeClaim'][name]
+        for kind, resource in (
+            ('PersistentVolume', pv),
+            ('PersistentVolumeClaim', pvc),
+        ):
+            metadata = _mapping(
+                resource.get('metadata'),
+                f'{kind} {name} metadata',
+            )
+            annotations_value = metadata.get('annotations')
+            annotations = (
+                {}
+                if annotations_value is None
+                else _mapping(
+                    annotations_value,
+                    f'{kind} {name} annotations',
+                )
+            )
+            if LEGACY_STORAGE_CLASS_ANNOTATION in annotations:
+                raise WorkloadBundleError(
+                    f'{kind} {name} has a legacy storage-class annotation.'
+                )
         if pv.get('status', {}).get('phase') != 'Bound':
             raise WorkloadBundleError(f'PersistentVolume dsb-{name} is not Bound.')
         if pvc.get('status', {}).get('phase') != 'Bound':
@@ -1728,6 +1797,10 @@ def parse_workload_attestation(
         if pod_containers[0].get('resources', {}) not in ({}, None):
             raise WorkloadBundleError(
                 f'Pod for {component} unexpectedly constrains benchmark resources.'
+            )
+        if pod_containers[0].get('envFrom') not in (None, []):
+            raise WorkloadBundleError(
+                f'Pod for {component} contains an unapproved environment source.'
             )
         if spec.get('initContainers') not in (None, []):
             raise WorkloadBundleError(

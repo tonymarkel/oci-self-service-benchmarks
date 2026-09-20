@@ -39,7 +39,7 @@ def candidate_plan():
             'warmup_seconds': 30,
             'duration_seconds': 60,
             'threads': 4,
-            'connections': 64,
+            'connections': 4,
             'request_rate': 100,
         },
     }
@@ -144,7 +144,7 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
             warmup_seconds=30,
             duration_seconds=60,
             threads=4,
-            connections=64,
+            connections=4,
             request_rate=100,
         )
 
@@ -1108,6 +1108,18 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
                 '--image-lock', 'lock.json', '--measure',
                 '--interrupt-at', 'not-a-checkpoint',
             ))
+
+    def test_cli_defaults_match_the_live_qualified_load_contract(self):
+        args = qualification._parser().parse_args((
+            '--image-lock', 'lock.json',
+            '--measure',
+        ))
+
+        self.assertEqual(args.warmup_seconds, 30)
+        self.assertEqual(args.duration_seconds, 60)
+        self.assertEqual(args.threads, 4)
+        self.assertEqual(args.connections, 4)
+        self.assertEqual(args.request_rate, 100)
 
     def test_interruption_artifact_is_bounded_canonical_and_strictly_reloaded(self):
         job = self.job()

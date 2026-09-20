@@ -114,7 +114,11 @@ WORKLOAD_OPTION_DEFAULTS = {
     'warmup_seconds': 30,
     'duration_seconds': 60,
     'threads': 4,
-    'connections': 64,
+    # Keep the operator harness on the exact live-qualified load contract.
+    # The benchmark application's general UI default is intentionally
+    # independent; 64 connections at only 100 requests/second causes wrk2 to
+    # report timeout events even when the service completes the requests.
+    'connections': 4,
     'request_rate': 100,
 }
 SAFE_MEASUREMENT_RESUME_STATES = frozenset({

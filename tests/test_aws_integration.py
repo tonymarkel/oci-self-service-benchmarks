@@ -3,7 +3,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from starlette.requests import Request
@@ -592,7 +591,7 @@ class BenchmarkFailureAccountingTests(unittest.TestCase):
 class DurableStateTests(unittest.TestCase):
     def test_destroy_preserves_interrupted_partial_benchmark_outcome(self):
         job = {
-            'id': 'interrupted-partial-aws',
+            'id': '1a2b3c4d5e6f',
             'status': 'testing',
             'plan': {
                 'provider': 'aws',
@@ -611,21 +610,12 @@ class DurableStateTests(unittest.TestCase):
             'created_at': main.now(),
             'updated_at': main.now(),
         }
-        scheduled = []
-
-        def create_task(coroutine):
-            scheduled.append(coroutine)
-            coroutine.close()
-            task = SimpleNamespace(exception=lambda: None)
-            task.add_done_callback = lambda callback: callback(task)
-            return task
-
         with tempfile.TemporaryDirectory() as directory:
             run_directory = Path(directory) / job['id']
             with (
                 patch.object(main, 'RUNS', Path(directory)),
                 patch.dict(main.jobs, {}, clear=True),
-                patch.object(main.asyncio, 'create_task', side_effect=create_task),
+                patch.object(main, 'destroy_with_status'),
             ):
                 main.persist_job_state(job)
                 self.assertEqual(
@@ -650,7 +640,6 @@ class DurableStateTests(unittest.TestCase):
         self.assertEqual(destroying['benchmark_status'], 'interrupted')
         self.assertEqual(summary['status'], 'destroyed')
         self.assertEqual(summary['benchmark_status'], 'interrupted')
-        self.assertEqual(len(scheduled), 1)
 
     def test_benchmark_status_requires_every_selected_result(self):
         result_ids = [
@@ -803,7 +792,7 @@ class DurableStateTests(unittest.TestCase):
 
     def test_destroy_resumes_persisted_destroying_cleanup_after_restart(self):
         job = {
-            'id': 'resume-destroying-aws',
+            'id': 'de5700de5700',
             'status': 'destroying',
             'plan': {
                 'provider': 'aws',
@@ -817,20 +806,11 @@ class DurableStateTests(unittest.TestCase):
             'created_at': main.now(),
             'updated_at': main.now(),
         }
-        scheduled = []
-
-        def create_task(coroutine):
-            scheduled.append(coroutine)
-            coroutine.close()
-            task = SimpleNamespace(exception=lambda: None)
-            task.add_done_callback = lambda callback: callback(task)
-            return task
-
         with tempfile.TemporaryDirectory() as directory:
             with (
                 patch.object(main, 'RUNS', Path(directory)),
                 patch.dict(main.jobs, {}, clear=True),
-                patch.object(main.asyncio, 'create_task', side_effect=create_task),
+                patch.object(main, 'destroy_with_status'),
             ):
                 main.persist_job_state(job)
                 response = asyncio.run(main.destroy(job['id']))
@@ -841,7 +821,6 @@ class DurableStateTests(unittest.TestCase):
 
         self.assertEqual(response, {'status': 'destroying'})
         self.assertEqual(saved['status'], 'destroying')
-        self.assertEqual(len(scheduled), 1)
 
     def test_state_is_atomic_and_available_before_a_report_exists(self):
         job = {

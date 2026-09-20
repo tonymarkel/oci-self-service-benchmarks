@@ -106,6 +106,12 @@ from .resource_inventory import (
     ResourceInventoryError,
     load_role_node_inventory,
 )
+from .run_lease import (
+    RunLeaseError,
+    RunLeaseHeldError,
+    acquire_run_lease,
+    inspect_run_lease,
+)
 from .phoronix import (
     PREPARE_TIMEOUT_SECONDS as PHORONIX_PREPARE_TIMEOUT_SECONDS,
     parse_result_output as parse_phoronix_result,
@@ -1098,6 +1104,28 @@ def read_json_file(path, default):
         return default
 
 
+def run_lease_ownership_state(runs_root, job_id):
+    """Return ``held``, ``unheld``, or ``unknown`` for a persisted run."""
+    if not RUN_ID_PATTERN.fullmatch(str(job_id)):
+        # Legacy/unit-test artifacts with noncanonical names cannot be owned
+        # by the shared run-lease protocol. Preserve their prior behavior.
+        return 'unheld'
+    try:
+        return (
+            'held'
+            if inspect_run_lease(runs_root, str(job_id)).held
+            else 'unheld'
+        )
+    except RunLeaseError:
+        # A malformed, inaccessible, or otherwise ambiguous lease is never
+        # proof that a persisted run is abandoned.
+        return 'unknown'
+
+
+def run_lease_is_definitively_unheld(runs_root, job_id):
+    return run_lease_ownership_state(runs_root, job_id) == 'unheld'
+
+
 def run_summary(directory):
     report_path = directory / 'report.html'
     state_path = directory / 'state.json'
@@ -1106,6 +1134,7 @@ def run_summary(directory):
     state = read_json_file(state_path, {})
     plan = read_json_file(directory / 'plan.json', {})
     results_document = None
+    ownership_state = None
     if results_path.exists():
         try:
             results_document = load_results_document(directory)
@@ -1136,16 +1165,13 @@ def run_summary(directory):
             # infrastructure lifecycle.
             benchmark_outcome = 'failed'
         status = state.get('status', 'reported')
-        if status in {
-            'queued',
-            'provisioning',
-            'testing',
-            'reporting',
-            'cancelling',
-            'cleanup_pending',
-            'destroying',
-        }:
-            status = 'interrupted'
+        if status in ACTIVE_RUN_STATUSES:
+            ownership_state = run_lease_ownership_state(
+                directory.parent,
+                directory.name,
+            )
+            if ownership_state == 'unheld':
+                status = 'interrupted'
         created_at = state.get('created_at') or next(
             (
                 item.get('at')
@@ -1268,6 +1294,7 @@ def run_summary(directory):
         'benchmark_status': benchmark_outcome,
         'report_ready': report_ready,
         'recoverable': recoverable,
+        'ownership_unknown': ownership_state == 'unknown',
         'region': plan.get('region'),
         'gcp_project_id': plan.get('gcp_project_id'),
         'gcp_zone': plan.get('gcp_zone'),
@@ -1317,9 +1344,19 @@ def saved_run_directories():
     return sorted(directories, key=lambda item: item.name)
 
 
-def saved_run_can_be_deleted(directory):
-    """Fail closed unless a saved run is finalized and locally disposable."""
+def saved_run_can_be_deleted(directory, *, lease_held=False):
+    """Observe whether a saved run is finalized and locally disposable.
+
+    This observation does not authorize deletion unless ``lease_held`` is
+    true. Callers that mutate history must acquire the run lease first and
+    keep it through removal.
+    """
     job_id = directory.name
+    if (
+        not lease_held
+        and not run_lease_is_definitively_unheld(directory.parent, job_id)
+    ):
+        return False
     task = job_tasks.get(job_id)
     if task is not None:
         try:
@@ -1454,18 +1491,40 @@ def clear_saved_runs(confirmation: ClearSavedRunsRequest):
     preserved_run_ids = []
     for directory in saved_run_directories():
         job_id = directory.name
-        if not saved_run_can_be_deleted(directory):
-            preserved_run_ids.append(job_id)
-            continue
         try:
-            shutil.rmtree(directory)
-        except OSError:
-            # A partial filesystem failure must never be reported as a
-            # successful deletion or discard the matching in-memory state.
+            deletion_lease = acquire_run_lease(
+                RUNS,
+                job_id,
+                'history-delete',
+            )
+        except (RunLeaseError, ValueError):
             preserved_run_ids.append(job_id)
             continue
-        forget_deleted_run(job_id)
-        deleted_run_ids.append(job_id)
+        quarantine = RUNS / f'.deleting-{job_id}-{uuid.uuid4().hex}'
+        try:
+            # Re-read all local lifecycle guards while ownership is held.
+            if not saved_run_can_be_deleted(directory, lease_held=True):
+                preserved_run_ids.append(job_id)
+                continue
+            try:
+                # Rename first so unlinking the locked lease inode cannot let
+                # another process create a second lease for the same visible
+                # run directory while recursive removal is in progress.
+                directory.rename(quarantine)
+                shutil.rmtree(quarantine)
+            except OSError:
+                # Never restore a quarantine after recursive deletion began:
+                # rmtree may already have unlinked the held lock inode, and a
+                # restored canonical directory could then admit a second lock
+                # owner. Hidden remnants are retained for operator recovery.
+                if not directory.exists():
+                    forget_deleted_run(job_id)
+                preserved_run_ids.append(job_id)
+                continue
+            forget_deleted_run(job_id)
+            deleted_run_ids.append(job_id)
+        finally:
+            deletion_lease.release()
 
     preserved_run_ids.sort()
     return JSONResponse(
@@ -1838,14 +1897,32 @@ async def create_job(plan: BenchmarkPlan):
     }
     run_directory = RUNS / job_id
     run_directory.mkdir(parents=True, exist_ok=False)
-    (run_directory / 'plan.json').write_text(json.dumps(sanitized_plan, indent=2))
-    jobs[job_id] = job
-    event(
-        job,
-        'Queued',
-        f'Plan accepted. Waiting to provision {adapter.short_name} resources.',
-    )
-    task = asyncio.create_task(run_job(job, plan))
+    try:
+        run_lease = acquire_run_lease(RUNS, job_id, 'web-run')
+    except (RunLeaseError, ValueError) as exc:
+        raise HTTPException(
+            500,
+            'Unable to establish exclusive ownership for the new run.',
+        ) from exc
+    try:
+        (run_directory / 'plan.json').write_text(
+            json.dumps(sanitized_plan, indent=2)
+        )
+        jobs[job_id] = job
+        event(
+            job,
+            'Queued',
+            f'Plan accepted. Waiting to provision {adapter.short_name} resources.',
+        )
+        task = asyncio.create_task(run_job(job, plan, run_lease=run_lease))
+    except BaseException:
+        jobs.pop(job_id, None)
+        run_lease.release()
+        raise
+    # A task cancelled before its coroutine executes cannot enter run_job's
+    # finally block. The callback is the never-started fallback; normal and
+    # in-flight cancellation releases are idempotent and thread-safe.
+    task.add_done_callback(lambda _completed: run_lease.release())
     retain_job_task(job_id, task, cancel_event=job['_cancel_event'])
     return {'id': job_id}
 
@@ -1878,20 +1955,22 @@ def job_status(job_id: str):
             safe['report_ready'] = report_path.exists()
             safe['live'] = False
             safe['recoverable'] = has_recoverable_resources(safe)
-            if safe.get('status') in {
-                'queued',
-                'provisioning',
-                'testing',
-                'reporting',
-                'cancelling',
-                'cleanup_pending',
-                'destroying',
-            }:
-                safe['status'] = 'interrupted'
-                safe['error'] = (
-                    'The local app stopped before this lifecycle completed. '
-                    'Its recorded resources can still be destroyed.'
-                )
+            safe['ownership_unknown'] = False
+            if safe.get('status') in ACTIVE_RUN_STATUSES:
+                ownership_state = run_lease_ownership_state(RUNS, job_id)
+                if ownership_state == 'unheld':
+                    safe['status'] = 'interrupted'
+                    safe['error'] = (
+                        'The local app stopped before this lifecycle completed. '
+                        'Its recorded resources can still be destroyed.'
+                    )
+                elif ownership_state == 'unknown':
+                    safe['ownership_unknown'] = True
+                    safe['ownership_message'] = (
+                        'Run ownership could not be verified. Cleanup and '
+                        'history deletion remain disabled until the local '
+                        'lease files are repaired.'
+                    )
             return safe
         if report_path.exists():
             return {
@@ -2046,14 +2125,11 @@ def comparisons(runs: str | None = None):
 
 @app.post('/api/jobs/{job_id}/destroy')
 async def destroy(job_id: str):
+    if not RUN_ID_PATTERN.fullmatch(job_id):
+        raise HTTPException(404, 'Job not found')
     job = jobs.get(job_id)
     live_job = job is not None
-    if not job:
-        job = load_persisted_job(job_id)
-        if job:
-            jobs[job_id] = job
-    if not job: raise HTTPException(404, 'Job not found')
-    if job['status'] == 'destroyed':
+    if job is not None and job['status'] == 'destroyed':
         return {'status': job['status']}
     supervisor = job_tasks.get(job_id)
     supervisor_active = bool(supervisor and not supervisor.done())
@@ -2100,12 +2176,61 @@ async def destroy(job_id: str):
         await asyncio.shield(supervisor)
         if job['status'] == 'destroyed':
             return {'status': job['status']}
-    if live_job and job['status'] == 'destroying':
+
+    # Every manual cleanup without an active in-memory supervisor is a
+    # persisted cleanup. This includes retries of jobs that this process
+    # recovered earlier: treating those objects as ordinary live jobs would
+    # let a retry bypass ownership after the first cleanup task completed.
+    job = load_persisted_job(job_id)
+    if job is None and live_job:
+        # Normal API jobs persist before they can reach this path. Keep the
+        # in-memory fallback recoverable if an older/test producer omitted its
+        # initial state write, then continue through the same leased path.
+        in_memory_job = jobs.get(job_id)
+        if in_memory_job is not None:
+            persist_job_state(in_memory_job)
+            job = load_persisted_job(job_id)
+    if not job:
+        raise HTTPException(404, 'Job not found')
+    if job['status'] == 'destroyed':
         return {'status': job['status']}
+    try:
+        cleanup_lease = acquire_run_lease(
+            RUNS,
+            job_id,
+            'api-destroy',
+        )
+    except RunLeaseHeldError as exc:
+        raise HTTPException(
+            409,
+            'This run is active in another benchmark process. Wait for '
+            'that operation to finish before destroying infrastructure.',
+        ) from exc
+    except RunLeaseError as exc:
+        raise HTTPException(
+            409,
+            'Run ownership could not be established safely, so no cleanup '
+            'was started.',
+        ) from exc
+    try:
+        # State may have changed between the initial existence check and lease
+        # acquisition. Only the fresh lease-protected manifest can authorize
+        # mutation or enter the in-memory registry.
+        job = load_persisted_job(job_id)
+        if not job:
+            raise HTTPException(404, 'Job not found')
+        if job['status'] == 'destroyed':
+            cleanup_lease.release()
+            return {'status': job['status']}
+        jobs[job_id] = job
+    except BaseException:
+        if not cleanup_lease.released:
+            cleanup_lease.release()
+        raise
+
     persisted_status = job.get('status')
     if (
-        not live_job
-        and persisted_status in {
+        persisted_status in {
             'queued',
             'provisioning',
             'testing',
@@ -2123,12 +2248,76 @@ async def destroy(job_id: str):
     # cannot enqueue another cleanup task, then resume from the exact recorded
     # provider resource manifest.
     job['status'] = 'destroying'
-    persist_job_state(job)
-    cleanup_task = asyncio.create_task(
-        asyncio.to_thread(destroy_with_status, job)
-    )
+    try:
+        persist_job_state(job)
+    except BaseException:
+        if not cleanup_lease.released:
+            cleanup_lease.release()
+        raise
+
+    # Submit the thread before creating its awaiter. The worker, not the
+    # asyncio Task, owns release of the lease. If the waiter has started,
+    # ``shield`` delays its cancellation until the thread stops. If it is
+    # cancelled before its first step, the submitted worker still retains the
+    # lease, so another cleanup attempt fails closed until that worker exits.
+    loop = asyncio.get_running_loop()
+    try:
+        cleanup_future = loop.run_in_executor(
+            None,
+            destroy_with_status_under_lease,
+            job,
+            cleanup_lease,
+        )
+    except BaseException:
+        if not cleanup_lease.released:
+            cleanup_lease.release()
+        raise
+    # Once submission succeeds, only the worker may release ownership. Even a
+    # callback/task construction failure must not expose an unlocked run while
+    # that worker can still mutate cloud or persisted state.
+    cleanup_future.add_done_callback(consume_future_exception)
+    cleanup_waiter = wait_for_uncancellable_cleanup(cleanup_future)
+    try:
+        cleanup_task = asyncio.create_task(cleanup_waiter)
+    except BaseException:
+        # The already-submitted worker retains ownership and will release the
+        # lease in its own ``finally`` block.
+        cleanup_waiter.close()
+        raise
     retain_job_task(job_id, cleanup_task)
     return {'status': 'destroying'}
+
+
+async def wait_for_uncancellable_cleanup(cleanup_future):
+    """Delay waiter cancellation until its cleanup thread has really ended."""
+
+    cancellation = None
+    while True:
+        try:
+            result = await asyncio.shield(cleanup_future)
+            break
+        except asyncio.CancelledError as exc:
+            cancellation = cancellation or exc
+    if cancellation is not None:
+        raise cancellation
+    return result
+
+
+async def run_in_thread_uncancellable(function, *args):
+    """Run one lifecycle mutation without outliving its owning supervisor."""
+
+    loop = asyncio.get_running_loop()
+    worker = loop.run_in_executor(None, function, *args)
+    return await wait_for_uncancellable_cleanup(worker)
+
+
+def consume_future_exception(completed_future):
+    """Retrieve an orphaned executor failure after Task creation failed."""
+
+    try:
+        completed_future.exception()
+    except asyncio.CancelledError:
+        pass
 
 def normalize_private_key(private_key):
     return private_key.replace('\r\n', '\n').replace('\r', '\n').strip() + '\n'
@@ -2237,13 +2426,13 @@ async def finish_cancelled_job(job):
     )
     if job.get('results'):
         try:
-            await asyncio.to_thread(make_report, job)
+            await run_in_thread_uncancellable(make_report, job)
         except Exception as report_error:
             event(job, 'Report warning', str(report_error))
-    await asyncio.to_thread(destroy_with_status, job)
+    await run_in_thread_uncancellable(destroy_with_status, job)
 
 
-async def run_job(job, plan):
+async def run_job(job, plan, *, run_lease=None):
     try:
         raise_if_cancelled(job)
         adapter = provider_adapter(plan)
@@ -2253,14 +2442,14 @@ async def run_job(job, plan):
             'Provision',
             adapter.provisioning_message,
         )
-        await asyncio.to_thread(provision, job, plan)
+        await run_in_thread_uncancellable(provision, job, plan)
         raise_if_cancelled(job)
         job['status'] = 'testing'; event(job, 'Connect', 'Instance is ready; connecting with SSH.')
-        await asyncio.to_thread(run_benchmarks, job, plan)
+        await run_in_thread_uncancellable(run_benchmarks, job, plan)
         raise_if_cancelled(job)
         require_complete_benchmark_results(job)
         job['status'] = 'reporting'; event(job, 'Report', 'Generating standalone HTML report.')
-        await asyncio.to_thread(make_report, job)
+        await run_in_thread_uncancellable(make_report, job)
         raise_if_cancelled(job)
         if plan.destroy_after_completion:
             job['status'] = 'cleanup_pending'
@@ -2270,7 +2459,7 @@ async def run_job(job, plan):
                 'The report is ready; starting automatic infrastructure '
                 'cleanup.',
             )
-            await asyncio.to_thread(destroy_with_status, job)
+            await run_in_thread_uncancellable(destroy_with_status, job)
         else:
             job['status'] = 'complete'; event(job, 'Complete', 'Benchmarks and report are ready. Infrastructure has been retained.')
     except RunCancelled:
@@ -2308,12 +2497,12 @@ async def run_job(job, plan):
             )
         if job['results']:
             try:
-                await asyncio.to_thread(make_report, job)
+                await run_in_thread_uncancellable(make_report, job)
             except Exception as report_error:
                 event(job, 'Report warning', str(report_error))
         if plan.destroy_after_completion:
             try:
-                await asyncio.to_thread(destroy_with_status, job)
+                await run_in_thread_uncancellable(destroy_with_status, job)
             except Exception as cleanup:
                 event(job, 'Cleanup warning', str(cleanup))
         elif job['resources'].get('public_ip'):
@@ -2326,13 +2515,17 @@ async def run_job(job, plan):
                 f'{job["resources"]["public_ip"]}',
             )
     finally:
-        if cancellation_requested(job):
-            await finish_cancelled_job(job)
-        job.pop('_key', None)
-        job.pop('_passphrase', None)
-        job.pop('_public_key', None)
-        job.pop('_cancel_event', None)
-        persist_job_state(job)
+        try:
+            if cancellation_requested(job):
+                await finish_cancelled_job(job)
+            job.pop('_key', None)
+            job.pop('_passphrase', None)
+            job.pop('_public_key', None)
+            job.pop('_cancel_event', None)
+            persist_job_state(job)
+        finally:
+            if run_lease is not None:
+                run_lease.release()
 
 
 def latest_oracle_linux_image(compute, compartment_id, shape, require_ol9=False):
@@ -5009,6 +5202,8 @@ def run_azure_distributed_deathstarbench_candidate_measurement(
     job,
     plan,
     image_lock,
+    *,
+    qualification_checkpoint=None,
 ):
     """Internal one-shot measurement hook for the unreleased candidate.
 
@@ -5031,6 +5226,7 @@ def run_azure_distributed_deathstarbench_candidate_measurement(
         execute=ssh,
         emit=event,
         persist=persist_job_state,
+        qualification_checkpoint=qualification_checkpoint,
     )
 
 
@@ -5859,6 +6055,14 @@ def destroy_with_status(job):
         )
     finally:
         persist_job_state(job)
+
+
+def destroy_with_status_under_lease(job, lease):
+    """Keep exclusive persisted-run ownership through the entire cleanup."""
+    try:
+        destroy_with_status(job)
+    finally:
+        lease.release()
 
 
 def destroy_resources(job, preserve_status=False):

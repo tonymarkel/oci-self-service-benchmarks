@@ -10,6 +10,12 @@ from pydantic import ValidationError
 
 from app import main
 from app.models import ClearSavedRunsRequest
+from app.run_lease import (
+    LEGACY_AZURE_QUALIFICATION_LOCK_FILENAME,
+    RUN_LEASE_FILENAME,
+    RunLeaseHeldError,
+    acquire_run_lease,
+)
 
 
 def saved_state(
@@ -252,17 +258,26 @@ class ClearSavedRunsTests(unittest.TestCase):
                 self.assertTrue(path.exists())
             self.assertTrue(symlink.is_symlink())
 
-    def test_filesystem_failure_is_preserved_and_keeps_memory_state(self):
+    def test_partial_delete_stays_quarantined_after_lock_inode_is_removed(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             directory, job = saved_state(root, 'aaaaaaaaaaaa', 'destroyed')
             main.jobs[job['id']] = job
+
+            def partial_delete(quarantine):
+                (quarantine / RUN_LEASE_FILENAME).unlink()
+                (
+                    quarantine
+                    / LEGACY_AZURE_QUALIFICATION_LOCK_FILENAME
+                ).unlink()
+                raise PermissionError('read only')
+
             with (
                 patch.object(main, 'RUNS', root),
                 patch.object(
                     main.shutil,
                     'rmtree',
-                    side_effect=PermissionError('read only'),
+                    side_effect=partial_delete,
                 ),
             ):
                 payload = response_json(main.clear_saved_runs(
@@ -274,8 +289,64 @@ class ClearSavedRunsTests(unittest.TestCase):
                 'preserved_count': 1,
                 'preserved_run_ids': ['aaaaaaaaaaaa'],
             })
+            self.assertFalse(directory.exists())
+            quarantines = list(root.glob('.deleting-aaaaaaaaaaaa-*'))
+            self.assertEqual(len(quarantines), 1)
+            self.assertTrue((quarantines[0] / 'state.json').is_file())
+            self.assertNotIn(job['id'], main.jobs)
+
+    def test_clear_acquires_lease_before_final_revalidation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory, _ = saved_state(root, 'aaaaaaaaaaaa', 'destroyed')
+            real_eligibility = main.saved_run_can_be_deleted
+            observed_conflict = []
+
+            def eligibility(path, *, lease_held=False):
+                if lease_held:
+                    with self.assertRaises(RunLeaseHeldError):
+                        acquire_run_lease(
+                            root,
+                            path.name,
+                            'qualification-cli',
+                        )
+                    observed_conflict.append(path.name)
+                return real_eligibility(path, lease_held=lease_held)
+
+            with (
+                patch.object(main, 'RUNS', root),
+                patch.object(
+                    main,
+                    'saved_run_can_be_deleted',
+                    side_effect=eligibility,
+                ),
+            ):
+                payload = response_json(main.clear_saved_runs(
+                    ClearSavedRunsRequest(confirmed=True)
+                ))
+
+            self.assertEqual(observed_conflict, ['aaaaaaaaaaaa'])
+            self.assertEqual(payload['deleted_count'], 1)
+            self.assertFalse(directory.exists())
+
+    def test_clear_preserves_run_owned_by_another_process(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory, _ = saved_state(root, 'aaaaaaaaaaaa', 'destroyed')
+            with (
+                patch.object(main, 'RUNS', root),
+                acquire_run_lease(root, 'aaaaaaaaaaaa', 'qualification-cli'),
+            ):
+                payload = response_json(main.clear_saved_runs(
+                    ClearSavedRunsRequest(confirmed=True)
+                ))
+
+            self.assertEqual(payload, {
+                'deleted_count': 0,
+                'preserved_count': 1,
+                'preserved_run_ids': ['aaaaaaaaaaaa'],
+            })
             self.assertTrue(directory.exists())
-            self.assertIn(job['id'], main.jobs)
 
 
 if __name__ == '__main__':

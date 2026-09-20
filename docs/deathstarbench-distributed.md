@@ -3,12 +3,15 @@
 Status: the foundation, Azure five-node infrastructure, internal four-node
 K3s bootstrap, deterministic Social Network deployment, candidate-image
 publication, deterministic Reed98 initialization, bounded warm-up, measured
-traffic, reporting, and exact Azure cleanup qualification are implemented.
+traffic, reporting, exact Azure cleanup, shared cross-process ownership, and
+failure-injection machinery are implemented. One safe pre-initialization Azure
+hard-exit/reacquisition/resume/cleanup path has also passed live qualification.
 `distributed_tiered_v1` is still unreleased for normal cloud provisioning.
 The UI does not offer it, and the normal API/provider path rejects it before
 creating a run or making a cloud write. Representative negative network
-probes, interruption and failure-path qualification at the new execution
-phases, and qualification on the other providers remain release gates.
+probes, live post-initialization cleanup-only and signal paths, immutable
+load-driver publication or equivalent qualification, and qualification on the
+other providers remain release gates.
 
 ## Benchmark modes
 
@@ -317,6 +320,51 @@ all 27 workload Pods. Cleanup removes the execution journal as cloud ownership
 state, while the completed result and report retain the safe comparison and
 qualification evidence.
 
+## Interruption and cross-process recovery
+
+Every normal web run, operator qualification run, persisted manual destroy,
+and history deletion now uses the same nonblocking per-run POSIX lease. The
+stable empty `.benchmark-run.lease` inode is paired with a canonical 0600
+`.benchmark-run.lease.owner` sidecar. Each owner also acquires the historical
+`.deathstarbench-azure-qualification.lock` first as a migration guard, so an
+older qualifier and a current process cannot split ownership during rollout.
+The normal supervisor retains its lease through final persistence and cleanup,
+including any mutating worker thread that outlives asyncio cancellation.
+Persisted destroy reloads state after taking the lease. History deletion
+revalidates under the lease, atomically moves the visible run directory to a
+hidden quarantine name, and only then removes it. Held or ambiguous ownership
+fails closed; an active persisted run is classified as interrupted only when
+its lease is definitively unheld.
+
+The operator harness supports failure injection at `load_generator_ready`,
+`initialization_started`, `warmup_started`, and `measurement_started`. A
+checkpoint callback runs only after the named execution-journal state has been
+durably persisted and before the next remote operation. A `started` checkpoint
+therefore identifies a replay boundary; it does not by itself prove that an
+already-running remote process was killed. Graceful injection raises the same
+cooperative cancellation used by the application and attempts cleanup. Hard
+injection first atomically writes `qualification-interruption.json`, then exits
+the process with status 86 without cleanup. SIGINT and SIGTERM interrupt
+synchronous Azure waits; evidence is then recorded during normal unwinding,
+including a separate immutable record of the first later signal that arrives
+during recovery or cleanup.
+
+The interruption artifact preserves its origin immutably: job, source,
+checkpoint or signal, mode, durable execution state, replay decision, and
+timestamp cannot be replaced. Cleanup and recovery outcomes may advance, and
+the first subsequent signal has its own immutable fields. A recovery with
+existing evidence cannot inject a second checkpoint. Only an absent execution
+journal, `preparing_load_generator`, or `load_generator_ready` may resume.
+`initialization_started` and every later state require cleanup-only followed by
+fresh infrastructure because partial database mutation is not safely
+distinguishable from the requested dataset. Damaged retained evidence never
+blocks cloud cleanup, but it keeps the qualification exit nonzero.
+
+Synthetic coverage exercises every checkpoint and replay decision, both
+injection modes, real subprocess exit-86 and fresh-process reacquisition,
+SIGINT/SIGTERM during blocked waits, historical/current lock exclusion, and
+the normal web-run, destroy, and history-deletion ownership races.
+
 ## Azure live qualification evidence
 
 The first exact `workload_ready` qualification completed on 2026-09-18. This
@@ -426,11 +474,61 @@ The first complete measured qualification also passed on 2026-09-18:
   lookup returned `false`; those two observations are external evidence rather
   than fields retained in the final artifacts.
 
-The release and UI gates remain closed. Positive Azure deployment and
-measurement do not replace representative forbidden-path probes, live
-interruption/recovery exercises at the new phases, publication or equivalent
-qualification of an immutable load-driver artifact, or the same qualification
-on AWS, GCP, and OCI.
+The first complete safe-replay qualification passed on 2026-09-20:
+
+- Job `f6131578cb93` ran failure-gate implementation commit
+  `94ed686cec728cb95f0cad678637f805641c13f9`, including the shared-lease base
+  from `b470c5b4f968ca5ce0d33279ed5df649d74e619f`. This remains operator/external
+  source association because the retained result does not yet embed Git
+  revision and dirty-tree identity.
+- The first process used the qualifier's no-override workload contract: a
+  30-second warm-up, 60-second measurement, four threads, four connections,
+  and 100 requests/second. It durably reached `load_generator_ready`, wrote
+  immutable hard-interruption evidence at
+  `2026-09-20T21:45:48.145104+00:00`, then exited with status 86 without
+  cleanup. The evidence recorded `resume_allowed`. A fresh recovery process
+  acquired both the current and migration-guard locks before making its first
+  recovered cloud operation.
+- Recovery reused and re-attested the original resource group, five role
+  identities, K3s cluster, database disk, and Social Network workload. It ran
+  one Reed98 initializer, proved 962 users, 37,624 follows, and 9,424 posts,
+  and reached `measurement_complete`. The retained pre/post-measurement
+  attestation showed all 27 Pod identities unchanged with zero restarts.
+- Warm-up completed 2,999 requests with one sent request recorded as
+  uncompleted at the fixed cutoff, 99.966667 percent completion, and zero HTTP,
+  socket, connect, read, write, or timeout errors. Measurement completed all
+  5,994 sent requests in 60.004685 seconds at 99.8922 requests/second, with
+  p50/p95/p99 latencies of 5.891/24.639/36.799 ms and the same all-zero error
+  counters.
+- `results.json` and `report.html` were generated. Comparison retained the
+  known contract fingerprint
+  `ef61988d881204d765e8ffe698f2f88d880b83f19534f4ede3b7b3ad17bb3898`;
+  measurement evidence and normalized metrics hashes were
+  `sha256:b36dbfa502a74c10e6ebaf62f8fa5d9c4d768b064f1bcb072d99a22b2f16b8df`
+  and
+  `sha256:46d8e29c2151746f2488eec945a26ff77e4f70ca9561e6ad39681c2d230c0b3f`.
+- Retained evidence finalized as `recovery_outcome: resume_completed` and
+  `cleanup_outcome: completed`. State finalized `destroyed` with no error or
+  recoverable ownership, the lease was unheld, and an independent Azure lookup
+  confirmed resource group `benchmark-f6131578cb93` was absent.
+
+This qualification proves crash-boundary persistence, cross-process
+reacquisition, safe pre-initialization replay, strict result acceptance, and
+exact cleanup. It does not claim that a remote process was killed after a
+`started` checkpoint. Two earlier attempts supplied additional negative-path
+evidence without being accepted as successful qualifications: job
+`f94788204d1c` used a stale 64-connection harness default and was correctly
+rejected for wrk2 timeout events, which led to the default being aligned with
+the already-qualified four-connection contract; job `3234bc8ac487` then hit an
+independent SSH transport timeout during the measured wrk2 command, after
+initialization and warm-up. Both attempts failed closed, released their leases,
+completed cleanup, and had absent resource groups afterward.
+
+The release and UI gates remain closed. Positive Azure deployment,
+measurement, and safe pre-initialization recovery do not replace representative
+forbidden-path probes, live post-initialization cleanup-only and signal paths,
+publication or equivalent qualification of an immutable load-driver artifact,
+or the same qualification on AWS, GCP, and OCI.
 
 ## Network and access policy
 
@@ -500,9 +598,10 @@ group.
    implemented; the other providers remain.
 3. **In progress:** exercise an unreleased five-node lifecycle on Azure first,
    using its run-owned resource group as the cleanup boundary, then qualify the
-   same lifecycle on every provider. Azure synthetic coverage and the positive
-   live deployment and measurement qualifications are complete; the other
-   providers and additional live failure paths remain.
+   same lifecycle on every provider. Azure synthetic coverage, positive live
+   deployment and measurement, and the safe pre-initialization hard-exit,
+   reacquisition, resume, and cleanup path are complete; the other providers
+   and additional live failure paths remain.
 4. **Implemented for the Azure candidate:** the internal K3s bootstrap, OS
    preparation, exact database mount, secure node joining, and cluster
    placement attestation are covered synthetically and passed live
@@ -521,13 +620,17 @@ group.
    deterministic Reed98 initialization, durable at-most-once dispatch and
    reconciliation, exact database cardinality checks, bounded warm-up and
    measurement from the dedicated x86 load generator, result/report
-   generation, comparison fingerprinting, and cleanup. The two post-run
-   ownership/identity hardenings have focused synthetic coverage but still
-   require live failure-path qualification. Initialization is not resumable
-   after partial dataset mutation: an interrupted initialization fails closed
-   and requires fresh infrastructure rather than continuing from an unknown
-   database state. Representative live failure and interruption paths remain
-   release gates.
+   generation, comparison fingerprinting, and cleanup. Shared run ownership,
+   all four checkpoint/replay decisions, hard and graceful injection, and
+   signal unwinding have synthetic coverage. Live job `f6131578cb93` also
+   passed the safe `load_generator_ready` hard-exit, cross-process resume,
+   strict measurement, report, and cleanup path. The two post-run
+   ownership/identity hardenings, post-initialization cleanup-only behavior,
+   and signal paths still require live failure-path qualification.
+   Initialization is not resumable after partial dataset mutation: an
+   interrupted initialization fails closed and requires fresh infrastructure
+   rather than continuing from an unknown database state. Those remaining
+   representative paths remain release gates.
 7. **Planned:** equivalent deployment and qualification on the other three
    providers.
 8. **Planned:** per-role CPU, memory, network, disk, restart, and readiness

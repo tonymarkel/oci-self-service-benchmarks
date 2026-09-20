@@ -2,12 +2,13 @@
 
 Status: the foundation, Azure five-node infrastructure, internal four-node
 K3s bootstrap, deterministic Social Network deployment, candidate-image
-publication, and exact Azure `workload_ready` qualification are implemented.
+publication, deterministic Reed98 initialization, bounded warm-up, measured
+traffic, reporting, and exact Azure cleanup qualification are implemented.
 `distributed_tiered_v1` is still unreleased for normal cloud provisioning.
 The UI does not offer it, and the normal API/provider path rejects it before
-creating a run or making a cloud write. Dataset initialization, benchmark
-traffic, representative negative network probes, and qualification on the
-other providers remain release gates.
+creating a run or making a cloud write. Representative negative network
+probes, interruption and failure-path qualification at the new execution
+phases, and qualification on the other providers remain release gates.
 
 ## Benchmark modes
 
@@ -39,6 +40,17 @@ Every result records:
 - DeathStarBench upstream revision;
 - workload, warm-up, duration, threads, connections, and offered rate; and
 - provider-observed hardware and storage as provenance.
+
+The measured Azure candidate additionally pins dataset revision
+`social-network-socfb-reed98-compose-seed1-v1`, load-driver revision
+`wrk2-6ecb097-native-v1`, and measurement revision
+`social-network-distributed-measurement-v1`. It records the exact hashes of
+the source graph, patched initializer, request script, built load-driver
+binary, compiler version, rendered workload, pod execution identity, raw
+output, and normalized metrics. Distributed comparison fails closed unless
+all workload, image-lock, rendered-manifest, dataset, driver, measurement,
+initializer, graph-input, and request-script identities are present and
+valid; a changed identity creates a separate comparison cohort.
 
 The distributed runtime uses an exact K3s release. It must never resolve the
 moving `stable` or `latest` channels during a run. A runtime cannot be marked
@@ -268,6 +280,43 @@ were anonymously resolvable for the Azure qualification. Publication and
 public pulls are qualification evidence, not permission to open the UI release
 gate.
 
+## Internal dataset and measurement candidate
+
+The Azure candidate has a separate operator-only execution hook outside the
+normal run path. Its cleanup-owned journal advances monotonically through
+`preparing_load_generator`, `load_generator_ready`,
+`initialization_started`, `dataset_ready`, `warmup_started`,
+`warmup_complete`, `measurement_started`, and `measurement_complete`.
+Before initialization it requires an exact HTTP 200 GET response with the
+empty JSON object `{}` from the user-timeline endpoint and proves that every
+relevant MongoDB collection is empty. The GET probe cannot mutate the
+workload.
+
+Initialization uses the pinned Reed98 graph and deterministic seed-one
+Social Network initializer. A root-owned transient systemd oneshot on the
+load generator claims the run exactly once, executes the payload as the
+unprivileged `benchmark` user, bounds its runtime, and atomically finalizes a
+size-limited transcript. Every loaded-unit status observation verifies the
+root-owned initializer script SHA-256, systemd service user, and exact
+ExecStart argv; terminal observations additionally require an invocation
+identity and monotonic timestamps. An ambiguous SSH response is reconciled
+against that durable identity without dispatching the initializer again. Only
+pre-initialization journal states are safely resumable; any interruption at
+`initialization_started` or later requires cleanup and fresh infrastructure
+because partially mutated databases cannot be distinguished from the
+requested dataset.
+
+After initialization, independent MongoDB queries require the exact Reed98
+cardinalities. The fixed x86 load generator then builds the pinned wrk2
+revision, performs a bounded warm-up, and performs one bounded measured run
+over the private endpoint. Transport retries are disabled for non-idempotent
+execution boundaries. The result retains workload and input identities,
+warm-up and measured counters, latency and throughput, process resource
+observations, raw-output and metrics hashes, and exact pre/post identities for
+all 27 workload Pods. Cleanup removes the execution journal as cloud ownership
+state, while the completed result and report retain the safe comparison and
+qualification evidence.
+
 ## Azure live qualification evidence
 
 The first exact `workload_ready` qualification completed on 2026-09-18. This
@@ -299,10 +348,89 @@ is deployment evidence, not a benchmark result.
   `destroyed` state with no recoverable ownership keys, and an independent
   Azure resource-group lookup returned `false`.
 
-The release and UI gates remain closed. A single positive Azure deployment
-does not replace representative forbidden-path probes, dataset and load-driver
-qualification, interruption/recovery exercises at the new phases, or the same
-qualification on AWS, GCP, and OCI.
+The first complete measured qualification also passed on 2026-09-18:
+
+- The operator qualification record associates job `73213d3a298b` with branch
+  `codex/azure-dsb-dataset-load`; the reviewed slice is frozen at implementation
+  commit `aab1d81649b2a3fc7d1963f9c36ca2ac806df84d`. This source association is
+  external provenance because the retained result does not yet embed Git
+  revision and dirty-tree identity. The live run preceded two review-driven
+  fail-closed checks—live VM ownership before deallocation and exact installed
+  initializer/unit identity during ambiguous reconciliation—which are included
+  in that commit and covered by focused synthetic tests.
+- The run used Azure `eastus2`, zone 1. Control, cache, and load generator used
+  `Standard_D2as_v7`; database used `Standard_D4as_v7` plus the contracted
+  disk; and the Arm application role used `Standard_D8ps_v6` with 8 vCPUs and
+  32 GiB. Warm-up was 30 seconds and measurement was 60 seconds, both with
+  four threads, four connections, and an offered rate of 100 requests/second.
+- Workload provenance bound upstream revision
+  `6ecb09706140f8730b5385c08f1386c654c3c526`, image-lock fingerprint
+  `sha256:e5435057d7813e563f6c4f40e7d877660326d83a87ce1df805f9440e161487d4`,
+  manifest-source hash
+  `sha256:6d397ff6d633d627bb2ae115b6bb031e6db0715bdb13eb3885adce2f74151df6`,
+  rendered-manifest hash
+  `sha256:a2dfff62061af974a14688ffa698faa77b6b03995914293c0382d95da8615ef8`,
+  and topology hash
+  `sha256:b572496ed3a0e48bad17528dd5b89edaf1b2e9b682eb75988c197f00b3106583`.
+- Dataset inputs bound initializer-source SHA-256
+  `1b7dce9e14b82b3fb8b4ecdfe90b6fda9b7797da849840ca1a4521ef706e0482`,
+  patched-initializer SHA-256
+  `ff504a03311c1d6da4e5ba031b49ec824541fa78b898cda029a60e364edcadaf`,
+  Reed98 node SHA-256
+  `084917af148384c1e8396addcec2fca2a9f2c3918cad9676e12cdaad7dc7dfb2`,
+  and edge SHA-256
+  `ad6861fc9c27cfa77a865614454e5836988277a84889232acdb1fd1e0f557300`.
+  The pinned input contains 18,812 undirected edges. Independent
+  post-initialization database queries proved 962 users, 962 social-graph
+  users, 37,624 followers, 37,624 followees, 9,424 posts, 908 user-timeline
+  documents, and 9,424 timeline post references.
+- The durable initializer ran as unit
+  `benchmark-deathstarbench-init-73213d3a298b.service`, with invocation ID
+  `eef48e065be64b288eeebb401d7dc0e0`, payload SHA-256
+  `550ed626f9455d9ffc032a20876a18d528b52f94e045920e226c2e5b4db69080`,
+  and a 1,000-byte finalized transcript whose SHA-256 was
+  `877f8435b78df72b325f176beb3332519e31dedd64fdb6043c2421cd92d259a9`.
+- The load driver bound Lua request-script SHA-256
+  `ab2cd04b6cffb53beaf27efd8dfb5eae7dcd6c8abecbb70623fda93139b3dd32`,
+  wrk2-binary SHA-256
+  `f017e4e7a462b525c0b1fc5d23e883a6390f3ea09a9982d79e50a13f8c4bcd65`,
+  and compiler-version SHA-256
+  `798b37549d22cbbac6287c535cfc6dd1212f426ab26c45505cd64bdde58be27d`.
+- Warm-up completed 3,000 of 3,000 requests in 30.002117 seconds at
+  99.992944 requests/second, with p50/p95/p99 latencies of
+  4.295/13.783/20.879 ms and zero HTTP, socket, connect, read, write, timeout,
+  or incomplete-request errors. The measured interval completed and sent
+  5,994 of 5,994 successful requests in 60.005865 seconds at 99.890236
+  requests/second, with p50/p95/p99 latencies of 4.219/13.823/20.015 ms and
+  the same all-zero error counters.
+- The measured wrk2 process observed 9,344 KiB peak RSS, two logical CPUs,
+  and rounded CPU/capacity values of 0.0 percent with no capacity warning.
+  Zero is a valid integer-rounded observation at this offered load, not
+  missing telemetry. The warm-up observed 9,088 KiB peak RSS with the same
+  logical-CPU and rounded CPU/capacity values.
+- All 27 pre-measurement Pod identities were unchanged after measurement,
+  including UID, node, image ID, and zero restarts. The pod execution
+  attestation hash was
+  `sha256:0d147bcd1e81d2e3580785de12acf066001e4d62555e6bf75ea8f18e0d3445f9`;
+  measurement evidence, normalized metrics, and full-output hashes were
+  `sha256:7097ca018c07d84b4ee6c718ed64aedd854f2152d2038d89b6240b958a855c82`,
+  `sha256:b8555bf63b60a50f2415a5918c8afd0d52580e4a8af554bf98fe7448c0c0fba0`,
+  and
+  `sha256:2358a12e79bfd0a8e6886ddd8cc89fd5df48f993985adfd58e49cbde8cdd1fd1`.
+- Both `results.json` and `report.html` were generated, and comparison accepted
+  the result as known contract fingerprint
+  `ef61988d881204d765e8ffe698f2f88d880b83f19534f4ede3b7b3ad17bb3898`.
+  Retained state proves automatic cleanup reached `destroyed` and removed every
+  recoverable ownership key. The qualification console additionally observed
+  `measurement_complete` before cleanup and an independent Azure resource-group
+  lookup returned `false`; those two observations are external evidence rather
+  than fields retained in the final artifacts.
+
+The release and UI gates remain closed. Positive Azure deployment and
+measurement do not replace representative forbidden-path probes, live
+interruption/recovery exercises at the new phases, publication or equivalent
+qualification of an immutable load-driver artifact, or the same qualification
+on AWS, GCP, and OCI.
 
 ## Network and access policy
 
@@ -354,6 +482,15 @@ and a failure-injection test. A distributed topology remains unreleased until
 create, cancel, application restart, manual stop/destroy, and automatic cleanup
 are proven for AWS, GCP, Azure, and OCI.
 
+For an Azure execution journal, cleanup first reads the deterministic load
+generator through the Azure control plane and verifies its exact resource ID
+and run ownership tags. It then attempts a best-effort deallocation to reduce
+the risk of leaving measured traffic running when SSH is unavailable. The
+run-owned resource group remains the authoritative cleanup boundary: its
+complete top-level inventory is re-read and verified immediately before
+deletion, and an unexpected sibling still fails closed without deleting the
+group.
+
 ## Release sequence
 
 1. **Implemented:** versioned model, result fingerprint, immutable runtime
@@ -364,8 +501,8 @@ are proven for AWS, GCP, Azure, and OCI.
 3. **In progress:** exercise an unreleased five-node lifecycle on Azure first,
    using its run-owned resource group as the cleanup boundary, then qualify the
    same lifecycle on every provider. Azure synthetic coverage and the positive
-   live `workload_ready` qualification are complete; the other providers and
-   additional live failure paths remain.
+   live deployment and measurement qualifications are complete; the other
+   providers and additional live failure paths remain.
 4. **Implemented for the Azure candidate:** the internal K3s bootstrap, OS
    preparation, exact database mount, secure node joining, and cluster
    placement attestation are covered synthetically and passed live
@@ -378,13 +515,19 @@ are proven for AWS, GCP, Azure, and OCI.
    attestation are implemented with synthetic coverage. The manual GHCR image
    workflow published the candidate, the exact digest lock is checked in, and
    positive Azure qualification passed. Representative negative live network
-   probes, dataset/load qualification, and the other providers remain. The
-   release and UI gates stay closed.
-6. **Next:** deterministically initialize the Social Network dataset, warm up,
-   drive and measure load, and gather the first result. Initialization is not
-   resumable after partial dataset mutation: an interrupted initialization
-   must fail closed and use fresh infrastructure rather than continue from an
-   unknown database state.
+   probes and the other providers remain. The release and UI gates stay
+   closed.
+6. **Implemented for the Azure candidate, with the core path live-qualified:**
+   deterministic Reed98 initialization, durable at-most-once dispatch and
+   reconciliation, exact database cardinality checks, bounded warm-up and
+   measurement from the dedicated x86 load generator, result/report
+   generation, comparison fingerprinting, and cleanup. The two post-run
+   ownership/identity hardenings have focused synthetic coverage but still
+   require live failure-path qualification. Initialization is not resumable
+   after partial dataset mutation: an interrupted initialization fails closed
+   and requires fresh infrastructure rather than continuing from an unknown
+   database state. Representative live failure and interruption paths remain
+   release gates.
 7. **Planned:** equivalent deployment and qualification on the other three
    providers.
 8. **Planned:** per-role CPU, memory, network, disk, restart, and readiness
@@ -394,6 +537,6 @@ are proven for AWS, GCP, Azure, and OCI.
 10. **Planned:** advanced per-role shape selection and later topology
    revisions.
 
-The UI exposes only released profiles. Until workload measurement, remaining
-provider qualification, and all release cleanup gates pass, the existing
-compact mode remains the only runnable option.
+The UI exposes only released profiles. Until the remaining provider
+qualification and all network, interruption, and cleanup release gates pass,
+the existing compact mode remains the only runnable option.

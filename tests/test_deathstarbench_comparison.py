@@ -2,7 +2,12 @@ import unittest
 
 from app import comparison
 from app.deathstarbench_contract import (
+    DISTRIBUTED_DATASET_REVISION,
+    DISTRIBUTED_IMAGE_SET_REVISION,
+    DISTRIBUTED_LOAD_DRIVER_REVISION,
+    DISTRIBUTED_MEASUREMENT_REVISION,
     DISTRIBUTED_TIERED_PROFILE,
+    DISTRIBUTED_WORKLOAD_REVISION,
     SINGLE_HOST_PROFILE,
     runtime_profile,
 )
@@ -15,6 +20,20 @@ from app.models import (
 
 
 UPSTREAM_REVISION = '6ecb09706140f8730b5385c08f1386c654c3c526'
+IMAGE_LOCK_FINGERPRINT = 'sha256:' + ('1' * 64)
+RENDERED_MANIFEST_SHA256 = 'sha256:' + ('2' * 64)
+INITIALIZER_SHA256 = (
+    'ff504a03311c1d6da4e5ba031b49ec824541fa78b898cda029a60e364edcadaf'
+)
+DATASET_NODES_SHA256 = (
+    '084917af148384c1e8396addcec2fca2a9f2c3918cad9676e12cdaad7dc7dfb2'
+)
+DATASET_EDGES_SHA256 = (
+    'ad6861fc9c27cfa77a865614454e5836988277a84889232acdb1fd1e0f557300'
+)
+LOAD_SCRIPT_SHA256 = (
+    'ab2cd04b6cffb53beaf27efd8dfb5eae7dcd6c8abecbb70623fda93139b3dd32'
+)
 
 
 def plan(*, distributed=False):
@@ -50,6 +69,17 @@ def metadata(
     runtime_revision='v1.33.4+k3s1',
     topology_revision=None,
     service_placement_revision=None,
+    workload_revision=DISTRIBUTED_WORKLOAD_REVISION,
+    image_set_revision=DISTRIBUTED_IMAGE_SET_REVISION,
+    image_lock_fingerprint=IMAGE_LOCK_FINGERPRINT,
+    rendered_manifest_sha256=RENDERED_MANIFEST_SHA256,
+    dataset_revision=DISTRIBUTED_DATASET_REVISION,
+    load_driver_revision=DISTRIBUTED_LOAD_DRIVER_REVISION,
+    measurement_revision=DISTRIBUTED_MEASUREMENT_REVISION,
+    initializer_sha256=INITIALIZER_SHA256,
+    dataset_nodes_sha256=DATASET_NODES_SHA256,
+    dataset_edges_sha256=DATASET_EDGES_SHA256,
+    load_script_sha256=LOAD_SCRIPT_SHA256,
 ):
     profile = runtime_profile(topology_id, runtime_id)
     return {
@@ -63,10 +93,29 @@ def metadata(
         'service_placement_revision': (
             service_placement_revision or profile.placement_revision
         ),
+        'workload_revision': workload_revision,
+        'image_set_revision': image_set_revision,
+        'image_lock_fingerprint': image_lock_fingerprint,
+        'rendered_manifest_sha256': rendered_manifest_sha256,
+        'dataset_revision': dataset_revision,
+        'load_driver_revision': load_driver_revision,
+        'measurement_revision': measurement_revision,
+        'initializer_sha256': initializer_sha256,
+        'dataset_nodes_sha256': dataset_nodes_sha256,
+        'dataset_edges_sha256': dataset_edges_sha256,
+        'load_script_sha256': load_script_sha256,
     }
 
 
-def document(run_id, *, runtime_revision='v1.33.4+k3s1', value=10.0):
+def document(
+    run_id,
+    *,
+    runtime_revision='v1.33.4+k3s1',
+    value=10.0,
+    metadata_overrides=None,
+):
+    result_metadata = metadata(runtime_revision=runtime_revision)
+    result_metadata.update(metadata_overrides or {})
     return comparison.build_results_artifact({
         'id': run_id,
         'status': 'destroyed',
@@ -76,7 +125,7 @@ def document(run_id, *, runtime_revision='v1.33.4+k3s1', value=10.0):
             'id': 'deathstarbench',
             'name': 'DeathStarBench — Social Network',
             'status': 'completed',
-            'metadata': metadata(runtime_revision=runtime_revision),
+            'metadata': result_metadata,
             'metrics': {'p95_ms': value},
         }],
     })
@@ -343,6 +392,42 @@ class DeathStarBenchComparisonContractTests(unittest.TestCase):
             {item['run_id'] for item in payload['excluded']},
             {'run-a', 'run-b'},
         )
+
+    def test_different_distributed_execution_identities_do_not_compare(self):
+        cases = (
+            ('dataset_revision', 'social-network-other-dataset-v1'),
+            ('load_driver_revision', 'wrk2-other-driver-v1'),
+            ('image_set_revision', 'social-network-other-images-v1'),
+            ('image_lock_fingerprint', 'sha256:' + ('3' * 64)),
+            ('rendered_manifest_sha256', 'sha256:' + ('4' * 64)),
+        )
+
+        for field, changed_value in cases:
+            with self.subTest(field=field):
+                payload = comparison.build_comparison_payload([
+                    document('run-a', value=10.0),
+                    document(
+                        'run-b',
+                        value=12.0,
+                        metadata_overrides={field: changed_value},
+                    ),
+                ])
+
+                self.assertEqual(payload['charts'], [])
+                self.assertEqual(len(payload['mismatches']), 1)
+                self.assertEqual(
+                    {
+                        difference['path']
+                        for difference in payload['mismatches'][0][
+                            'differences'
+                        ]
+                    },
+                    {f'settings.{field}'},
+                )
+                self.assertEqual(
+                    {item['run_id'] for item in payload['excluded']},
+                    {'run-a', 'run-b'},
+                )
 
 
 if __name__ == '__main__':

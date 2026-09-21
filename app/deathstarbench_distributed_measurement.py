@@ -35,12 +35,14 @@ from .deathstarbench_contract import (
 from .deathstarbench_distributed import (
     RUNTIME_JOURNAL_KEY,
     WORKLOAD_JOURNAL_KEY,
-    AzureK3sCandidatePlan,
+    DistributedK3sCandidatePlan,
     DistributedRuntimeError,
     RuntimeHost,
     _validate_existing_journal,
     _validate_existing_workload_journal,
     azure_k3s_candidate_plan,
+    distributed_k3s_candidate_plan,
+    gcp_k3s_candidate_plan,
 )
 from .deathstarbench_k3s_workload import (
     EXPECTED_COMPONENTS,
@@ -1122,7 +1124,7 @@ def _validated_options(value: Any) -> DeathStarBenchOptions:
 
 
 def _journal_identity(
-    plan: AzureK3sCandidatePlan,
+    plan: DistributedK3sCandidatePlan,
     bundle: Any,
     options: DeathStarBenchOptions,
 ) -> dict[str, Any]:
@@ -1773,11 +1775,12 @@ def _run_durable_initializer(
         ))
 
 
-def run_azure_distributed_social_network_measurement(
+def _run_distributed_social_network_measurement(
     job: MutableMapping[str, Any],
     image_lock: Mapping[str, Any],
     options: DeathStarBenchOptions | Mapping[str, Any],
     *,
+    plan_factory: Callable[[Mapping[str, Any]], DistributedK3sCandidatePlan],
     execute: Callable[..., str],
     emit: Callable[[MutableMapping[str, Any], str, str], Any] | None = None,
     persist: Callable[[MutableMapping[str, Any]], Any] | None = None,
@@ -1789,7 +1792,7 @@ def run_azure_distributed_social_network_measurement(
         Callable[[MutableMapping[str, Any], str], Any] | None
     ) = None,
 ) -> dict[str, Any]:
-    """Initialize and measure the exact Azure distributed candidate once."""
+    """Initialize and measure one strictly validated candidate exactly once."""
 
     if not isinstance(job, MutableMapping):
         raise DistributedMeasurementError('A mutable benchmark job is required.')
@@ -1823,7 +1826,7 @@ def run_azure_distributed_social_network_measurement(
         )
     validated_options = _validated_options(options)
     try:
-        plan = azure_k3s_candidate_plan(resources)
+        plan = plan_factory(resources)
         runtime_journal = resources.get(RUNTIME_JOURNAL_KEY)
         _validate_existing_journal(runtime_journal, plan)
         if runtime_journal is None or runtime_journal['state'] != 'cluster_ready':
@@ -1888,14 +1891,17 @@ def run_azure_distributed_social_network_measurement(
         job,
         load_generator,
         web_guest.readiness_command(
-            'azure',
+            plan.provider,
             'deathstarbench',
             'loadgen',
             expected_architecture='x86_64',
         ),
         timeout=900,
     )
-    for step in web_guest.deathstarbench_install_steps('azure', 'loadgen'):
+    for step in web_guest.deathstarbench_install_steps(
+        plan.provider,
+        'loadgen',
+    ):
         _execute(
             execute,
             job,
@@ -2202,7 +2208,7 @@ def run_azure_distributed_social_network_measurement(
         ],
         'workload_execution_attestation_sha256': _sha256_json(pre_execution),
         # The execution journal is an infrastructure-ownership record and is
-        # removed after Azure cleanup.  Preserve its safe benchmark evidence
+        # removed after provider cleanup. Preserve its safe benchmark evidence
         # with the result so results.json and report.html retain the completed
         # dataset, warm-up, and pre/post execution attestations.
         'measurement_evidence': safe_measurement_evidence,
@@ -2244,3 +2250,105 @@ def run_azure_distributed_social_network_measurement(
     )
     _emit(emit, job, 'Distributed Social Network measurement completed.')
     return result
+
+
+def run_distributed_social_network_measurement(
+    job: MutableMapping[str, Any],
+    image_lock: Mapping[str, Any],
+    options: DeathStarBenchOptions | Mapping[str, Any],
+    *,
+    execute: Callable[..., str],
+    emit: Callable[[MutableMapping[str, Any], str, str], Any] | None = None,
+    persist: Callable[[MutableMapping[str, Any]], Any] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    timestamp: Callable[[], str] | None = None,
+    initializer_clock: Callable[[], float] = time.monotonic,
+    initializer_sleep: Callable[[float], Any] = time.sleep,
+    qualification_checkpoint: (
+        Callable[[MutableMapping[str, Any], str], Any] | None
+    ) = None,
+) -> dict[str, Any]:
+    """Measure after dispatching the persisted provider contract."""
+
+    return _run_distributed_social_network_measurement(
+        job,
+        image_lock,
+        options,
+        plan_factory=distributed_k3s_candidate_plan,
+        execute=execute,
+        emit=emit,
+        persist=persist,
+        monotonic=monotonic,
+        timestamp=timestamp,
+        initializer_clock=initializer_clock,
+        initializer_sleep=initializer_sleep,
+        qualification_checkpoint=qualification_checkpoint,
+    )
+
+
+def run_azure_distributed_social_network_measurement(
+    job: MutableMapping[str, Any],
+    image_lock: Mapping[str, Any],
+    options: DeathStarBenchOptions | Mapping[str, Any],
+    *,
+    execute: Callable[..., str],
+    emit: Callable[[MutableMapping[str, Any], str, str], Any] | None = None,
+    persist: Callable[[MutableMapping[str, Any]], Any] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    timestamp: Callable[[], str] | None = None,
+    initializer_clock: Callable[[], float] = time.monotonic,
+    initializer_sleep: Callable[[float], Any] = time.sleep,
+    qualification_checkpoint: (
+        Callable[[MutableMapping[str, Any], str], Any] | None
+    ) = None,
+) -> dict[str, Any]:
+    """Compatibility wrapper retaining strict Azure-only validation."""
+
+    return _run_distributed_social_network_measurement(
+        job,
+        image_lock,
+        options,
+        plan_factory=azure_k3s_candidate_plan,
+        execute=execute,
+        emit=emit,
+        persist=persist,
+        monotonic=monotonic,
+        timestamp=timestamp,
+        initializer_clock=initializer_clock,
+        initializer_sleep=initializer_sleep,
+        qualification_checkpoint=qualification_checkpoint,
+    )
+
+
+def run_gcp_distributed_social_network_measurement(
+    job: MutableMapping[str, Any],
+    image_lock: Mapping[str, Any],
+    options: DeathStarBenchOptions | Mapping[str, Any],
+    *,
+    execute: Callable[..., str],
+    emit: Callable[[MutableMapping[str, Any], str, str], Any] | None = None,
+    persist: Callable[[MutableMapping[str, Any]], Any] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    timestamp: Callable[[], str] | None = None,
+    initializer_clock: Callable[[], float] = time.monotonic,
+    initializer_sleep: Callable[[float], Any] = time.sleep,
+    qualification_checkpoint: (
+        Callable[[MutableMapping[str, Any], str], Any] | None
+    ) = None,
+) -> dict[str, Any]:
+    """Measure after reloading the strict GCP candidate contract."""
+
+    return _run_distributed_social_network_measurement(
+        job,
+        image_lock,
+        options,
+        plan_factory=gcp_k3s_candidate_plan,
+        execute=execute,
+        emit=emit,
+        persist=persist,
+        monotonic=monotonic,
+        timestamp=timestamp,
+        initializer_clock=initializer_clock,
+        initializer_sleep=initializer_sleep,
+        qualification_checkpoint=qualification_checkpoint,
+    )

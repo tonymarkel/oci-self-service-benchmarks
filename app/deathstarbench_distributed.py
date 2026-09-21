@@ -37,6 +37,9 @@ from .guests.rocky_linux import (
     azure_deathstarbench_database_volume_attestation_command,
     azure_deathstarbench_database_volume_mount_command,
     azure_deathstarbench_database_workload_storage_command,
+    gcp_deathstarbench_database_volume_attestation_command,
+    gcp_deathstarbench_database_volume_mount_command,
+    gcp_deathstarbench_database_workload_storage_command,
 )
 from .k3s_runtime import (
     ExpectedK3sNode,
@@ -94,7 +97,7 @@ _AZURE_SUPPORT_SHAPES = {
     'cache': 'Standard_D2as_v7',
     'load-generator': 'Standard_D2as_v7',
 }
-_SSH_ROUTES = {
+_AZURE_SSH_ROUTES = {
     'control': ('azure_dsb_control_public_ip', None),
     'database': (
         'azure_dsb_database_private_ip',
@@ -109,6 +112,29 @@ _SSH_ROUTES = {
         'azure_dsb_control_public_ip',
     ),
     'load-generator': ('azure_dsb_load_generator_public_ip', None),
+}
+_GCP_PRIVATE_ADDRESSES = {
+    'control': '10.240.1.10',
+    'database': '10.240.1.11',
+    'cache': '10.240.1.12',
+    'application': '10.240.1.13',
+    'load-generator': '10.240.2.10',
+}
+_GCP_SSH_ROUTES = {
+    'control': ('gcp_dsb_control_public_ip', None),
+    'database': (
+        'gcp_dsb_database_private_ip',
+        'gcp_dsb_control_public_ip',
+    ),
+    'cache': (
+        'gcp_dsb_cache_private_ip',
+        'gcp_dsb_control_public_ip',
+    ),
+    'application': (
+        'gcp_dsb_application_private_ip',
+        'gcp_dsb_control_public_ip',
+    ),
+    'load-generator': ('gcp_dsb_load_generator_public_ip', None),
 }
 _STATES = frozenset({
     'preparing_hosts',
@@ -129,6 +155,8 @@ _DATABASE_DEVICE_LINKS = frozenset({
     '/dev/disk/azure/data/by-lun/0',
     '/dev/disk/azure/scsi1/lun0',
 })
+_GCP_DATABASE_DEVICE_LINK_PREFIX = '/dev/disk/by-id/google-'
+_GCP_RESOURCE_NAME_RE = re.compile(r'^[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?$')
 _DATABASE_WORKLOAD_ROOT = '/var/lib/deathstarbench/database/mongodb'
 _WORKLOAD_READY_STATE = 'workload_ready'
 
@@ -160,13 +188,23 @@ class RuntimeHost:
 
 
 @dataclass(frozen=True, slots=True)
-class AzureK3sCandidatePlan:
-    """Validated internal plan for one Azure candidate cluster."""
+class DistributedK3sCandidatePlan:
+    """Validated provider-neutral execution plan for one candidate cluster.
+
+    Provider adapters remain responsible for proving cloud identities, fixed
+    addresses, shapes, and the destructive database-disk target.  Everything
+    after this boundary consumes the same pinned K3s and workload contract.
+    """
 
     topology_fingerprint: str
     hosts: tuple[RuntimeHost, ...]
     load_generator: RuntimeHost
     load_generator_private_ip: str
+    # Keep the historical Azure constructor's first four positional fields.
+    # Provider-neutral callers pass this explicitly; legacy Azure callers get
+    # the original behavior without a source-breaking new argument.
+    provider: str = 'azure'
+    database_device_name: str | None = None
 
     def host(self, key: str) -> RuntimeHost:
         try:
@@ -179,6 +217,11 @@ class AzureK3sCandidatePlan:
     @property
     def expected_nodes(self) -> tuple[ExpectedK3sNode, ...]:
         return tuple(host.expected_node for host in self.hosts)
+
+
+# Compatibility name retained for callers and saved qualification harnesses
+# that imported the Azure-specific type before orchestration became reusable.
+AzureK3sCandidatePlan = DistributedK3sCandidatePlan
 
 
 def _required_text(value: Any, label: str) -> str:
@@ -446,7 +489,7 @@ def azure_k3s_candidate_plan(
             )
 
         if node_key in _CLUSTER_KEYS:
-            host_key, jump_host_key = _SSH_ROUTES[node_key]
+            host_key, jump_host_key = _AZURE_SSH_ROUTES[node_key]
             # Resolve both keys here as well as in main.ssh so a malformed
             # candidate fails before the first subprocess is created.
             _required_text(resources.get(host_key), f'{node_key} SSH target')
@@ -465,7 +508,7 @@ def azure_k3s_candidate_plan(
                 jump_host_key=jump_host_key,
             ))
         elif node_key == 'load-generator':
-            host_key, jump_host_key = _SSH_ROUTES[node_key]
+            host_key, jump_host_key = _AZURE_SSH_ROUTES[node_key]
             _required_text(
                 resources.get(host_key),
                 f'{node_key} SSH target',
@@ -489,6 +532,7 @@ def azure_k3s_candidate_plan(
             'The candidate load-generator address is missing.'
         )
     return AzureK3sCandidatePlan(
+        provider='azure',
         topology_fingerprint=manifest.fingerprint,
         hosts=tuple(hosts),
         load_generator=load_generator_host,
@@ -496,9 +540,399 @@ def azure_k3s_candidate_plan(
     )
 
 
+def _gcp_self_link_has_identity(
+    value: Any,
+    *,
+    project_id: str,
+    zone: str,
+    collection: str,
+    name: str,
+) -> bool:
+    """Match a persisted zonal GCE selfLink without accepting another parent."""
+
+    if not isinstance(value, str) or not value or value != value.strip():
+        return False
+    path = value.split('?', 1)[0].rstrip('/')
+    suffix = (
+        f'/projects/{project_id}/zones/{zone}/{collection}/{name}'
+    )
+    return path.endswith(suffix)
+
+
+def _gcp_numeric_resource_id(value: Any, label: str) -> str:
+    normalized = _required_text(value, label)
+    if not normalized.isdigit() or int(normalized) <= 0:
+        raise DistributedRuntimeError(f'{label} is not a positive GCE ID.')
+    return normalized
+
+
+def _validate_gcp_rocky_image(
+    resources: Mapping[str, Any],
+    *,
+    prefix: str,
+    architecture: str,
+) -> None:
+    normalized_architecture_value = normalized_architecture(architecture)
+    family = (
+        'rocky-linux-9-arm64'
+        if normalized_architecture_value == 'aarch64'
+        else 'rocky-linux-9'
+    )
+    name = _required_text(resources.get(f'{prefix}_name'), f'{prefix} name')
+    image_id = _gcp_numeric_resource_id(
+        resources.get(f'{prefix}_id'),
+        f'{prefix} ID',
+    )
+    self_link = resources.get(f'{prefix}_self_link')
+    expected_suffix = f'/projects/rocky-linux-cloud/global/images/{name}'
+    if (
+        not image_id
+        or not _GCP_RESOURCE_NAME_RE.fullmatch(name)
+        or not isinstance(self_link, str)
+        or not self_link.split('?', 1)[0].rstrip('/').endswith(expected_suffix)
+        or resources.get(f'{prefix}_family') != family
+        or normalized_architecture(_required_text(
+            resources.get(f'{prefix}_architecture'),
+            f'{prefix} architecture',
+        )) != normalized_architecture_value
+    ):
+        raise DistributedRuntimeError(
+            f'{prefix} is not the exact Rocky Linux 9 image contract.'
+        )
+
+
+def gcp_k3s_candidate_plan(
+    resources: Mapping[str, Any],
+) -> DistributedK3sCandidatePlan:
+    """Reload the exact persisted GCP contract before any SSH operation."""
+
+    if not isinstance(resources, Mapping):
+        raise DistributedRuntimeError('Job resources must be an object.')
+    if resources.get('provider') != 'gcp':
+        raise DistributedRuntimeError(
+            'The distributed K3s candidate requires GCP resource state.'
+        )
+    if resources.get('gcp_distributed_candidate') is not True:
+        raise DistributedRuntimeError(
+            'The GCP distributed-candidate marker is missing.'
+        )
+    try:
+        manifest = DeathStarBenchTopologyManifest.from_dict(
+            resources[TOPOLOGY_MANIFEST_KEY]
+        )
+        inventory = load_role_node_inventory(resources)
+    except (KeyError, ResourceInventoryError, ValueError) as exc:
+        raise DistributedRuntimeError(
+            f'The distributed topology/inventory contract is invalid: {exc}'
+        ) from exc
+    if (
+        manifest.topology_id != DISTRIBUTED_TIERED_TOPOLOGY_ID
+        or manifest.runtime_id != K3S_RUNTIME_ID
+        or manifest.runtime_revision != DISTRIBUTED_RUNTIME_REVISION
+    ):
+        raise DistributedRuntimeError(
+            'The persisted topology is not the exact distributed K3s candidate.'
+        )
+    fingerprint = resources.get(TOPOLOGY_FINGERPRINT_KEY)
+    if (
+        fingerprint != manifest.fingerprint
+        or inventory.topology_fingerprint != manifest.fingerprint
+    ):
+        raise DistributedRuntimeError(
+            'The topology and role inventory fingerprints do not match.'
+        )
+    if inventory.provider != 'gcp':
+        raise DistributedRuntimeError(
+            'The role inventory does not belong to GCP.'
+        )
+    if {node.key for node in inventory.nodes} != set(_EXPECTED_ROLES):
+        raise DistributedRuntimeError(
+            'The role inventory must contain the exact five candidate nodes.'
+        )
+    if resources.get('ssh_user') != 'benchmark':
+        raise DistributedRuntimeError(
+            'The GCP candidate requires the exact benchmark SSH user.'
+        )
+
+    project_id = _required_text(resources.get('gcp_project_id'), 'GCP project ID')
+    zone = _required_text(
+        resources.get('gcp_zone') or resources.get('availability_zone'),
+        'GCP zone',
+    )
+    manifest_nodes = {node.key: node for node in manifest.nodes}
+    _validate_gcp_rocky_image(
+        resources,
+        prefix='gcp_dsb_application_image',
+        architecture=_required_text(
+            manifest_nodes['application'].architecture,
+            'application manifest architecture',
+        ),
+    )
+    _validate_gcp_rocky_image(
+        resources,
+        prefix='gcp_dsb_support_image',
+        architecture='x86_64',
+    )
+    support_shapes = {
+        'control': 'n2-standard-2',
+        'database': 'n2-standard-4',
+        'cache': 'n2-standard-2',
+        'load-generator': 'n2-standard-2',
+    }
+    hosts: list[RuntimeHost] = []
+    load_generator_host = None
+    load_generator_private_ip = None
+    database_device_name = None
+    for node_key in manifest.creation_order:
+        node = inventory.node(node_key)
+        if node is None or node.role != _EXPECTED_ROLES[node_key]:
+            raise DistributedRuntimeError(
+                f'The {node_key} role inventory is missing or conflicting.'
+            )
+        if node.lifecycle_status != 'running':
+            raise DistributedRuntimeError(
+                f'The {node_key} role is not in running lifecycle state.'
+            )
+        if node.zone != zone:
+            raise DistributedRuntimeError(
+                f'The {node_key} zone conflicts with the GCP contract.'
+            )
+        normalized = node_key.replace('-', '_')
+        prefix = f'gcp_dsb_{normalized}_instance'
+        flat_prefix = f'gcp_dsb_{normalized}'
+        node_name = _required_text(
+            node.provider_resource_name,
+            f'{node_key} resource name',
+        )
+        if (
+            not _GCP_RESOURCE_NAME_RE.fullmatch(node_name)
+            or resources.get(f'{prefix}_name') != node_name
+        ):
+            raise DistributedRuntimeError(
+                f'The {node_key} resource name conflicts with inventory.'
+            )
+        node_id = _gcp_numeric_resource_id(
+            node.provider_resource_id,
+            f'{node_key} resource ID',
+        )
+        if (
+            str(resources.get(f'{prefix}_id') or '') != node_id
+            or not _gcp_self_link_has_identity(
+                resources.get(f'{prefix}_self_link'),
+                project_id=project_id,
+                zone=zone,
+                collection='instances',
+                name=node_name,
+            )
+        ):
+            raise DistributedRuntimeError(
+                f'The {node_key} resource identity conflicts with inventory.'
+            )
+        if len(node.private_addresses) != 1:
+            raise DistributedRuntimeError(
+                f'The {node_key} role must have one private address.'
+            )
+        private_ip = node.private_addresses[0]
+        if (
+            private_ip != _GCP_PRIVATE_ADDRESSES[node_key]
+            or resources.get(f'{flat_prefix}_private_ip') != private_ip
+        ):
+            raise DistributedRuntimeError(
+                f'The {node_key} private address violates the GCP contract.'
+            )
+        architecture = normalized_architecture(
+            _required_text(node.architecture, f'{node_key} architecture')
+        )
+        manifest_node = manifest_nodes[node_key]
+        expected_architecture = normalized_architecture(
+            _required_text(
+                manifest_node.architecture,
+                f'{node_key} manifest architecture',
+            )
+        )
+        if (
+            architecture != expected_architecture
+            or normalized_architecture(_required_text(
+                resources.get(f'{flat_prefix}_architecture'),
+                f'{node_key} persisted architecture',
+            )) != architecture
+        ):
+            raise DistributedRuntimeError(
+                f'The {node_key} architecture conflicts with the manifest.'
+            )
+        if node_key in _CLUSTER_KEYS:
+            try:
+                ExpectedK3sNode(
+                    node_name,
+                    node.role,
+                    private_ip,
+                    architecture,
+                )
+            except ValueError as exc:
+                raise DistributedRuntimeError(
+                    f'The {node_key} K3s node identity is invalid: {exc}'
+                ) from exc
+        shape = _required_text(node.shape, f'{node_key} shape')
+        expected_shape = support_shapes.get(
+            node_key,
+            manifest_node.selected_shape,
+        )
+        persisted_shape = _required_text(
+            resources.get(f'{flat_prefix}_machine_type'),
+            f'{node_key} persisted machine type',
+        ).rsplit('/', 1)[-1]
+        if (
+            not expected_shape
+            or shape != expected_shape
+            or persisted_shape != shape
+        ):
+            raise DistributedRuntimeError(
+                f'The {node_key} shape conflicts with the GCP contract.'
+            )
+
+        if node_key in {'control', 'application', 'load-generator'}:
+            public_ip = _required_text(
+                resources.get(f'{flat_prefix}_public_ip'),
+                f'{node_key} public address',
+            )
+            if node.public_addresses != (public_ip,):
+                raise DistributedRuntimeError(
+                    f'The {node_key} public address conflicts with inventory.'
+                )
+        elif (
+            node.public_addresses
+            or resources.get(f'{flat_prefix}_public_ip') not in (None, '')
+        ):
+            raise DistributedRuntimeError(
+                f'The private {node_key} role unexpectedly has a public address.'
+            )
+
+        if node_key == 'database':
+            storage = node.storage_resource('database-data')
+            manifest_storage = manifest_node.storage
+            if (
+                storage is None
+                or len(manifest_storage) != 1
+                or len(node.storage) != 1
+                or storage.lifecycle_status != 'running'
+                or storage.kind != 'persistent_block_volume'
+            ):
+                raise DistributedRuntimeError(
+                    'The database persistent-storage contract is incomplete.'
+                )
+            expected_storage = manifest_storage[0]
+            disk_name = _required_text(
+                storage.provider_resource_name,
+                'database disk name',
+            )
+            disk_id = _gcp_numeric_resource_id(
+                storage.provider_resource_id,
+                'database disk ID',
+            )
+            device_link = f'{_GCP_DATABASE_DEVICE_LINK_PREFIX}{disk_name}'
+            if (
+                not _GCP_RESOURCE_NAME_RE.fullmatch(disk_name)
+                or storage.key != expected_storage.key
+                or storage.device != device_link
+                or storage.filesystem != expected_storage.filesystem
+                or storage.mount_point != expected_storage.mount_point
+                or storage.size_gb != expected_storage.size_gib
+                or storage.provisioned_iops != expected_storage.minimum_iops
+                or storage.provisioned_throughput_mibps
+                != expected_storage.minimum_throughput_mibps
+                or storage.ephemeral is not False
+                or resources.get('gcp_dsb_database_data_disk_name') != disk_name
+                or str(resources.get('gcp_dsb_database_data_disk_id') or '')
+                != disk_id
+                or not _gcp_self_link_has_identity(
+                    resources.get('gcp_dsb_database_data_disk_self_link'),
+                    project_id=project_id,
+                    zone=zone,
+                    collection='disks',
+                    name=disk_name,
+                )
+                or resources.get('gcp_dsb_database_disk_device') != device_link
+                or resources.get('gcp_dsb_database_data_disk_type') != 'pd-ssd'
+                or resources.get('gcp_dsb_database_data_disk_size_gb')
+                != expected_storage.size_gib
+                or resources.get(
+                    'gcp_dsb_database_data_disk_provisioned_iops'
+                ) is not None
+                or resources.get(
+                    'gcp_dsb_database_data_disk_provisioned_throughput_mibps'
+                ) is not None
+            ):
+                raise DistributedRuntimeError(
+                    'The database destructive-storage contract is invalid.'
+                )
+            database_device_name = disk_name
+        elif node.storage:
+            raise DistributedRuntimeError(
+                f'The {node_key} role has unexpected persistent storage.'
+            )
+
+        host_key, jump_host_key = _GCP_SSH_ROUTES[node_key]
+        _required_text(resources.get(host_key), f'{node_key} SSH target')
+        if jump_host_key is not None:
+            _required_text(
+                resources.get(jump_host_key),
+                f'{node_key} SSH jump target',
+            )
+        runtime_host = RuntimeHost(
+            key=node_key,
+            role=node.role,
+            node_name=node_name,
+            private_ip=private_ip,
+            architecture=architecture,
+            host_key=host_key,
+            jump_host_key=jump_host_key,
+        )
+        if node_key in _CLUSTER_KEYS:
+            hosts.append(runtime_host)
+        else:
+            load_generator_host = runtime_host
+            load_generator_private_ip = private_ip
+
+    if tuple(host.key for host in hosts) != _CLUSTER_KEYS:
+        raise DistributedRuntimeError(
+            'The candidate cluster host order conflicts with its manifest.'
+        )
+    if (
+        load_generator_host is None
+        or load_generator_private_ip is None
+        or database_device_name is None
+    ):
+        raise DistributedRuntimeError(
+            'The GCP candidate load-generator or database identity is missing.'
+        )
+    return DistributedK3sCandidatePlan(
+        provider='gcp',
+        topology_fingerprint=manifest.fingerprint,
+        hosts=tuple(hosts),
+        load_generator=load_generator_host,
+        load_generator_private_ip=load_generator_private_ip,
+        database_device_name=database_device_name,
+    )
+
+
+def distributed_k3s_candidate_plan(
+    resources: Mapping[str, Any],
+) -> DistributedK3sCandidatePlan:
+    """Dispatch strict provider validation, then expose one runtime plan."""
+
+    provider = resources.get('provider') if isinstance(resources, Mapping) else None
+    if provider == 'azure':
+        return azure_k3s_candidate_plan(resources)
+    if provider == 'gcp':
+        return gcp_k3s_candidate_plan(resources)
+    raise DistributedRuntimeError(
+        'Distributed K3s candidate state must belong to Azure or GCP.'
+    )
+
+
 def _validate_existing_journal(
     journal: Any,
-    plan: AzureK3sCandidatePlan,
+    plan: DistributedK3sCandidatePlan,
 ):
     if journal is None:
         return
@@ -562,17 +996,31 @@ def _validate_existing_journal(
         )
     database_volume = journal['database_volume']
     if database_volume is not None:
+        common_fields = {
+            'device_link',
+            'filesystem_uuid',
+            'mount_point',
+            'filesystem',
+        }
+        provider_fields = {'lun'} if plan.provider == 'azure' else {'device_name'}
+        valid_provider_identity = isinstance(database_volume, Mapping) and (
+            (
+                database_volume.get('lun') == 0
+                and database_volume.get('device_link') in _DATABASE_DEVICE_LINKS
+            )
+            if plan.provider == 'azure'
+            else (
+                plan.provider == 'gcp'
+                and database_volume.get('device_name')
+                == plan.database_device_name
+                and database_volume.get('device_link')
+                == f'{_GCP_DATABASE_DEVICE_LINK_PREFIX}{plan.database_device_name}'
+            )
+        )
         if (
             not isinstance(database_volume, Mapping)
-            or set(database_volume) != {
-                'lun',
-                'device_link',
-                'filesystem_uuid',
-                'mount_point',
-                'filesystem',
-            }
-            or database_volume['lun'] != 0
-            or database_volume['device_link'] not in _DATABASE_DEVICE_LINKS
+            or set(database_volume) != common_fields | provider_fields
+            or not valid_provider_identity
             or not isinstance(database_volume['filesystem_uuid'], str)
             or not _VOLUME_UUID_RE.fullmatch(
                 database_volume['filesystem_uuid']
@@ -664,10 +1112,69 @@ def parse_database_volume_attestation(output: str) -> dict[str, Any]:
     }
 
 
+def parse_gcp_database_volume_attestation(
+    output: str,
+    *,
+    expected_device_name: str,
+) -> dict[str, Any]:
+    """Parse a GCE stable-device attestation bound to the persisted disk."""
+
+    device_name = _required_text(expected_device_name, 'GCP database device name')
+    if not _GCP_RESOURCE_NAME_RE.fullmatch(device_name):
+        raise DistributedRuntimeError(
+            'The expected GCP database device name is invalid.'
+        )
+    expected_link = f'{_GCP_DATABASE_DEVICE_LINK_PREFIX}{device_name}'
+    matches = re.findall(
+        r'^GCP_DSB_DATABASE_VOLUME device_name=(\S+) device_link=(\S+) '
+        r'uuid=(\S+) mount_point=/var/lib/deathstarbench/database '
+        r'filesystem=xfs$',
+        str(output),
+        flags=re.MULTILINE,
+    )
+    if len(matches) != 1:
+        raise DistributedRuntimeError(
+            'The GCP database mount did not return one exact attestation marker.'
+        )
+    observed_name, device_link, filesystem_uuid = matches[0]
+    if (
+        observed_name != device_name
+        or device_link != expected_link
+        or not _VOLUME_UUID_RE.fullmatch(filesystem_uuid)
+    ):
+        raise DistributedRuntimeError(
+            'The GCP database mount returned a conflicting disk identity.'
+        )
+    return {
+        'device_name': device_name,
+        'device_link': expected_link,
+        'filesystem_uuid': filesystem_uuid.lower(),
+        'mount_point': '/var/lib/deathstarbench/database',
+        'filesystem': 'xfs',
+    }
+
+
+def _parse_plan_database_volume_attestation(
+    output: str,
+    plan: DistributedK3sCandidatePlan,
+) -> dict[str, Any]:
+    if plan.provider == 'azure':
+        return parse_database_volume_attestation(output)
+    if plan.provider == 'gcp' and plan.database_device_name is not None:
+        return parse_gcp_database_volume_attestation(
+            output,
+            expected_device_name=plan.database_device_name,
+        )
+    raise DistributedRuntimeError(
+        'The candidate database volume parser is not configured.'
+    )
+
+
 def parse_database_workload_storage_attestation(
     output: str,
     *,
     expected_filesystem_uuid: str,
+    provider: str = 'azure',
 ) -> dict[str, Any]:
     """Parse the owned MongoDB-directory attestation without guest secrets."""
 
@@ -676,8 +1183,16 @@ def parse_database_workload_storage_attestation(
         raise DistributedRuntimeError(
             'The expected database workload filesystem UUID is invalid.'
         )
+    marker = {
+        'azure': 'AZURE_DSB_WORKLOAD_STORAGE',
+        'gcp': 'GCP_DSB_WORKLOAD_STORAGE',
+    }.get(provider)
+    if marker is None:
+        raise DistributedRuntimeError(
+            'The database workload-storage provider is unsupported.'
+        )
     matches = re.findall(
-        r'^AZURE_DSB_WORKLOAD_STORAGE uuid=(\S+) '
+        rf'^{marker} uuid=(\S+) '
         r'root=(\S+) databases=(\d+)$',
         str(output),
         flags=re.MULTILINE,
@@ -706,10 +1221,21 @@ def _same_database_volume_identity(
     left: Mapping[str, Any],
     right: Mapping[str, Any],
 ) -> bool:
-    """Compare stable identity fields when an Azure disk is re-attested."""
+    """Compare stable provider disk identity and filesystem fields."""
 
+    azure_identity = (
+        set(left) == set(right)
+        and 'lun' in left
+        and left.get('lun') == right.get('lun')
+    )
+    gcp_identity = (
+        set(left) == set(right)
+        and 'device_name' in left
+        and left.get('device_name') == right.get('device_name')
+        and left.get('device_link') == right.get('device_link')
+    )
     return (
-        left.get('lun') == right.get('lun')
+        (azure_identity or gcp_identity)
         and str(left.get('filesystem_uuid') or '').casefold()
         == str(right.get('filesystem_uuid') or '').casefold()
         and left.get('mount_point') == right.get('mount_point')
@@ -717,9 +1243,58 @@ def _same_database_volume_identity(
     )
 
 
+def _database_volume_mount_command(
+    plan: DistributedK3sCandidatePlan,
+) -> str:
+    if plan.provider == 'azure':
+        return azure_deathstarbench_database_volume_mount_command()
+    if plan.provider == 'gcp' and plan.database_device_name is not None:
+        return gcp_deathstarbench_database_volume_mount_command(
+            plan.database_device_name
+        )
+    raise DistributedRuntimeError(
+        'The candidate database mount command is not configured.'
+    )
+
+
+def _database_volume_attestation_command(
+    plan: DistributedK3sCandidatePlan,
+    filesystem_uuid: str,
+) -> str:
+    if plan.provider == 'azure':
+        return azure_deathstarbench_database_volume_attestation_command(
+            filesystem_uuid
+        )
+    if plan.provider == 'gcp' and plan.database_device_name is not None:
+        return gcp_deathstarbench_database_volume_attestation_command(
+            plan.database_device_name,
+            filesystem_uuid,
+        )
+    raise DistributedRuntimeError(
+        'The candidate database attestation command is not configured.'
+    )
+
+
+def _database_workload_storage_command(
+    plan: DistributedK3sCandidatePlan,
+    filesystem_uuid: str,
+) -> str:
+    if plan.provider == 'azure':
+        return azure_deathstarbench_database_workload_storage_command(
+            filesystem_uuid
+        )
+    if plan.provider == 'gcp':
+        return gcp_deathstarbench_database_workload_storage_command(
+            filesystem_uuid
+        )
+    raise DistributedRuntimeError(
+        'The candidate database workload-storage command is not configured.'
+    )
+
+
 def _write_journal(
     job: MutableMapping[str, Any],
-    plan: AzureK3sCandidatePlan,
+    plan: DistributedK3sCandidatePlan,
     *,
     state: str,
     prepared_hosts: list[str],
@@ -784,14 +1359,15 @@ def _execute(
     return execute(job, command, **kwargs)
 
 
-def prepare_azure_distributed_k3s_candidate(
+def _prepare_distributed_k3s_candidate(
     job: MutableMapping[str, Any],
     *,
+    plan_factory: Callable[[Mapping[str, Any]], DistributedK3sCandidatePlan],
     execute: Callable[..., str],
     emit: Callable[[MutableMapping[str, Any], str, str], Any] | None = None,
     persist: Callable[[MutableMapping[str, Any]], Any] | None = None,
 ) -> dict[str, Any]:
-    """Prepare and attest the internal Azure K3s cluster candidate.
+    """Prepare and attest one strictly validated K3s cluster candidate.
 
     The function is intentionally not wired into normal benchmark dispatch.
     It may be invoked by a live qualification harness after the matching
@@ -803,7 +1379,7 @@ def prepare_azure_distributed_k3s_candidate(
     resources = job.get('resources')
     if not isinstance(resources, MutableMapping):
         raise DistributedRuntimeError('The job has no mutable resource state.')
-    plan = azure_k3s_candidate_plan(resources)
+    plan = plan_factory(resources)
     existing_journal = resources.get(RUNTIME_JOURNAL_KEY)
     _validate_existing_journal(existing_journal, plan)
     prior_server_ca_sha256 = (
@@ -886,11 +1462,12 @@ def prepare_azure_distributed_k3s_candidate(
         execute,
         job,
         database,
-        azure_deathstarbench_database_volume_mount_command(),
+        _database_volume_mount_command(plan),
         timeout=300,
     )
-    database_volume = parse_database_volume_attestation(
-        database_mount_output
+    database_volume = _parse_plan_database_volume_attestation(
+        database_mount_output,
+        plan,
     )
     if (
         prior_database_volume is not None
@@ -1078,6 +1655,60 @@ def prepare_azure_distributed_k3s_candidate(
     return journal
 
 
+def prepare_distributed_k3s_candidate(
+    job: MutableMapping[str, Any],
+    *,
+    execute: Callable[..., str],
+    emit: Callable[[MutableMapping[str, Any], str, str], Any] | None = None,
+    persist: Callable[[MutableMapping[str, Any]], Any] | None = None,
+) -> dict[str, Any]:
+    """Prepare K3s after dispatching the persisted provider contract."""
+
+    return _prepare_distributed_k3s_candidate(
+        job,
+        plan_factory=distributed_k3s_candidate_plan,
+        execute=execute,
+        emit=emit,
+        persist=persist,
+    )
+
+
+def prepare_azure_distributed_k3s_candidate(
+    job: MutableMapping[str, Any],
+    *,
+    execute: Callable[..., str],
+    emit: Callable[[MutableMapping[str, Any], str, str], Any] | None = None,
+    persist: Callable[[MutableMapping[str, Any]], Any] | None = None,
+) -> dict[str, Any]:
+    """Compatibility wrapper retaining strict Azure-only validation."""
+
+    return _prepare_distributed_k3s_candidate(
+        job,
+        plan_factory=azure_k3s_candidate_plan,
+        execute=execute,
+        emit=emit,
+        persist=persist,
+    )
+
+
+def prepare_gcp_distributed_k3s_candidate(
+    job: MutableMapping[str, Any],
+    *,
+    execute: Callable[..., str],
+    emit: Callable[[MutableMapping[str, Any], str, str], Any] | None = None,
+    persist: Callable[[MutableMapping[str, Any]], Any] | None = None,
+) -> dict[str, Any]:
+    """Prepare K3s after reloading the strict GCP candidate contract."""
+
+    return _prepare_distributed_k3s_candidate(
+        job,
+        plan_factory=gcp_k3s_candidate_plan,
+        execute=execute,
+        emit=emit,
+        persist=persist,
+    )
+
+
 def _workload_phases(
     bundle: RenderedSocialNetworkBundle,
 ) -> tuple[tuple[str, str], ...]:
@@ -1116,7 +1747,7 @@ def _workload_states(phase_names: tuple[str, ...]) -> frozenset[str]:
 
 
 def _expected_workload_nodes(
-    plan: AzureK3sCandidatePlan,
+    plan: DistributedK3sCandidatePlan,
     bundle: RenderedSocialNetworkBundle,
 ) -> tuple[str, ...]:
     roles = set(bundle.expected_component_placement.values())
@@ -1133,7 +1764,7 @@ def _expected_workload_nodes(
 def _normalized_workload_attestation(
     value: Mapping[str, Any],
     *,
-    plan: AzureK3sCandidatePlan,
+    plan: DistributedK3sCandidatePlan,
     bundle: RenderedSocialNetworkBundle,
 ) -> dict[str, Any]:
     expected_fields = {
@@ -1205,7 +1836,7 @@ def _validate_database_workload_storage(
 def _validate_existing_workload_journal(
     journal: Any,
     *,
-    plan: AzureK3sCandidatePlan,
+    plan: DistributedK3sCandidatePlan,
     bundle: RenderedSocialNetworkBundle,
     filesystem_uuid: str,
 ):
@@ -1323,7 +1954,7 @@ def _validate_existing_workload_journal(
 
 def _write_workload_journal(
     job: MutableMapping[str, Any],
-    plan: AzureK3sCandidatePlan,
+    plan: DistributedK3sCandidatePlan,
     bundle: RenderedSocialNetworkBundle,
     *,
     state: str,
@@ -1369,17 +2000,18 @@ def _write_workload_journal(
     return journal
 
 
-def prepare_azure_distributed_social_network_candidate(
+def _prepare_distributed_social_network_candidate(
     job: MutableMapping[str, Any],
     image_lock: Mapping[str, Any],
     *,
+    plan_factory: Callable[[Mapping[str, Any]], DistributedK3sCandidatePlan],
     execute: Callable[..., str],
     emit: Callable[[MutableMapping[str, Any], str, str], Any] | None = None,
     persist: Callable[[MutableMapping[str, Any]], Any] | None = None,
 ) -> dict[str, Any]:
     """Deploy and attest the unreleased Social Network workload candidate.
 
-    A caller must first complete ``prepare_azure_distributed_k3s_candidate``.
+    A caller must first complete the matching K3s candidate preparation.
     This operation is declarative and retryable, but intentionally stops at
     ``workload_ready`` before any non-resumable dataset initialization or
     benchmark measurement.
@@ -1390,7 +2022,7 @@ def prepare_azure_distributed_social_network_candidate(
     resources = job.get('resources')
     if not isinstance(resources, MutableMapping):
         raise DistributedRuntimeError('The job has no mutable resource state.')
-    plan = azure_k3s_candidate_plan(resources)
+    plan = plan_factory(resources)
     runtime_journal = resources.get(RUNTIME_JOURNAL_KEY)
     _validate_existing_journal(runtime_journal, plan)
     if runtime_journal is None or runtime_journal['state'] != 'cluster_ready':
@@ -1484,12 +2116,13 @@ def prepare_azure_distributed_social_network_candidate(
         execute,
         job,
         database,
-        azure_deathstarbench_database_volume_attestation_command(
-            filesystem_uuid
-        ),
+        _database_volume_attestation_command(plan, filesystem_uuid),
         timeout=300,
     )
-    observed_volume = parse_database_volume_attestation(database_mount_output)
+    observed_volume = _parse_plan_database_volume_attestation(
+        database_mount_output,
+        plan,
+    )
     if not _same_database_volume_identity(database_volume, observed_volume):
         raise DistributedRuntimeError(
             'The database volume identity changed before workload deployment.'
@@ -1500,14 +2133,13 @@ def prepare_azure_distributed_social_network_candidate(
         execute,
         job,
         database,
-        azure_deathstarbench_database_workload_storage_command(
-            filesystem_uuid
-        ),
+        _database_workload_storage_command(plan, filesystem_uuid),
         timeout=300,
     )
     database_storage = parse_database_workload_storage_attestation(
         storage_output,
         expected_filesystem_uuid=filesystem_uuid,
+        provider=plan.provider,
     )
     prior_storage = current['database_storage']
     if prior_storage is not None and dict(prior_storage) != database_storage:
@@ -1614,3 +2246,63 @@ def prepare_azure_distributed_social_network_candidate(
         'The Social Network workload candidate is ready; no dataset was initialized.',
     )
     return journal
+
+
+def prepare_distributed_social_network_candidate(
+    job: MutableMapping[str, Any],
+    image_lock: Mapping[str, Any],
+    *,
+    execute: Callable[..., str],
+    emit: Callable[[MutableMapping[str, Any], str, str], Any] | None = None,
+    persist: Callable[[MutableMapping[str, Any]], Any] | None = None,
+) -> dict[str, Any]:
+    """Deploy the identical workload after provider-plan dispatch."""
+
+    return _prepare_distributed_social_network_candidate(
+        job,
+        image_lock,
+        plan_factory=distributed_k3s_candidate_plan,
+        execute=execute,
+        emit=emit,
+        persist=persist,
+    )
+
+
+def prepare_azure_distributed_social_network_candidate(
+    job: MutableMapping[str, Any],
+    image_lock: Mapping[str, Any],
+    *,
+    execute: Callable[..., str],
+    emit: Callable[[MutableMapping[str, Any], str, str], Any] | None = None,
+    persist: Callable[[MutableMapping[str, Any]], Any] | None = None,
+) -> dict[str, Any]:
+    """Compatibility wrapper retaining strict Azure-only validation."""
+
+    return _prepare_distributed_social_network_candidate(
+        job,
+        image_lock,
+        plan_factory=azure_k3s_candidate_plan,
+        execute=execute,
+        emit=emit,
+        persist=persist,
+    )
+
+
+def prepare_gcp_distributed_social_network_candidate(
+    job: MutableMapping[str, Any],
+    image_lock: Mapping[str, Any],
+    *,
+    execute: Callable[..., str],
+    emit: Callable[[MutableMapping[str, Any], str, str], Any] | None = None,
+    persist: Callable[[MutableMapping[str, Any]], Any] | None = None,
+) -> dict[str, Any]:
+    """Deploy the workload after reloading the strict GCP contract."""
+
+    return _prepare_distributed_social_network_candidate(
+        job,
+        image_lock,
+        plan_factory=gcp_k3s_candidate_plan,
+        execute=execute,
+        emit=emit,
+        persist=persist,
+    )

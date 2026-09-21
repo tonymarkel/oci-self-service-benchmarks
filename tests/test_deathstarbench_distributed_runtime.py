@@ -15,12 +15,18 @@ from app.deathstarbench_contract import (
 from app.deathstarbench_distributed import (
     RUNTIME_JOURNAL_KEY,
     WORKLOAD_JOURNAL_KEY,
+    AzureK3sCandidatePlan,
     DistributedRuntimeError,
     azure_k3s_candidate_plan,
+    distributed_k3s_candidate_plan,
+    gcp_k3s_candidate_plan,
     parse_database_volume_attestation,
+    parse_gcp_database_volume_attestation,
     parse_database_workload_storage_attestation,
     prepare_azure_distributed_k3s_candidate,
     prepare_azure_distributed_social_network_candidate,
+    prepare_gcp_distributed_k3s_candidate,
+    prepare_gcp_distributed_social_network_candidate,
 )
 from app.deathstarbench_k3s_workload import (
     IMAGE_LOCK_SCHEMA_VERSION,
@@ -156,6 +162,116 @@ def candidate_job():
     return {'id': 'abc123def456', 'resources': resources, 'results': []}
 
 
+def gcp_candidate_job():
+    shapes = {
+        'control': 'n2-standard-2',
+        'database': 'n2-standard-4',
+        'cache': 'n2-standard-2',
+        'application': 'c4a-standard-8',
+        'load-generator': 'n2-standard-2',
+    }
+    manifest = build_topology_manifest(
+        DISTRIBUTED_TIERED_TOPOLOGY_ID,
+        K3S_RUNTIME_ID,
+        selected_shape=shapes['application'],
+        selected_architecture='arm64',
+    )
+    project_id = 'benchmark-project'
+    zone = 'us-central1-a'
+    inventory = manifest.planned_inventory('gcp')
+    updated_nodes = []
+    resources = {
+        'provider': 'gcp',
+        'gcp_distributed_candidate': True,
+        'gcp_project_id': project_id,
+        'gcp_zone': zone,
+        'availability_zone': zone,
+        'ssh_user': 'benchmark',
+        'deathstarbench_topology_manifest': manifest.as_dict(),
+        'deathstarbench_topology_fingerprint': manifest.fingerprint,
+        'gcp_dsb_application_image_id': '3001',
+        'gcp_dsb_application_image_name': 'rocky-linux-9-arm64-test',
+        'gcp_dsb_application_image_self_link': (
+            'https://www.googleapis.com/compute/v1/projects/'
+            'rocky-linux-cloud/global/images/rocky-linux-9-arm64-test'
+        ),
+        'gcp_dsb_application_image_family': 'rocky-linux-9-arm64',
+        'gcp_dsb_application_image_architecture': 'arm64',
+        'gcp_dsb_support_image_id': '3002',
+        'gcp_dsb_support_image_name': 'rocky-linux-9-test',
+        'gcp_dsb_support_image_self_link': (
+            'https://www.googleapis.com/compute/v1/projects/'
+            'rocky-linux-cloud/global/images/rocky-linux-9-test'
+        ),
+        'gcp_dsb_support_image_family': 'rocky-linux-9',
+        'gcp_dsb_support_image_architecture': 'x86_64',
+    }
+    for index, node in enumerate(inventory.nodes, start=1):
+        key = node.key
+        normalized = key.replace('-', '_')
+        prefix = f'gcp_dsb_{normalized}_instance'
+        name = f'benchmark-{key.replace("load-generator", "loadgen")}'
+        resource_id = str(1000 + index)
+        public = (
+            f'203.0.113.{20 + index}'
+            if key in {'control', 'application', 'load-generator'}
+            else None
+        )
+        storage_items = []
+        for storage in node.storage:
+            disk_name = 'benchmark-database-data'
+            disk_id = '2001'
+            device = f'/dev/disk/by-id/google-{disk_name}'
+            storage_items.append(replace(
+                storage,
+                provider_resource_id=disk_id,
+                provider_resource_name=disk_name,
+                device=device,
+                lifecycle_status='running',
+            ))
+            resources.update({
+                'gcp_dsb_database_data_disk_name': disk_name,
+                'gcp_dsb_database_data_disk_id': disk_id,
+                'gcp_dsb_database_data_disk_self_link': (
+                    f'https://www.googleapis.com/compute/v1/projects/'
+                    f'{project_id}/zones/{zone}/disks/{disk_name}'
+                ),
+                'gcp_dsb_database_disk_device': device,
+                'gcp_dsb_database_data_disk_type': 'pd-ssd',
+                'gcp_dsb_database_data_disk_size_gb': 100,
+                'gcp_dsb_database_data_disk_provisioned_iops': None,
+                'gcp_dsb_database_data_disk_provisioned_throughput_mibps': None,
+            })
+        architecture = 'arm64' if key == 'application' else 'x86_64'
+        updated_nodes.append(replace(
+            node,
+            provider_resource_id=resource_id,
+            provider_resource_name=name,
+            public_addresses=(public,) if public else (),
+            private_addresses=(PRIVATE_ADDRESSES[key],),
+            zone=zone,
+            shape=shapes[key],
+            architecture=architecture,
+            storage=tuple(storage_items),
+            lifecycle_status='running',
+        ))
+        resources.update({
+            f'{prefix}_name': name,
+            f'{prefix}_id': resource_id,
+            f'{prefix}_self_link': (
+                f'https://www.googleapis.com/compute/v1/projects/{project_id}'
+                f'/zones/{zone}/instances/{name}'
+            ),
+            f'gcp_dsb_{normalized}_public_ip': public,
+            f'gcp_dsb_{normalized}_private_ip': PRIVATE_ADDRESSES[key],
+            f'gcp_dsb_{normalized}_machine_type': shapes[key],
+            f'gcp_dsb_{normalized}_architecture': architecture,
+        })
+    inventory = replace(inventory, nodes=tuple(updated_nodes))
+    persist_role_node_inventory(resources, inventory)
+    return {'id': 'abc123def456', 'resources': resources, 'results': []}
+
+
 class FakeRemoteExecutor:
     def __init__(self, fail_at=None, *, ca_sha256=None, filesystem_uuid=None):
         self.calls = []
@@ -194,8 +310,30 @@ class FakeRemoteExecutor:
         return ''
 
 
+class GcpFakeRemoteExecutor(FakeRemoteExecutor):
+    def __call__(self, job, command, **kwargs):
+        if 'GCP_DSB_WORKLOAD_STORAGE' in command:
+            self.calls.append((command, kwargs))
+            return (
+                'GCP_DSB_WORKLOAD_STORAGE '
+                f'uuid={self.filesystem_uuid} '
+                'root=/var/lib/deathstarbench/database/mongodb databases=6\n'
+            )
+        if 'GCP_DSB_DATABASE_VOLUME' in command:
+            self.calls.append((command, kwargs))
+            return (
+                'GCP_DSB_DATABASE_VOLUME '
+                'device_name=benchmark-database-data '
+                'device_link=/dev/disk/by-id/google-benchmark-database-data '
+                f'uuid={self.filesystem_uuid} '
+                'mount_point=/var/lib/deathstarbench/database '
+                'filesystem=xfs\n'
+            )
+        return super().__call__(job, command, **kwargs)
+
+
 def candidate_workload_attestation(job, lock):
-    plan = azure_k3s_candidate_plan(job['resources'])
+    plan = distributed_k3s_candidate_plan(job['resources'])
     bundle = render_social_network_bundle(
         lock,
         plan.host('application').architecture,
@@ -220,6 +358,19 @@ def candidate_workload_attestation(job, lock):
 
 
 class DistributedRuntimePlanTests(unittest.TestCase):
+    def test_legacy_azure_plan_constructor_remains_source_compatible(self):
+        current = azure_k3s_candidate_plan(candidate_job()['resources'])
+
+        legacy = AzureK3sCandidatePlan(
+            current.topology_fingerprint,
+            current.hosts,
+            current.load_generator,
+            current.load_generator_private_ip,
+        )
+
+        self.assertEqual(legacy.provider, 'azure')
+        self.assertEqual(legacy.expected_nodes, current.expected_nodes)
+
     def test_plan_uses_exact_private_bastion_routes_and_mixed_architecture(self):
         job = candidate_job()
 
@@ -375,6 +526,127 @@ class DistributedRuntimePlanTests(unittest.TestCase):
             'persistent-storage contract is incomplete',
         ):
             azure_k3s_candidate_plan(job['resources'])
+
+
+class GcpDistributedRuntimeTests(unittest.TestCase):
+    def test_gcp_plan_uses_same_roles_with_strict_gce_disk_and_routes(self):
+        job = gcp_candidate_job()
+
+        plan = gcp_k3s_candidate_plan(job['resources'])
+
+        self.assertEqual(plan.provider, 'gcp')
+        self.assertEqual(
+            tuple(host.key for host in plan.hosts),
+            ('control', 'database', 'cache', 'application'),
+        )
+        self.assertEqual(plan.database_device_name, 'benchmark-database-data')
+        self.assertEqual(
+            plan.host('database').jump_host_key,
+            'gcp_dsb_control_public_ip',
+        )
+        self.assertEqual(
+            plan.host('application').host_key,
+            'gcp_dsb_application_private_ip',
+        )
+        self.assertEqual(
+            plan.host('application').jump_host_key,
+            'gcp_dsb_control_public_ip',
+        )
+        self.assertEqual(
+            plan.load_generator.host_key,
+            'gcp_dsb_load_generator_public_ip',
+        )
+        self.assertEqual(plan.host('application').architecture, 'aarch64')
+        self.assertEqual(distributed_k3s_candidate_plan(job['resources']), plan)
+
+    def test_gcp_plan_rejects_numeric_identity_and_stable_device_drift(self):
+        job = gcp_candidate_job()
+        job['resources']['gcp_dsb_cache_instance_id'] = '9999'
+        with self.assertRaisesRegex(DistributedRuntimeError, 'identity conflicts'):
+            gcp_k3s_candidate_plan(job['resources'])
+
+        job = gcp_candidate_job()
+        database = next(
+            node
+            for node in job['resources']['role_node_inventory']['nodes']
+            if node['key'] == 'database'
+        )
+        database['storage'][0]['device'] = '/dev/sdb'
+        with self.assertRaisesRegex(
+            DistributedRuntimeError,
+            'destructive-storage contract',
+        ):
+            gcp_k3s_candidate_plan(job['resources'])
+
+    def test_gcp_volume_parser_binds_name_link_and_uuid(self):
+        output = (
+            'GCP_DSB_DATABASE_VOLUME device_name=benchmark-database-data '
+            'device_link=/dev/disk/by-id/google-benchmark-database-data '
+            'uuid=11111111-2222-3333-4444-555555555555 '
+            'mount_point=/var/lib/deathstarbench/database filesystem=xfs\n'
+        )
+
+        parsed = parse_gcp_database_volume_attestation(
+            output,
+            expected_device_name='benchmark-database-data',
+        )
+
+        self.assertEqual(parsed['device_name'], 'benchmark-database-data')
+        self.assertNotIn('lun', parsed)
+        with self.assertRaises(DistributedRuntimeError):
+            parse_gcp_database_volume_attestation(
+                output.replace('benchmark-database-data', 'another-disk'),
+                expected_device_name='benchmark-database-data',
+            )
+
+    def test_gcp_runs_identical_k3s_and_workload_orchestration(self):
+        job = gcp_candidate_job()
+        runtime_executor = GcpFakeRemoteExecutor()
+
+        runtime = prepare_gcp_distributed_k3s_candidate(
+            job,
+            execute=runtime_executor,
+        )
+
+        self.assertEqual(runtime['state'], 'cluster_ready')
+        self.assertEqual(
+            runtime['database_volume']['device_name'],
+            'benchmark-database-data',
+        )
+        self.assertTrue(any(
+            'GCP_DSB_DATABASE_VOLUME' in command
+            for command, _ in runtime_executor.calls
+        ))
+        lock = candidate_image_lock()
+        attestation = candidate_workload_attestation(job, lock)
+        workload_executor = GcpFakeRemoteExecutor()
+        with mock.patch(
+            'app.deathstarbench_distributed.parse_workload_attestation',
+            return_value=attestation,
+        ):
+            workload = prepare_gcp_distributed_social_network_candidate(
+                job,
+                lock,
+                execute=workload_executor,
+            )
+
+        self.assertEqual(workload['state'], 'workload_ready')
+        self.assertTrue(any(
+            'GCP_DSB_WORKLOAD_STORAGE' in command
+            for command, _ in workload_executor.calls
+        ))
+        payload_calls = [
+            kwargs for _, kwargs in workload_executor.calls
+            if 'stdin_text' in kwargs
+        ]
+        self.assertEqual(
+            len(payload_calls),
+            len(render_social_network_bundle(
+                lock,
+                'arm64',
+                PRIVATE_ADDRESSES['load-generator'],
+            ).phase_names),
+        )
 
 
 class DistributedRuntimeOrchestrationTests(unittest.TestCase):

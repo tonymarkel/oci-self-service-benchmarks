@@ -920,6 +920,171 @@ class DistributedMeasurementOrchestrationTests(unittest.TestCase):
             evidence,
         )
 
+    def test_qualification_checkpoint_follows_durable_persistence_exactly(self):
+        executor = MeasurementExecutor()
+        persisted = []
+        checkpoints = []
+
+        def persist(current):
+            persisted.append(copy.deepcopy(
+                current['resources'][EXECUTION_JOURNAL_KEY]
+            ))
+
+        def checkpoint(current, state):
+            checkpoints.append((
+                state,
+                persisted[-1]['state'],
+                current['resources'][EXECUTION_JOURNAL_KEY]['state'],
+            ))
+
+        self.run_measurement(
+            executor,
+            persist=persist,
+            qualification_checkpoint=checkpoint,
+        )
+
+        expected = [
+            'load_generator_ready',
+            'initialization_started',
+            'warmup_started',
+            'measurement_started',
+        ]
+        self.assertEqual([entry[0] for entry in checkpoints], expected)
+        self.assertEqual(
+            checkpoints,
+            [(state, state, state) for state in expected],
+        )
+
+        self.job, self.image_lock = ready_workload_job()
+        self.options = measurement_options(warmup_seconds=0)
+        no_warmup_checkpoints = []
+        self.run_measurement(
+            MeasurementExecutor(),
+            persist=lambda _job: None,
+            qualification_checkpoint=(
+                lambda _job, state: no_warmup_checkpoints.append(state)
+            ),
+        )
+        self.assertEqual(
+            no_warmup_checkpoints,
+            [
+                'load_generator_ready',
+                'initialization_started',
+                'measurement_started',
+            ],
+        )
+
+    def test_qualification_checkpoint_must_be_callable_before_mutation(self):
+        executor = MeasurementExecutor()
+        original_resources = copy.deepcopy(self.job['resources'])
+
+        with self.assertRaisesRegex(
+            DistributedMeasurementError,
+            'qualification checkpoint must be callable',
+        ):
+            self.run_measurement(
+                executor,
+                qualification_checkpoint='not-callable',
+            )
+
+        self.assertEqual(executor.calls, [])
+        self.assertEqual(self.job['resources'], original_resources)
+
+    def test_qualification_checkpoint_requires_persistence_before_mutation(self):
+        executor = MeasurementExecutor()
+        original_resources = copy.deepcopy(self.job['resources'])
+
+        with self.assertRaisesRegex(
+            DistributedMeasurementError,
+            'requires a callable persistence hook',
+        ):
+            self.run_measurement(
+                executor,
+                qualification_checkpoint=lambda _job, _state: None,
+            )
+
+        self.assertEqual(executor.calls, [])
+        self.assertEqual(self.job['resources'], original_resources)
+
+    def test_checkpoint_exceptions_propagate_before_next_phase_without_replay(self):
+        boundaries = (
+            ('load_generator_ready', 'frontend_probe'),
+            ('initialization_started', 'initialization'),
+            ('warmup_started', 'warmup'),
+            ('measurement_started', 'measurement'),
+        )
+        for failed_state, blocked_stage in boundaries:
+            with self.subTest(state=failed_state):
+                self.job, self.image_lock = ready_workload_job()
+                self.options = measurement_options()
+                executor = MeasurementExecutor()
+                persisted = []
+                checkpoints = []
+
+                def persist(current):
+                    persisted.append(copy.deepcopy(
+                        current['resources'][EXECUTION_JOURNAL_KEY]
+                    ))
+
+                def checkpoint(_job, state):
+                    checkpoints.append(state)
+                    if state == failed_state:
+                        raise RuntimeError(f'injected {state} checkpoint failure')
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    f'injected {failed_state} checkpoint failure',
+                ):
+                    self.run_measurement(
+                        executor,
+                        persist=persist,
+                        qualification_checkpoint=checkpoint,
+                    )
+
+                self.assertEqual(checkpoints.count(failed_state), 1)
+                self.assertEqual(persisted[-1]['state'], failed_state)
+                self.assertEqual(
+                    self.job['resources'][EXECUTION_JOURNAL_KEY]['state'],
+                    failed_state,
+                )
+                self.assertNotIn(blocked_stage, executor.stages)
+
+                if failed_state != 'load_generator_ready':
+                    retry = MeasurementExecutor()
+                    with self.assertRaises(DistributedMeasurementError):
+                        self.run_measurement(retry)
+                    self.assertEqual(retry.calls, [])
+
+    def test_internal_main_wrapper_forwards_qualification_checkpoint(self):
+        from app import main
+
+        checkpoint = mock.Mock()
+        expected = object()
+        with mock.patch.object(
+            main,
+            'run_azure_distributed_social_network_measurement',
+            return_value=expected,
+        ) as measurement:
+            result = (
+                main.run_azure_distributed_deathstarbench_candidate_measurement(
+                    self.job,
+                    self.job['plan'],
+                    self.image_lock,
+                    qualification_checkpoint=checkpoint,
+                )
+            )
+
+        self.assertIs(result, expected)
+        measurement.assert_called_once_with(
+            self.job,
+            self.image_lock,
+            self.job['plan']['deathstarbench'],
+            execute=main.ssh,
+            emit=main.event,
+            persist=main.persist_job_state,
+            qualification_checkpoint=checkpoint,
+        )
+
     def test_ambiguous_dispatch_without_a_unit_is_poisoned_and_never_replayed(self):
         missing = initializer_status_output(self.job, state='not_found')
         first = MeasurementExecutor(

@@ -1551,6 +1551,17 @@ def _write_journal(
     return journal
 
 
+def _qualification_checkpoint(
+    checkpoint: Callable[[MutableMapping[str, Any], str], Any] | None,
+    job: MutableMapping[str, Any],
+    state: str,
+) -> None:
+    """Notify an operator-only harness after a state is durably persisted."""
+
+    if checkpoint is not None:
+        checkpoint(job, state)
+
+
 def _execute(
     execute: Callable[..., str],
     job: MutableMapping[str, Any],
@@ -1774,11 +1785,26 @@ def run_azure_distributed_social_network_measurement(
     timestamp: Callable[[], str] | None = None,
     initializer_clock: Callable[[], float] = time.monotonic,
     initializer_sleep: Callable[[float], Any] = time.sleep,
+    qualification_checkpoint: (
+        Callable[[MutableMapping[str, Any], str], Any] | None
+    ) = None,
 ) -> dict[str, Any]:
     """Initialize and measure the exact Azure distributed candidate once."""
 
     if not isinstance(job, MutableMapping):
         raise DistributedMeasurementError('A mutable benchmark job is required.')
+    if (
+        qualification_checkpoint is not None
+        and not callable(qualification_checkpoint)
+    ):
+        raise DistributedMeasurementError(
+            'The qualification checkpoint must be callable.'
+        )
+    if qualification_checkpoint is not None and not callable(persist):
+        raise DistributedMeasurementError(
+            'A qualification checkpoint requires a callable persistence '
+            'hook so its journal boundary is durable.'
+        )
     resources = job.get('resources')
     if not isinstance(resources, MutableMapping):
         raise DistributedMeasurementError(
@@ -1896,6 +1922,11 @@ def run_azure_distributed_social_network_measurement(
         measurement_attestation=None,
         persist=persist,
     )
+    _qualification_checkpoint(
+        qualification_checkpoint,
+        job,
+        'load_generator_ready',
+    )
 
     application = plan.host('application')
     control = plan.host('control')
@@ -1942,6 +1973,11 @@ def run_azure_distributed_social_network_measurement(
         warmup_metrics=None,
         measurement_attestation=None,
         persist=persist,
+    )
+    _qualification_checkpoint(
+        qualification_checkpoint,
+        job,
+        'initialization_started',
     )
 
     _emit(emit, job, 'Initializing the pinned Reed98 Social Network dataset.')
@@ -2008,6 +2044,11 @@ def run_azure_distributed_social_network_measurement(
             measurement_attestation=in_progress_attestation,
             persist=persist,
         )
+        _qualification_checkpoint(
+            qualification_checkpoint,
+            job,
+            'warmup_started',
+        )
         _emit(emit, job, 'Running the excluded distributed warm-up interval.')
         warmup_output = _execute(
             execute,
@@ -2053,6 +2094,11 @@ def run_azure_distributed_social_network_measurement(
         warmup_metrics=warmup_metrics,
         measurement_attestation=in_progress_attestation,
         persist=persist,
+    )
+    _qualification_checkpoint(
+        qualification_checkpoint,
+        job,
+        'measurement_started',
     )
     _emit(emit, job, 'Running the one-shot distributed measurement interval.')
     started_at = _timestamp(timestamp)

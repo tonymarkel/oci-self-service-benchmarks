@@ -11,7 +11,7 @@ from unittest.mock import patch
 from app import main
 
 
-def active_job(job_id='cancel-job', *, status='testing'):
+def active_job(job_id='ca11ce11ca10', *, status='testing'):
     cancel = threading.Event()
     return {
         'id': job_id,
@@ -136,7 +136,7 @@ class LiveRunCancellationTests(unittest.TestCase):
 
     def test_stop_during_reporting_preserves_completed_benchmark_outcome(self):
         async def scenario(directory):
-            job = active_job(job_id='cancel-reporting', status='queued')
+            job = active_job(job_id='ca11ce11ca12', status='queued')
             report_started = threading.Event()
             release_report = threading.Event()
             cleanup_calls = []
@@ -197,7 +197,7 @@ class LiveRunCancellationTests(unittest.TestCase):
 
     def test_stop_during_auto_cleanup_does_not_race_or_mark_interrupted(self):
         async def scenario(directory):
-            job = active_job(job_id='cleanup-race', status='queued')
+            job = active_job(job_id='c1ea0a11ca13', status='queued')
             cleanup_started = threading.Event()
             release_cleanup = threading.Event()
             cleanup_calls = []
@@ -255,7 +255,7 @@ class LiveRunCancellationTests(unittest.TestCase):
         self.assertEqual(main.benchmark_status(job), 'complete')
 
     def test_ssh_process_is_terminated_when_cancellation_is_signalled(self):
-        job = active_job(job_id='cancel-ssh')
+        job = active_job(job_id='ca11ce55aa14')
         cancel = job['_cancel_event']
         captured = {}
 
@@ -303,7 +303,7 @@ class LiveRunCancellationTests(unittest.TestCase):
         self.assertNotIn(job['id'], main.job_processes)
 
     def test_unexpected_communicate_error_cannot_orphan_ssh_process(self):
-        job = active_job(job_id='broken-ssh-pipe')
+        job = active_job(job_id='b00b1e55aa15')
 
         class Process:
             pid = 4343
@@ -348,7 +348,7 @@ class LiveRunCancellationTests(unittest.TestCase):
         self.assertNotIn(job['id'], main.job_processes)
 
     def test_first_boot_retry_wait_is_cancellation_aware(self):
-        job = active_job(job_id='cancel-readiness')
+        job = active_job(job_id='ca11cead1e16')
 
         def unavailable(*_args, **_kwargs):
             job['_cancel_event'].set()
@@ -374,17 +374,9 @@ class LiveRunCancellationTests(unittest.TestCase):
         sleep.assert_not_called()
 
     def test_persisted_cancelling_job_recovers_as_interrupted_and_destroys(self):
-        job = active_job(job_id='restart-cancelling', status='cancelling')
+        job = active_job(job_id='ca11ce11ca11', status='cancelling')
         job['benchmark_interrupted'] = True
         job['cancel_requested_at'] = main.now()
-        scheduled = []
-
-        def create_task(coroutine):
-            scheduled.append(coroutine)
-            coroutine.close()
-            task = SimpleNamespace(exception=lambda: None)
-            task.add_done_callback = lambda callback: callback(task)
-            return task
 
         with tempfile.TemporaryDirectory() as directory:
             run_directory = Path(directory) / job['id']
@@ -393,11 +385,7 @@ class LiveRunCancellationTests(unittest.TestCase):
                 main.jobs.clear()
                 status = main.job_status(job['id'])
                 summary = main.run_summary(run_directory)
-                with patch.object(
-                    main.asyncio,
-                    'create_task',
-                    side_effect=create_task,
-                ):
+                with patch.object(main, 'destroy_with_status'):
                     response = asyncio.run(main.destroy(job['id']))
                 saved = json.loads((run_directory / 'state.json').read_text())
 
@@ -409,11 +397,10 @@ class LiveRunCancellationTests(unittest.TestCase):
         self.assertEqual(summary['benchmark_status'], 'interrupted')
         self.assertEqual(response, {'status': 'destroying'})
         self.assertEqual(saved['status'], 'destroying')
-        self.assertEqual(len(scheduled), 1)
 
     def test_direct_cleanup_task_is_retained_and_repeated_post_is_serial(self):
         async def scenario(directory):
-            job = active_job(job_id='retained-cleanup', status='complete')
+            job = active_job(job_id='e7a1edc1ea17', status='complete')
             job['results'] = [{
                 'id': 'deathstarbench',
                 'name': 'DeathStarBench',
@@ -444,21 +431,22 @@ class LiveRunCancellationTests(unittest.TestCase):
                 release_cleanup.set()
                 await cleanup_task
                 await asyncio.sleep(0)
-            return job, first, second, cleanup_calls
+            return job, main.jobs[job['id']], first, second, cleanup_calls
 
         with tempfile.TemporaryDirectory() as directory:
-            job, first, second, cleanup_calls = asyncio.run(
+            original_job, managed_job, first, second, cleanup_calls = asyncio.run(
                 scenario(directory)
             )
 
         self.assertEqual(first, {'status': 'destroying'})
         self.assertEqual(second, {'status': 'destroying'})
         self.assertEqual(cleanup_calls, ['destroying'])
-        self.assertEqual(job['status'], 'destroyed')
-        self.assertNotIn(job['id'], main.job_tasks)
+        self.assertEqual(original_job['status'], 'complete')
+        self.assertEqual(managed_job['status'], 'destroyed')
+        self.assertNotIn(original_job['id'], main.job_tasks)
 
     def test_live_status_always_reports_recoverability(self):
-        job = active_job(job_id='live-recoverable')
+        job = active_job(job_id='11feaec0ab18')
         main.jobs[job['id']] = job
 
         status = main.job_status(job['id'])
@@ -468,7 +456,7 @@ class LiveRunCancellationTests(unittest.TestCase):
 
     def test_terminal_supervisor_is_joined_without_falsifying_outcome(self):
         async def scenario(directory):
-            job = active_job(job_id='terminal-race', status='complete')
+            job = active_job(job_id='7eaa1a1ace19', status='complete')
             job['results'] = [{
                 'id': 'deathstarbench',
                 'name': 'DeathStarBench',
@@ -481,34 +469,25 @@ class LiveRunCancellationTests(unittest.TestCase):
             supervisor = asyncio.create_task(finishing_supervisor())
             main.jobs[job['id']] = job
             main.job_tasks[job['id']] = supervisor
-            scheduled = []
-
-            def create_task(coroutine):
-                scheduled.append(coroutine)
-                coroutine.close()
-                task = SimpleNamespace(exception=lambda: None)
-                task.add_done_callback = lambda callback: callback(task)
-                return task
 
             with (
                 patch.object(main, 'RUNS', Path(directory)),
-                patch.object(
-                    main.asyncio,
-                    'create_task',
-                    side_effect=create_task,
-                ),
+                patch.object(main, 'destroy_with_status'),
             ):
                 response = await main.destroy(job['id'])
-            return job, response, scheduled
+                cleanup_task = main.job_tasks[job['id']]
+                await cleanup_task
+                await asyncio.sleep(0)
+            return job, main.jobs[job['id']], response
 
         with tempfile.TemporaryDirectory() as directory:
-            job, response, scheduled = asyncio.run(scenario(directory))
+            original_job, managed_job, response = asyncio.run(scenario(directory))
 
         self.assertEqual(response, {'status': 'destroying'})
-        self.assertEqual(job['status'], 'destroying')
-        self.assertFalse(job.get('benchmark_interrupted', False))
-        self.assertFalse(job['_cancel_event'].is_set())
-        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(original_job['status'], 'complete')
+        self.assertEqual(managed_job['status'], 'destroying')
+        self.assertFalse(managed_job.get('benchmark_interrupted', False))
+        self.assertFalse(original_job['_cancel_event'].is_set())
 
 
 if __name__ == '__main__':

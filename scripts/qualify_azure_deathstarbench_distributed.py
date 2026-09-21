@@ -12,17 +12,18 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-import fcntl
+from datetime import datetime, timedelta
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import re
+import signal
 import sys
 import threading
 import uuid
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, NoReturn
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import (
@@ -53,10 +54,31 @@ from app.deathstarbench_k3s_workload import validate_image_lock
 from app.models import BenchmarkPlan
 from app.providers import azure
 from app.resource_inventory import ROLE_NODE_INVENTORY_KEY
+from app.run_lease import (
+    LEGACY_AZURE_QUALIFICATION_LOCK_FILENAME,
+    RunLease,
+    RunLeaseError,
+    RunLeaseHeldError,
+    acquire_run_lease,
+)
 
 
 LOCK_FILENAME = 'deathstarbench-social-image-lock.json'
-QUALIFICATION_LOCK_FILENAME = '.deathstarbench-azure-qualification.lock'
+# Retain this name for callers/tests that used the harness-specific constant,
+# while the process-wide run lease holds it as a migration guard for older
+# qualifier processes.
+QUALIFICATION_LOCK_FILENAME = LEGACY_AZURE_QUALIFICATION_LOCK_FILENAME
+INTERRUPTION_EVIDENCE_FILENAME = 'qualification-interruption.json'
+INTERRUPTION_EVIDENCE_SCHEMA_VERSION = 1
+MAX_INTERRUPTION_EVIDENCE_BYTES = 1024
+HARD_INTERRUPTION_EXIT_CODE = 86
+INTERRUPTION_CHECKPOINTS = (
+    'load_generator_ready',
+    'initialization_started',
+    'warmup_started',
+    'measurement_started',
+)
+INTERRUPTION_MODES = ('graceful', 'hard')
 GHCR_HOST = 'ghcr.io'
 GHCR_RESPONSE_LIMIT_BYTES = 2 * 1024 * 1024
 GHCR_TIMEOUT_SECONDS = 30
@@ -92,12 +114,25 @@ WORKLOAD_OPTION_DEFAULTS = {
     'warmup_seconds': 30,
     'duration_seconds': 60,
     'threads': 4,
-    'connections': 64,
+    # Keep the operator harness on the exact live-qualified load contract.
+    # The benchmark application's general UI default is intentionally
+    # independent; 64 connections at only 100 requests/second causes wrk2 to
+    # report timeout events even when the service completes the requests.
+    'connections': 4,
     'request_rate': 100,
 }
 SAFE_MEASUREMENT_RESUME_STATES = frozenset({
     'preparing_load_generator',
     'load_generator_ready',
+})
+MEASUREMENT_JOURNAL_STATES = frozenset({
+    *SAFE_MEASUREMENT_RESUME_STATES,
+    'initialization_started',
+    'dataset_ready',
+    'warmup_started',
+    'warmup_complete',
+    'measurement_started',
+    'measurement_complete',
 })
 
 
@@ -142,6 +177,23 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             'After workload readiness, initialize the one-shot dataset, run '
             'wrk2, and require a complete saved report before cleanup.'
+        ),
+    )
+    parser.add_argument(
+        '--interrupt-at',
+        choices=INTERRUPTION_CHECKPOINTS,
+        help=(
+            'Qualification-only failure injection immediately after the named '
+            'measurement state is durably journaled. Requires --measure.'
+        ),
+    )
+    parser.add_argument(
+        '--interrupt-mode',
+        choices=INTERRUPTION_MODES,
+        help=(
+            'Use cooperative cleanup (graceful) or intentionally terminate '
+            'the harness process (hard). Requires --measure and --interrupt-at; '
+            'the safe default with --interrupt-at is graceful.'
         ),
     )
     parser.add_argument(
@@ -496,25 +548,573 @@ def _set_status(job: dict[str, Any], status: str):
     _persist(job)
 
 
+def _validate_interruption_options(args: argparse.Namespace) -> None:
+    interrupt_at = getattr(args, 'interrupt_at', None)
+    interrupt_mode = getattr(args, 'interrupt_mode', None)
+    if interrupt_at is not None and interrupt_at not in INTERRUPTION_CHECKPOINTS:
+        raise QualificationError('The interruption checkpoint is invalid.')
+    if interrupt_mode is not None and interrupt_mode not in INTERRUPTION_MODES:
+        raise QualificationError('The interruption mode is invalid.')
+    if getattr(args, 'cleanup_only', None) and (
+        interrupt_at is not None or interrupt_mode is not None
+    ):
+        raise QualificationError(
+            'Interruption injection cannot be used with --cleanup-only.'
+        )
+    if interrupt_at is not None and not getattr(args, 'measure', False):
+        raise QualificationError('--interrupt-at requires --measure.')
+    if interrupt_mode is not None and (
+        not getattr(args, 'measure', False) or interrupt_at is None
+    ):
+        raise QualificationError(
+            '--interrupt-mode requires --measure and --interrupt-at.'
+        )
+    if (
+        interrupt_at == 'warmup_started'
+        and getattr(args, 'warmup_seconds', None) == 0
+    ):
+        raise QualificationError(
+            '--interrupt-at warmup_started requires a non-zero warm-up.'
+        )
+
+
+def _effective_interrupt_mode(args: argparse.Namespace) -> str | None:
+    if getattr(args, 'interrupt_at', None) is None:
+        return None
+    return str(getattr(args, 'interrupt_mode', None) or 'graceful')
+
+
+def _execution_state(job: Mapping[str, Any]) -> str | None:
+    resources = job.get('resources')
+    journal = (
+        resources.get(DEATHSTARBENCH_EXECUTION_JOURNAL_KEY)
+        if isinstance(resources, Mapping)
+        else None
+    )
+    state = journal.get('state') if isinstance(journal, Mapping) else None
+    return state if isinstance(state, str) and state else None
+
+
+def _replay_decision(execution_state: str | None) -> str:
+    if execution_state is None or execution_state in SAFE_MEASUREMENT_RESUME_STATES:
+        return 'resume_allowed'
+    return 'cleanup_only_required'
+
+
+def _evidence_path(job_id: str) -> Path:
+    if not application.RUN_ID_PATTERN.fullmatch(job_id):
+        raise QualificationError(
+            'Qualification job IDs must be 12 lowercase hex digits.'
+        )
+    return application.RUNS / job_id / INTERRUPTION_EVIDENCE_FILENAME
+
+
+def _validated_interruption_evidence(
+    value: Mapping[str, Any] | object,
+    *,
+    job_id: str,
+) -> dict[str, Any]:
+    fields = {
+        'schema_version',
+        'job_id',
+        'source',
+        'mode',
+        'checkpoint',
+        'signal',
+        'execution_state',
+        'replay_decision',
+        'requested_at',
+        'subsequent_signal',
+        'subsequent_signal_at',
+        'subsequent_signal_execution_state',
+        'subsequent_signal_replay_decision',
+        'cleanup_outcome',
+        'recovery_outcome',
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise QualificationError(
+            'The qualification interruption evidence schema is invalid.'
+        )
+    evidence = dict(value)
+    schema_version = evidence['schema_version']
+    source = evidence['source']
+    mode = evidence['mode']
+    checkpoint = evidence['checkpoint']
+    signal_name = evidence['signal']
+    execution_state = evidence['execution_state']
+    replay_decision = evidence['replay_decision']
+    requested_at = evidence['requested_at']
+    subsequent_signal = evidence['subsequent_signal']
+    subsequent_signal_at = evidence['subsequent_signal_at']
+    subsequent_execution_state = evidence[
+        'subsequent_signal_execution_state'
+    ]
+    subsequent_replay_decision = evidence[
+        'subsequent_signal_replay_decision'
+    ]
+    cleanup_outcome = evidence['cleanup_outcome']
+    recovery_outcome = evidence['recovery_outcome']
+    try:
+        parsed_requested_at = datetime.fromisoformat(requested_at)
+    except (TypeError, ValueError):
+        parsed_requested_at = None
+    try:
+        parsed_subsequent_signal_at = (
+            datetime.fromisoformat(subsequent_signal_at)
+            if subsequent_signal_at is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        parsed_subsequent_signal_at = None
+    if (
+        type(schema_version) is not int
+        or schema_version != INTERRUPTION_EVIDENCE_SCHEMA_VERSION
+        or not isinstance(evidence['job_id'], str)
+        or evidence['job_id'] != job_id
+        or not isinstance(source, str)
+        or source not in {'checkpoint', 'signal'}
+        or not isinstance(mode, str)
+        or mode not in INTERRUPTION_MODES
+        or (
+            checkpoint is not None
+            and (
+                not isinstance(checkpoint, str)
+                or checkpoint not in INTERRUPTION_CHECKPOINTS
+            )
+        )
+        or (
+            signal_name is not None
+            and (
+                not isinstance(signal_name, str)
+                or signal_name not in {'SIGINT', 'SIGTERM'}
+            )
+        )
+        or (
+            execution_state is not None
+            and (
+                not isinstance(execution_state, str)
+                or execution_state not in MEASUREMENT_JOURNAL_STATES
+            )
+        )
+        or not isinstance(replay_decision, str)
+        or replay_decision not in {'resume_allowed', 'cleanup_only_required'}
+        or not isinstance(requested_at, str)
+        or not requested_at
+        or len(requested_at) > 64
+        or parsed_requested_at is None
+        or parsed_requested_at.utcoffset() != timedelta(0)
+        or parsed_requested_at.isoformat() != requested_at
+        or (
+            subsequent_signal is None
+            and any(
+                item is not None
+                for item in (
+                    subsequent_signal_at,
+                    subsequent_execution_state,
+                    subsequent_replay_decision,
+                )
+            )
+        )
+        or (
+            subsequent_signal is not None
+            and (
+                not isinstance(subsequent_signal, str)
+                or subsequent_signal not in {'SIGINT', 'SIGTERM'}
+                or not isinstance(subsequent_signal_at, str)
+                or not subsequent_signal_at
+                or len(subsequent_signal_at) > 64
+                or parsed_subsequent_signal_at is None
+                or parsed_subsequent_signal_at.utcoffset() != timedelta(0)
+                or parsed_subsequent_signal_at.isoformat()
+                != subsequent_signal_at
+                or (
+                    subsequent_execution_state is not None
+                    and (
+                        not isinstance(subsequent_execution_state, str)
+                        or subsequent_execution_state
+                        not in MEASUREMENT_JOURNAL_STATES
+                    )
+                )
+                or not isinstance(subsequent_replay_decision, str)
+                or subsequent_replay_decision
+                not in {'resume_allowed', 'cleanup_only_required'}
+                or subsequent_replay_decision
+                != _replay_decision(subsequent_execution_state)
+            )
+        )
+        or not isinstance(cleanup_outcome, str)
+        or cleanup_outcome
+        not in {
+            'pending',
+            'not_attempted_process_exit',
+            'completed',
+            'failed',
+        }
+        or not isinstance(recovery_outcome, str)
+        or recovery_outcome
+        not in {
+            'pending',
+            'not_required',
+            'resume_started',
+            'resume_completed',
+            'resume_failed',
+            'resume_refused',
+            'cleanup_only_started',
+            'cleanup_completed',
+            'cleanup_failed',
+        }
+    ):
+        raise QualificationError(
+            'The qualification interruption evidence values are invalid.'
+        )
+    if source == 'checkpoint':
+        if (
+            checkpoint is None
+            or signal_name is not None
+            or execution_state != checkpoint
+        ):
+            raise QualificationError(
+                'Checkpoint interruption evidence is inconsistent.'
+            )
+    elif (
+        checkpoint is not None
+        or signal_name is None
+        or mode != 'graceful'
+    ):
+        raise QualificationError('Signal interruption evidence is inconsistent.')
+    if replay_decision != _replay_decision(execution_state):
+        raise QualificationError(
+            'The qualification interruption replay decision is inconsistent.'
+        )
+    return evidence
+
+
+def _serialize_interruption_evidence(evidence: Mapping[str, Any]) -> bytes:
+    value = (
+        json.dumps(
+            dict(evidence),
+            sort_keys=True,
+            separators=(',', ':'),
+            ensure_ascii=True,
+        )
+        + '\n'
+    ).encode('ascii')
+    if len(value) > MAX_INTERRUPTION_EVIDENCE_BYTES:
+        raise QualificationError(
+            'The qualification interruption evidence exceeds its safety limit.'
+        )
+    return value
+
+
+def _write_interruption_evidence(
+    job: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    job_id = str(job.get('id') or '')
+    validated = _validated_interruption_evidence(evidence, job_id=job_id)
+    value = _serialize_interruption_evidence(validated)
+    target = _evidence_path(job_id)
+    temporary = target.with_name(
+        f'.{INTERRUPTION_EVIDENCE_FILENAME}.{uuid.uuid4().hex}.tmp'
+    )
+    try:
+        with temporary.open('xb') as artifact:
+            os.fchmod(artifact.fileno(), 0o600)
+            artifact.write(value)
+            artifact.flush()
+            os.fsync(artifact.fileno())
+        os.replace(temporary, target)
+        directory_descriptor = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+        if target.read_bytes() != value:
+            raise QualificationError(
+                'The qualification interruption evidence changed after writing.'
+            )
+    except QualificationError:
+        raise
+    except OSError as exc:
+        raise QualificationError(
+            f'Unable to persist qualification interruption evidence: {exc}'
+        ) from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+    return validated
+
+
+def _read_interruption_evidence(job_id: str) -> dict[str, Any] | None:
+    path = _evidence_path(job_id)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise QualificationError(
+            f'Unable to read qualification interruption evidence: {exc}'
+        ) from exc
+    if not raw or len(raw) > MAX_INTERRUPTION_EVIDENCE_BYTES:
+        raise QualificationError(
+            'The qualification interruption evidence has an invalid size.'
+        )
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f'duplicate field {key!r}')
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(raw, object_pairs_hook=unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise QualificationError(
+            'The qualification interruption evidence is invalid JSON.'
+        ) from exc
+    validated = _validated_interruption_evidence(value, job_id=job_id)
+    if raw != _serialize_interruption_evidence(validated):
+        raise QualificationError(
+            'The qualification interruption evidence is not canonical.'
+        )
+    return validated
+
+
+def _update_interruption_evidence(
+    job: Mapping[str, Any],
+    *,
+    cleanup_outcome: str | None = None,
+    recovery_outcome: str | None = None,
+) -> dict[str, Any] | None:
+    evidence = _read_interruption_evidence(str(job['id']))
+    if evidence is None:
+        return None
+    if cleanup_outcome is not None:
+        evidence['cleanup_outcome'] = cleanup_outcome
+    if recovery_outcome is not None:
+        evidence['recovery_outcome'] = recovery_outcome
+    return _write_interruption_evidence(job, evidence)
+
+
+def _record_checkpoint_interruption(
+    job: dict[str, Any],
+    state: str,
+    *,
+    mode: str,
+) -> None:
+    observed_state = _execution_state(job)
+    if state not in INTERRUPTION_CHECKPOINTS or observed_state != state:
+        raise QualificationError(
+            'The requested interruption checkpoint does not match the durable '
+            'measurement journal.'
+        )
+    if _read_interruption_evidence(str(job['id'])) is not None:
+        raise QualificationError(
+            'Qualification interruption origin evidence already exists; '
+            'refusing to replace it with another checkpoint.'
+        )
+    _write_interruption_evidence(
+        job,
+        {
+            'schema_version': INTERRUPTION_EVIDENCE_SCHEMA_VERSION,
+            'job_id': str(job['id']),
+            'source': 'checkpoint',
+            'mode': mode,
+            'checkpoint': state,
+            'signal': None,
+            'execution_state': observed_state,
+            'replay_decision': _replay_decision(observed_state),
+            'requested_at': application.now(),
+            'subsequent_signal': None,
+            'subsequent_signal_at': None,
+            'subsequent_signal_execution_state': None,
+            'subsequent_signal_replay_decision': None,
+            'cleanup_outcome': (
+                'not_attempted_process_exit' if mode == 'hard' else 'pending'
+            ),
+            'recovery_outcome': 'pending' if mode == 'hard' else 'not_required',
+        },
+    )
+
+
+def _record_signal_interruption(
+    job: dict[str, Any],
+    signum: int,
+) -> None:
+    signal_name = signal.Signals(signum).name
+    if signal_name not in {'SIGINT', 'SIGTERM'}:
+        raise QualificationError('Unsupported qualification cancellation signal.')
+    observed_state = _execution_state(job)
+    existing = _read_interruption_evidence(str(job['id']))
+    if existing is not None:
+        # Origin fields are immutable qualification evidence. A signal during
+        # later resume/cleanup work is retained separately, and the first such
+        # signal wins so repeated recovery attempts cannot rewrite history.
+        if existing['subsequent_signal'] is None:
+            existing['subsequent_signal'] = signal_name
+            existing['subsequent_signal_at'] = application.now()
+            existing['subsequent_signal_execution_state'] = observed_state
+            existing['subsequent_signal_replay_decision'] = _replay_decision(
+                observed_state
+            )
+            _write_interruption_evidence(job, existing)
+        return
+    _write_interruption_evidence(
+        job,
+        {
+            'schema_version': INTERRUPTION_EVIDENCE_SCHEMA_VERSION,
+            'job_id': str(job['id']),
+            'source': 'signal',
+            'mode': 'graceful',
+            'checkpoint': None,
+            'signal': signal_name,
+            'execution_state': observed_state,
+            'replay_decision': _replay_decision(observed_state),
+            'requested_at': application.now(),
+            'subsequent_signal': None,
+            'subsequent_signal_at': None,
+            'subsequent_signal_execution_state': None,
+            'subsequent_signal_replay_decision': None,
+            'cleanup_outcome': 'pending',
+            'recovery_outcome': 'not_required',
+        },
+    )
+
+
+def _mark_interrupted_unless_benchmark_is_terminal(
+    job: dict[str, Any],
+) -> str:
+    """Preserve a completed/failed result when cancellation happens later."""
+
+    outcome_probe = {
+        **job,
+        'error': None,
+        'benchmark_interrupted': False,
+    }
+    outcome = application.benchmark_status(outcome_probe)
+    if outcome not in {'complete', 'failed'}:
+        job['benchmark_interrupted'] = True
+        job['error'] = None
+    job['cancel_requested_at'] = (
+        job.get('cancel_requested_at') or application.now()
+    )
+    return outcome
+
+
+def _hard_exit(exit_code: int) -> NoReturn:
+    """Injectable hard-stop primitive; the OS releases the held lease fd."""
+
+    os._exit(exit_code)
+
+
+def _qualification_checkpoint_callback(
+    *,
+    interrupt_at: str,
+    interrupt_mode: str,
+) -> Callable[[dict[str, Any], str], None]:
+    def checkpoint(job: dict[str, Any], state: str) -> None:
+        application.raise_if_cancelled(job)
+        if state != interrupt_at:
+            return
+        _record_checkpoint_interruption(job, state, mode=interrupt_mode)
+        if interrupt_mode == 'graceful':
+            cancel = application.cancellation_event(job)
+            if cancel is None:
+                cancel = threading.Event()
+                job['_cancel_event'] = cancel
+            cancel.set()
+            raise application.RunCancelled(
+                f'Qualification interruption injected at {state}.'
+            )
+        _hard_exit(HARD_INTERRUPTION_EXIT_CODE)
+        raise QualificationError('The hard-exit primitive unexpectedly returned.')
+
+    return checkpoint
+
+
+@contextmanager
+def _cooperative_signal_handlers(
+    job: dict[str, Any],
+) -> Iterator[dict[str, int | None]]:
+    """Interrupt synchronous waits and retain the cooperative cancel signal.
+
+    Azure SDK pollers are synchronous and can remain inside a socket wait or
+    retry sleep for several minutes.  Merely setting the job's cancellation
+    event leaves the main thread trapped in that wait.  Raising the existing
+    ``RunCancelled`` control-flow exception from Python's main-thread signal
+    handler breaks those waits promptly; durable evidence is still written by
+    the normal lifecycle unwinder, never by the handler itself.
+    """
+
+    state: dict[str, int | None] = {'number': None}
+    cancel = application.cancellation_event(job)
+    if cancel is None:
+        cancel = threading.Event()
+        job['_cancel_event'] = cancel
+
+    def handler(signum, _frame):
+        # Python dispatches handlers on the main thread. Keep this deliberately
+        # in-memory: durable writes happen after normal control returns.  The
+        # BaseException-derived cancellation signal also bypasses Azure SDK
+        # ``except Exception`` retry/error wrappers.
+        if state['number'] is None:
+            state['number'] = signum
+        cancel.set()
+        raise application.RunCancelled(
+            'Qualification interrupted by an operating-system signal.'
+        )
+
+    if threading.current_thread() is not threading.main_thread():
+        raise QualificationError(
+            'Qualification signal handling requires the main Python thread.'
+        )
+    previous = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    try:
+        for signum in previous:
+            signal.signal(signum, handler)
+        yield state
+    finally:
+        for signum, old_handler in previous.items():
+            signal.signal(signum, old_handler)
+
+
+def _acquire_job_lease(job_id: str) -> RunLease:
+    try:
+        return acquire_run_lease(
+            application.RUNS,
+            job_id,
+            'qualification-cli',
+        )
+    except RunLeaseHeldError as exc:
+        raise QualificationError(
+            f'Qualification job {job_id} is already owned by another process '
+            f'({exc.owner.owner_label}, pid {exc.owner.pid}).'
+        ) from exc
+    except (RunLeaseError, ValueError) as exc:
+        raise QualificationError(
+            f'Unable to establish the exclusive lease for qualification job '
+            f'{job_id}: {exc}'
+        ) from exc
+
+
 def _new_job(
     plan: BenchmarkPlan,
     ssh: Mapping[str, str | None],
     image_lock: Mapping[str, Any],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], RunLease]:
     job_id = uuid.uuid4().hex[:12]
     sanitized_plan = plan.model_dump(
         exclude={'ssh_private_key', 'ssh_public_key', 'ssh_key_passphrase'}
     )
     run_directory = application.RUNS / job_id
     run_directory.mkdir(parents=True, exist_ok=False)
-    (run_directory / 'plan.json').write_text(
-        json.dumps(sanitized_plan, indent=2),
-        encoding='utf-8',
-    )
-    (run_directory / LOCK_FILENAME).write_text(
-        json.dumps(dict(image_lock), indent=2) + '\n',
-        encoding='utf-8',
-    )
+    # Acquire before publishing any active state, closing the prior gap where
+    # the web app could observe and mutate a newly-created run before the
+    # qualification harness obtained its own lock.
+    lease = _acquire_job_lease(job_id)
     timestamp = application.now()
     job = {
         'id': job_id,
@@ -531,8 +1131,20 @@ def _new_job(
         'created_at': timestamp,
         'updated_at': timestamp,
     }
-    _persist(job)
-    return job
+    try:
+        (run_directory / 'plan.json').write_text(
+            json.dumps(sanitized_plan, indent=2),
+            encoding='utf-8',
+        )
+        (run_directory / LOCK_FILENAME).write_text(
+            json.dumps(dict(image_lock), indent=2) + '\n',
+            encoding='utf-8',
+        )
+        _persist(job)
+    except BaseException:
+        lease.release()
+        raise
+    return job, lease
 
 
 def _validate_candidate_job(job: Mapping[str, Any], *, job_id: str) -> None:
@@ -580,29 +1192,11 @@ def _load_candidate_job(job_id: str) -> dict[str, Any]:
 
 @contextmanager
 def _exclusive_job_lock(job_id: str) -> Iterator[None]:
-    """Exclude a second qualification-harness process for the same job."""
+    """Compatibility context around the shared cross-process run lease."""
 
-    lock_path = application.RUNS / job_id / QUALIFICATION_LOCK_FILENAME
-    try:
-        lock_file = lock_path.open('a+', encoding='utf-8')
-    except OSError as exc:
-        raise QualificationError(
-            f'Unable to open qualification lock {lock_path}: {exc}'
-        ) from exc
-    try:
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise QualificationError(
-                f'Qualification job {job_id} is already owned by another '
-                'qualification process.'
-            ) from exc
+    lease = _acquire_job_lease(job_id)
+    with lease:
         yield
-    finally:
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        finally:
-            lock_file.close()
 
 
 def _resume_job(
@@ -910,9 +1504,50 @@ def _cleanup(job: dict[str, Any]) -> bool:
 
 
 def _cleanup_only(job_id: str) -> int:
-    job = _load_candidate_job(job_id)
+    # Prove the requested path is a candidate before creating/refreshing lease
+    # metadata, then re-load under the lease so cleanup never mutates stale
+    # pre-lock state.
+    _load_candidate_job(job_id)
     with _exclusive_job_lock(job_id):
-        return 0 if _cleanup(job) else 2
+        job = _load_candidate_job(job_id)
+        evidence_error: Exception | None = None
+        try:
+            if _read_interruption_evidence(job_id) is not None:
+                _update_interruption_evidence(
+                    job,
+                    recovery_outcome='cleanup_only_started',
+                )
+        except Exception as exc:
+            # Retained operator evidence is not part of cloud ownership. Never
+            # let a damaged evidence artifact prevent exact cleanup.
+            evidence_error = exc
+            print(
+                f'Unable to update interruption recovery evidence: {exc}',
+                file=sys.stderr,
+                flush=True,
+            )
+        cleanup_complete = _cleanup(job)
+        try:
+            if _read_interruption_evidence(job_id) is not None:
+                _update_interruption_evidence(
+                    job,
+                    cleanup_outcome=(
+                        'completed' if cleanup_complete else 'failed'
+                    ),
+                    recovery_outcome=(
+                        'cleanup_completed'
+                        if cleanup_complete
+                        else 'cleanup_failed'
+                    ),
+                )
+        except Exception as exc:
+            evidence_error = evidence_error or exc
+            print(
+                f'Unable to finalize interruption recovery evidence: {exc}',
+                file=sys.stderr,
+                flush=True,
+            )
+        return 0 if cleanup_complete and evidence_error is None else 2
 
 
 def _lock_for_run(
@@ -949,79 +1584,230 @@ def _run_qualification(
     ],
     *,
     measure: bool = False,
+    interrupt_at: str | None = None,
+    interrupt_mode: str | None = None,
+    recovery_attempt: bool = False,
 ) -> int:
     failure: BaseException | None = None
     qualified = False
-    try:
-        plan, ssh, image_lock = setup()
-        if measure:
-            job['_persist_results_artifact'] = True
-        _set_status(job, 'provisioning')
-        azure.provision_distributed_deathstarbench_candidate(
-            job,
-            plan,
-            public_key=str(ssh['public_key']),
-            emit=_event,
-            persist=_persist,
-        )
-        _set_status(job, 'testing')
-        prepare_azure_distributed_k3s_candidate(
-            job,
-            execute=application.ssh,
-            emit=_event,
-            persist=_persist,
-        )
-        prepare_azure_distributed_social_network_candidate(
-            job,
-            image_lock,
-            execute=application.ssh,
-            emit=_event,
-            persist=_persist,
-        )
-        resources = job['resources']
-        runtime = resources.get(K3S_RUNTIME_JOURNAL_KEY) or {}
-        workload = resources.get(DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY) or {}
-        if (
-            runtime.get('state') != 'cluster_ready'
-            or workload.get('state') != 'workload_ready'
-        ):
-            raise QualificationError(
-                'Azure candidate did not reach both exact readiness boundaries.'
-            )
-        if measure:
-            result = (
-                application.run_azure_distributed_deathstarbench_candidate_measurement(
-                    job,
-                    plan,
-                    image_lock,
+    setup_complete = False
+    cleanup_complete = False
+    with _cooperative_signal_handlers(job) as signal_state:
+        try:
+            application.raise_if_cancelled(job)
+            existing_evidence = _read_interruption_evidence(str(job['id']))
+            if (
+                recovery_attempt
+                and interrupt_at is not None
+                and existing_evidence is not None
+            ):
+                raise QualificationError(
+                    'A recovery with retained interruption evidence cannot '
+                    'inject another checkpoint; resume without --interrupt-at '
+                    'or use --cleanup-only.'
                 )
+            if recovery_attempt and existing_evidence is not None:
+                _update_interruption_evidence(
+                    job,
+                    recovery_outcome='resume_started',
+                )
+            plan, ssh, image_lock = setup()
+            setup_complete = True
+            application.raise_if_cancelled(job)
+            if measure:
+                job['_persist_results_artifact'] = True
+            _set_status(job, 'provisioning')
+            application.raise_if_cancelled(job)
+            azure.provision_distributed_deathstarbench_candidate(
+                job,
+                plan,
+                public_key=str(ssh['public_key']),
+                emit=_event,
+                persist=_persist,
             )
-            _require_qualified_measurement_result(job, plan, result)
-            _write_and_require_report(job)
-        qualified = True
-        _event(
-            job,
-            'Qualified',
-            (
-                'Azure K3s, Social Network workload, one-shot measurement, and '
-                'saved report passed qualification.'
-                if measure
-                else 'Azure K3s and Social Network workload reached exact '
-                'workload_ready.'
-            ),
-        )
-    except BaseException as exc:  # cleanup must also run for Ctrl-C
-        failure = exc
-        job['error'] = f'{type(exc).__name__}: {exc}'
-        _set_status(job, 'cleanup_pending')
-        print(f'Qualification failed: {job["error"]}', file=sys.stderr, flush=True)
-    finally:
-        cleanup_complete = _cleanup(job)
+            application.raise_if_cancelled(job)
+            _set_status(job, 'testing')
+            prepare_azure_distributed_k3s_candidate(
+                job,
+                execute=application.ssh,
+                emit=_event,
+                persist=_persist,
+            )
+            application.raise_if_cancelled(job)
+            prepare_azure_distributed_social_network_candidate(
+                job,
+                image_lock,
+                execute=application.ssh,
+                emit=_event,
+                persist=_persist,
+            )
+            application.raise_if_cancelled(job)
+            resources = job['resources']
+            runtime = resources.get(K3S_RUNTIME_JOURNAL_KEY) or {}
+            workload = resources.get(DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY) or {}
+            if (
+                runtime.get('state') != 'cluster_ready'
+                or workload.get('state') != 'workload_ready'
+            ):
+                raise QualificationError(
+                    'Azure candidate did not reach both exact readiness boundaries.'
+                )
+            if measure:
+                measurement_kwargs = {}
+                if interrupt_at is not None:
+                    if interrupt_mode not in INTERRUPTION_MODES:
+                        raise QualificationError(
+                            'An interruption checkpoint requires a valid mode.'
+                        )
+                    measurement_kwargs['qualification_checkpoint'] = (
+                        _qualification_checkpoint_callback(
+                            interrupt_at=interrupt_at,
+                            interrupt_mode=interrupt_mode,
+                        )
+                    )
+                application.raise_if_cancelled(job)
+                result = (
+                    application.run_azure_distributed_deathstarbench_candidate_measurement(
+                        job,
+                        plan,
+                        image_lock,
+                        **measurement_kwargs,
+                    )
+                )
+                application.raise_if_cancelled(job)
+                _require_qualified_measurement_result(job, plan, result)
+                application.raise_if_cancelled(job)
+                _write_and_require_report(job)
+                application.raise_if_cancelled(job)
+            qualified = True
+            _event(
+                job,
+                'Qualified',
+                (
+                    'Azure K3s, Social Network workload, one-shot measurement, and '
+                    'saved report passed qualification.'
+                    if measure
+                    else 'Azure K3s and Social Network workload reached exact '
+                    'workload_ready.'
+                ),
+            )
+        except BaseException as exc:  # cleanup must also run for Ctrl-C
+            failure = exc
+            failure_label = f'{type(exc).__name__}: {exc}'
+            job['error'] = failure_label
+            if isinstance(exc, (KeyboardInterrupt, application.RunCancelled)):
+                _mark_interrupted_unless_benchmark_is_terminal(job)
+            _set_status(job, 'cleanup_pending')
+            print(
+                f'Qualification failed: {failure_label}',
+                file=sys.stderr,
+                flush=True,
+            )
+        finally:
+            signum = signal_state['number']
+            if signum is not None:
+                signal_outcome = _mark_interrupted_unless_benchmark_is_terminal(
+                    job
+                )
+                if signal_outcome not in {'complete', 'failed'}:
+                    # A signal is the terminal cause for a still-pending
+                    # benchmark even if the interrupted SDK call surfaced an
+                    # ordinary exception while unwinding.
+                    job['error'] = None
+                if failure is None:
+                    failure = application.RunCancelled(
+                        f'Qualification received {signal.Signals(signum).name}.'
+                    )
+                    _set_status(job, 'cleanup_pending')
+                else:
+                    _persist(job)
+                try:
+                    _record_signal_interruption(job, signum)
+                except BaseException as evidence_error:
+                    if failure is None:
+                        failure = evidence_error
+                    print(
+                        f'Unable to retain signal interruption evidence: '
+                        f'{evidence_error}',
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            try:
+                cleanup_complete = _cleanup(job)
+            except application.RunCancelled as cleanup_interruption:
+                # A first signal during an Azure cleanup poller must also be
+                # able to return control promptly.  The persisted ownership
+                # contract remains intact so --cleanup-only can retry safely.
+                cleanup_complete = False
+                if failure is None:
+                    failure = cleanup_interruption
+                job['cleanup_error'] = (
+                    'Azure cleanup was interrupted by an operating-system '
+                    'signal; recoverable ownership was retained for '
+                    '--cleanup-only.'
+                )
+                _set_status(job, 'cleanup_failed')
+                print(job['cleanup_error'], file=sys.stderr, flush=True)
+
+            # A signal may arrive while cloud cleanup itself is running. It is
+            # still recorded after cleanup without performing file I/O in the
+            # Python signal handler.
+            final_signum = signal_state['number']
+            if final_signum is not None and signum is None:
+                _mark_interrupted_unless_benchmark_is_terminal(job)
+                if failure is None:
+                    failure = application.RunCancelled(
+                        f'Qualification received '
+                        f'{signal.Signals(final_signum).name} during cleanup.'
+                    )
+                try:
+                    _record_signal_interruption(job, final_signum)
+                except BaseException as evidence_error:
+                    if failure is None:
+                        failure = evidence_error
+                    print(
+                        f'Unable to retain signal interruption evidence: '
+                        f'{evidence_error}',
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                _persist(job)
+            try:
+                existing_evidence = _read_interruption_evidence(str(job['id']))
+                if existing_evidence is not None:
+                    recovery_outcome = None
+                    if recovery_attempt:
+                        if qualified:
+                            recovery_outcome = 'resume_completed'
+                        elif not setup_complete:
+                            recovery_outcome = 'resume_refused'
+                        else:
+                            recovery_outcome = 'resume_failed'
+                    _update_interruption_evidence(
+                        job,
+                        cleanup_outcome=(
+                            'completed' if cleanup_complete else 'failed'
+                        ),
+                        recovery_outcome=recovery_outcome,
+                    )
+            except BaseException as evidence_error:
+                if failure is None:
+                    failure = evidence_error
+                print(
+                    f'Unable to finalize interruption evidence: {evidence_error}',
+                    file=sys.stderr,
+                    flush=True,
+                )
 
     if not cleanup_complete:
         return 2
+    signum = signal_state['number']
+    if signum is not None:
+        return 128 + signum
     if failure is not None:
-        return 130 if isinstance(failure, KeyboardInterrupt) else 1
+        if isinstance(failure, (KeyboardInterrupt, application.RunCancelled)):
+            return 130
+        return 1
     if not qualified:
         return 1
     print(
@@ -1033,24 +1819,36 @@ def _run_qualification(
 
 
 def _qualify(args: argparse.Namespace) -> int:
+    interrupt_at = getattr(args, 'interrupt_at', None)
+    interrupt_mode = _effective_interrupt_mode(args)
     if args.resume:
         # Ownership is proven before even creating the harness lock file. Once
-        # this persisted candidate is accepted, every subsequent preflight is
-        # within the cleanup-guaranteed lifecycle.
-        job = _load_candidate_job(args.resume)
-        print(f'Azure qualification job: {job["id"]}', flush=True)
+        # this persisted candidate is accepted, acquire the shared lease and
+        # re-load it so no stale pre-lock object can authorize mutation.
+        preliminary = _load_candidate_job(args.resume)
+        job_id = str(preliminary['id'])
+        print(f'Azure qualification job: {job_id}', flush=True)
 
-        def resume_setup():
-            _require_resumable(job, measure=args.measure)
-            _require_resume_workload_settings(job, args)
-            ssh = _ssh_material()
-            _job, plan = _resume_job(job, ssh)
-            image_lock = _lock_for_run(args.image_lock, job)
-            _preflight_anonymous_ghcr_images(image_lock)
-            return plan, ssh, image_lock
+        with _exclusive_job_lock(job_id):
+            job = _load_candidate_job(job_id)
 
-        with _exclusive_job_lock(str(job['id'])):
-            return _run_qualification(job, resume_setup, measure=args.measure)
+            def resume_setup():
+                _require_resumable(job, measure=args.measure)
+                _require_resume_workload_settings(job, args)
+                ssh = _ssh_material()
+                _job, plan = _resume_job(job, ssh)
+                image_lock = _lock_for_run(args.image_lock, job)
+                _preflight_anonymous_ghcr_images(image_lock)
+                return plan, ssh, image_lock
+
+            return _run_qualification(
+                job,
+                resume_setup,
+                measure=args.measure,
+                interrupt_at=interrupt_at,
+                interrupt_mode=interrupt_mode,
+                recovery_attempt=True,
+            )
 
     # A new run performs every local/registry validation before its ownership
     # journal exists. No Azure write is possible until the job is persisted and
@@ -1059,19 +1857,26 @@ def _qualify(args: argparse.Namespace) -> int:
     image_lock = _read_image_lock(args.image_lock)
     _preflight_anonymous_ghcr_images(image_lock)
     plan = _plan(args, ssh)
-    job = _new_job(plan, ssh, image_lock)
+    job, lease = _new_job(plan, ssh, image_lock)
     print(f'Azure qualification job: {job["id"]}', flush=True)
 
     def new_setup():
         return plan, ssh, image_lock
 
-    with _exclusive_job_lock(str(job['id'])):
-        return _run_qualification(job, new_setup, measure=args.measure)
+    with lease:
+        return _run_qualification(
+            job,
+            new_setup,
+            measure=args.measure,
+            interrupt_at=interrupt_at,
+            interrupt_mode=interrupt_mode,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        _validate_interruption_options(args)
         if args.cleanup_only:
             return _cleanup_only(args.cleanup_only)
         if not args.resume and args.image_lock is None:

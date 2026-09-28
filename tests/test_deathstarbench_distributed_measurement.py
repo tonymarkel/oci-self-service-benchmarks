@@ -1080,7 +1080,7 @@ class DistributedMeasurementOrchestrationTests(unittest.TestCase):
                         self.run_measurement(retry)
                     self.assertEqual(retry.calls, [])
 
-    def test_internal_main_wrapper_forwards_qualification_checkpoint(self):
+    def test_internal_azure_main_wrapper_forwards_qualification_controls(self):
         from app import main
 
         checkpoint = mock.Mock()
@@ -1096,6 +1096,7 @@ class DistributedMeasurementOrchestrationTests(unittest.TestCase):
                     self.job['plan'],
                     self.image_lock,
                     qualification_checkpoint=checkpoint,
+                    qualification_inject_initializer_response_loss=True,
                 )
             )
 
@@ -1108,6 +1109,47 @@ class DistributedMeasurementOrchestrationTests(unittest.TestCase):
             emit=main.event,
             persist=main.persist_job_state,
             qualification_checkpoint=checkpoint,
+            qualification_inject_initializer_response_loss=True,
+        )
+
+    def test_internal_gcp_main_wrapper_forwards_qualification_controls(self):
+        from app import main
+
+        checkpoint = mock.Mock()
+        expected = object()
+        plan = copy.deepcopy(self.job['plan'])
+        plan.update({
+            'provider': 'gcp',
+            'region': 'us-east1',
+            'gcp_project_id': 'qualification-project',
+            'gcp_zone': 'us-east1-b',
+            'shape': 'c4a-standard-8',
+        })
+        with mock.patch.object(
+            main,
+            'run_gcp_distributed_social_network_measurement',
+            return_value=expected,
+        ) as measurement:
+            result = (
+                main.run_gcp_distributed_deathstarbench_candidate_measurement(
+                    self.job,
+                    plan,
+                    self.image_lock,
+                    qualification_checkpoint=checkpoint,
+                    qualification_inject_initializer_response_loss=True,
+                )
+            )
+
+        self.assertIs(result, expected)
+        measurement.assert_called_once_with(
+            self.job,
+            self.image_lock,
+            plan['deathstarbench'],
+            execute=main.ssh,
+            emit=main.event,
+            persist=main.persist_job_state,
+            qualification_checkpoint=checkpoint,
+            qualification_inject_initializer_response_loss=True,
         )
 
     def test_ambiguous_dispatch_without_a_unit_is_poisoned_and_never_replayed(self):
@@ -1264,6 +1306,60 @@ class DistributedMeasurementOrchestrationTests(unittest.TestCase):
         self.assertIn('systemd-run --quiet --no-block', dispatch_command)
         self.assertTrue(all('systemd-run' not in command for command in status_commands))
         self.assertTrue(all('systemctl show' in command for command in status_commands))
+
+    def test_qualification_injects_dispatch_response_loss_after_one_submission(self):
+        executor = MeasurementExecutor()
+        events = []
+
+        result = self.run_measurement(
+            executor,
+            emit=lambda _job, stage, message: events.append((stage, message)),
+            qualification_inject_initializer_response_loss=True,
+        )
+
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(executor.stages.count('initialization'), 1)
+        self.assertEqual(executor.stages.count('initialization_status'), 1)
+        self.assertEqual(
+            self.job['resources'][EXECUTION_JOURNAL_KEY]['state'],
+            'measurement_complete',
+        )
+        self.assertTrue(any(
+            'Qualification injected response loss' in message
+            for _stage, message in events
+        ))
+        self.assertTrue(any(
+            'Initializer dispatch was ambiguous' in message
+            for _stage, message in events
+        ))
+        dispatch_command = next(
+            command
+            for stage, command, _kwargs in executor.calls
+            if stage == 'initialization'
+        )
+        status_commands = [
+            command
+            for stage, command, _kwargs in executor.calls
+            if stage == 'initialization_status'
+        ]
+        self.assertIn('systemd-run --quiet --no-block', dispatch_command)
+        self.assertEqual(len(status_commands), 1)
+        self.assertNotIn('systemd-run', status_commands[0])
+        self.assertIn('systemctl show', status_commands[0])
+
+    def test_qualification_response_loss_flag_is_strictly_boolean(self):
+        executor = MeasurementExecutor()
+
+        with self.assertRaisesRegex(
+            DistributedMeasurementError,
+            'qualification flag must be boolean',
+        ):
+            self.run_measurement(
+                executor,
+                qualification_inject_initializer_response_loss=1,
+            )
+
+        self.assertEqual(executor.calls, [])
 
     def test_warmup_and_measurement_failures_poison_retry(self):
         for failed_stage, expected_state in (

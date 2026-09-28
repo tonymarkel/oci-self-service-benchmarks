@@ -1652,6 +1652,7 @@ def _run_durable_initializer(
     emit: Callable[[MutableMapping[str, Any], str, str], Any] | None,
     clock: Callable[[], float],
     sleep: Callable[[float], Any],
+    qualification_inject_response_loss: bool = False,
 ) -> tuple[str, dict[str, str]]:
     """Dispatch once, then reconcile exclusively through read-only polling."""
 
@@ -1671,6 +1672,20 @@ def _run_durable_initializer(
             timeout=180,
             transport_attempts=1,
         )
+        if qualification_inject_response_loss:
+            # Operator qualification needs to prove the exact response-loss
+            # boundary against a real durable unit.  Drop only the successful
+            # local response after the remote command has returned; the
+            # initializer itself is never submitted a second time.
+            _emit(
+                emit,
+                job,
+                'Qualification injected response loss after the durable '
+                'initializer dispatch returned.',
+            )
+            raise ConnectionError(
+                'Qualification injected initializer dispatch response loss.'
+            )
     except Exception:
         # A lost response cannot reveal whether systemd accepted the unit.  Do
         # not submit it again: the deterministic unit is reconciled below.
@@ -1791,6 +1806,7 @@ def _run_distributed_social_network_measurement(
     qualification_checkpoint: (
         Callable[[MutableMapping[str, Any], str], Any] | None
     ) = None,
+    qualification_inject_initializer_response_loss: bool = False,
 ) -> dict[str, Any]:
     """Initialize and measure one strictly validated candidate exactly once."""
 
@@ -1807,6 +1823,10 @@ def _run_distributed_social_network_measurement(
         raise DistributedMeasurementError(
             'A qualification checkpoint requires a callable persistence '
             'hook so its journal boundary is durable.'
+        )
+    if type(qualification_inject_initializer_response_loss) is not bool:
+        raise DistributedMeasurementError(
+            'The initializer response-loss qualification flag must be boolean.'
         )
     resources = job.get('resources')
     if not isinstance(resources, MutableMapping):
@@ -1997,6 +2017,9 @@ def _run_distributed_social_network_measurement(
             emit=emit,
             clock=initializer_clock,
             sleep=initializer_sleep,
+            qualification_inject_response_loss=(
+                qualification_inject_initializer_response_loss
+            ),
         )
     )
     initializer_attestation = parse_dataset_attestation(initialization_output)
@@ -2267,6 +2290,7 @@ def run_distributed_social_network_measurement(
     qualification_checkpoint: (
         Callable[[MutableMapping[str, Any], str], Any] | None
     ) = None,
+    qualification_inject_initializer_response_loss: bool = False,
 ) -> dict[str, Any]:
     """Measure after dispatching the persisted provider contract."""
 
@@ -2283,6 +2307,9 @@ def run_distributed_social_network_measurement(
         initializer_clock=initializer_clock,
         initializer_sleep=initializer_sleep,
         qualification_checkpoint=qualification_checkpoint,
+        qualification_inject_initializer_response_loss=(
+            qualification_inject_initializer_response_loss
+        ),
     )
 
 
@@ -2301,6 +2328,7 @@ def run_azure_distributed_social_network_measurement(
     qualification_checkpoint: (
         Callable[[MutableMapping[str, Any], str], Any] | None
     ) = None,
+    qualification_inject_initializer_response_loss: bool = False,
 ) -> dict[str, Any]:
     """Compatibility wrapper retaining strict Azure-only validation."""
 
@@ -2317,6 +2345,9 @@ def run_azure_distributed_social_network_measurement(
         initializer_clock=initializer_clock,
         initializer_sleep=initializer_sleep,
         qualification_checkpoint=qualification_checkpoint,
+        qualification_inject_initializer_response_loss=(
+            qualification_inject_initializer_response_loss
+        ),
     )
 
 
@@ -2335,6 +2366,7 @@ def run_gcp_distributed_social_network_measurement(
     qualification_checkpoint: (
         Callable[[MutableMapping[str, Any], str], Any] | None
     ) = None,
+    qualification_inject_initializer_response_loss: bool = False,
 ) -> dict[str, Any]:
     """Measure after reloading the strict GCP candidate contract."""
 
@@ -2351,4 +2383,7 @@ def run_gcp_distributed_social_network_measurement(
         initializer_clock=initializer_clock,
         initializer_sleep=initializer_sleep,
         qualification_checkpoint=qualification_checkpoint,
+        qualification_inject_initializer_response_loss=(
+            qualification_inject_initializer_response_loss
+        ),
     )

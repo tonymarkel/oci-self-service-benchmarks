@@ -81,9 +81,12 @@ from .deathstarbench_contract import (
 from .deathstarbench_distributed import (
     prepare_azure_distributed_k3s_candidate,
     prepare_azure_distributed_social_network_candidate,
+    prepare_gcp_distributed_k3s_candidate,
+    prepare_gcp_distributed_social_network_candidate,
 )
 from .deathstarbench_distributed_measurement import (
     run_azure_distributed_social_network_measurement,
+    run_gcp_distributed_social_network_measurement,
 )
 from .models import (
     BenchmarkPlan,
@@ -5118,7 +5121,7 @@ def run_deathstarbench(job, plan):
         raise RuntimeError(f'DeathStarBench failed. {exc}') from exc
 
 
-def _validate_azure_distributed_deathstarbench_candidate_plan(plan):
+def _validate_distributed_deathstarbench_candidate_plan(plan, provider_id):
     """Validate the exact internal plan shared by candidate-only hooks."""
 
     provider = (
@@ -5142,8 +5145,14 @@ def _validate_azure_distributed_deathstarbench_candidate_plan(plan):
             return options.get(key, default)
         return getattr(options, key, default)
 
-    if str(provider or '').casefold() != 'azure':
-        raise ValueError('The distributed runtime candidate requires Azure.')
+    normalized_provider = str(provider_id or '').strip().casefold()
+    if normalized_provider not in {'azure', 'gcp'}:
+        raise ValueError('The distributed runtime candidate provider is invalid.')
+    if str(provider or '').casefold() != normalized_provider:
+        raise ValueError(
+            f'The distributed runtime candidate requires '
+            f'{normalized_provider.upper()}.'
+        )
     if tuple(benchmarks) != ('deathstarbench',):
         raise ValueError(
             'The distributed runtime candidate requires DeathStarBench alone.'
@@ -5157,6 +5166,18 @@ def _validate_azure_distributed_deathstarbench_candidate_plan(plan):
             'The distributed runtime candidate requires the exact Social '
             'Network distributed_tiered_v1/k3s_v1 contract.'
         )
+
+
+def _validate_azure_distributed_deathstarbench_candidate_plan(plan):
+    """Compatibility validator for the Azure operator-only candidate."""
+
+    _validate_distributed_deathstarbench_candidate_plan(plan, 'azure')
+
+
+def _validate_gcp_distributed_deathstarbench_candidate_plan(plan):
+    """Validate the exact GCP operator-only candidate plan."""
+
+    _validate_distributed_deathstarbench_candidate_plan(plan, 'gcp')
 
 
 def prepare_azure_distributed_deathstarbench_candidate_runtime(job, plan):
@@ -5220,6 +5241,61 @@ def run_azure_distributed_deathstarbench_candidate_measurement(
         else getattr(plan, 'deathstarbench', None)
     )
     return run_azure_distributed_social_network_measurement(
+        job,
+        image_lock,
+        options,
+        execute=ssh,
+        emit=event,
+        persist=persist_job_state,
+        qualification_checkpoint=qualification_checkpoint,
+    )
+
+
+def prepare_gcp_distributed_deathstarbench_candidate_runtime(job, plan):
+    """Internal GCP hook that stops at exact K3s cluster attestation."""
+
+    _validate_gcp_distributed_deathstarbench_candidate_plan(plan)
+    return prepare_gcp_distributed_k3s_candidate(
+        job,
+        execute=ssh,
+        emit=event,
+        persist=persist_job_state,
+    )
+
+
+def prepare_gcp_distributed_deathstarbench_candidate_workload(
+    job,
+    plan,
+    image_lock,
+):
+    """Internal GCP hook that deploys the identical immutable workload."""
+
+    _validate_gcp_distributed_deathstarbench_candidate_plan(plan)
+    return prepare_gcp_distributed_social_network_candidate(
+        job,
+        image_lock,
+        execute=ssh,
+        emit=event,
+        persist=persist_job_state,
+    )
+
+
+def run_gcp_distributed_deathstarbench_candidate_measurement(
+    job,
+    plan,
+    image_lock,
+    *,
+    qualification_checkpoint=None,
+):
+    """Internal GCP one-shot measurement hook for live qualification."""
+
+    _validate_gcp_distributed_deathstarbench_candidate_plan(plan)
+    options = (
+        plan.get('deathstarbench')
+        if isinstance(plan, dict)
+        else getattr(plan, 'deathstarbench', None)
+    )
+    return run_gcp_distributed_social_network_measurement(
         job,
         image_lock,
         options,

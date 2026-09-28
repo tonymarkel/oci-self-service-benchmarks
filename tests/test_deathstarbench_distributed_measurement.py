@@ -17,6 +17,8 @@ from app.deathstarbench_contract import (
 from app.deathstarbench_distributed import (
     prepare_azure_distributed_k3s_candidate,
     prepare_azure_distributed_social_network_candidate,
+    prepare_gcp_distributed_k3s_candidate,
+    prepare_gcp_distributed_social_network_candidate,
 )
 from app.deathstarbench_distributed_measurement import (
     DATASET_FOLLOW_COUNT,
@@ -36,15 +38,18 @@ from app.deathstarbench_distributed_measurement import (
     parse_durable_initializer_status,
     parse_wrk2_execution_output,
     run_azure_distributed_social_network_measurement,
+    run_gcp_distributed_social_network_measurement,
     social_network_initialization_command,
 )
 from app.deathstarbench_k3s_workload import EXPECTED_COMPONENTS, UPSTREAM_REVISION
 from app.models import DeathStarBenchOptions
 from tests.test_deathstarbench_distributed_runtime import (
     FakeRemoteExecutor,
+    GcpFakeRemoteExecutor,
     candidate_image_lock,
     candidate_job,
     candidate_workload_attestation,
+    gcp_candidate_job,
 )
 
 
@@ -85,6 +90,26 @@ def ready_workload_job():
             job,
             image_lock,
             execute=FakeRemoteExecutor(),
+        )
+    return job, image_lock
+
+
+def ready_gcp_workload_job():
+    job = gcp_candidate_job()
+    image_lock = candidate_image_lock()
+    prepare_gcp_distributed_k3s_candidate(
+        job,
+        execute=GcpFakeRemoteExecutor(),
+    )
+    attestation = candidate_workload_attestation(job, image_lock)
+    with mock.patch(
+        'app.deathstarbench_distributed.parse_workload_attestation',
+        return_value=attestation,
+    ):
+        prepare_gcp_distributed_social_network_candidate(
+            job,
+            image_lock,
+            execute=GcpFakeRemoteExecutor(),
         )
     return job, image_lock
 
@@ -1315,6 +1340,111 @@ class DistributedMeasurementOrchestrationTests(unittest.TestCase):
             self.job['resources'][EXECUTION_JOURNAL_KEY],
             completed_journal,
         )
+
+
+class GcpDistributedMeasurementOrchestrationTests(unittest.TestCase):
+    def test_gcp_reuses_exact_dataset_driver_and_measurement_pipeline(self):
+        job, image_lock = ready_gcp_workload_job()
+        options = measurement_options()
+        job['plan'] = {
+            'provider': 'gcp',
+            'region': 'us-central1',
+            'shape': 'c4a-standard-8',
+            'ocpus': 8,
+            'memory_gb': 32,
+            'benchmarks': ['deathstarbench'],
+            'llm_benchmarks': [],
+            'deathstarbench': options.model_dump(),
+        }
+        execution_identity = {
+            'schema_version': 1,
+            'workload_revision': DISTRIBUTED_WORKLOAD_REVISION,
+            'bundle_fingerprint': job['resources'][
+                'deathstarbench_workload_state_v1'
+            ]['rendered_manifest_sha256'],
+            'pods': [
+                {
+                    'component': component,
+                    'name': f'{component}-test',
+                    'uid': f'pod-{index:02d}',
+                    'node_name': 'benchmark-application',
+                    'restart_count': 0,
+                    'image_id': (
+                        f'registry.example/{component}@sha256:' + '1' * 64
+                    ),
+                }
+                for index, component in enumerate(sorted(EXPECTED_COMPONENTS))
+            ],
+        }
+        executor = MeasurementExecutor()
+        ticks = iter((100.0, 110.0))
+
+        with mock.patch(
+            'app.deathstarbench_distributed_measurement.'
+            'parse_workload_execution_attestation',
+            return_value=execution_identity,
+        ):
+            result = run_gcp_distributed_social_network_measurement(
+                job,
+                image_lock,
+                options,
+                execute=executor,
+                monotonic=lambda: next(ticks),
+                timestamp=lambda: '2026-09-21T12:00:00+00:00',
+            )
+
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['metrics']['throughput_requests_per_second'], 20.0)
+        self.assertEqual(
+            result['metadata']['dataset_revision'],
+            DISTRIBUTED_DATASET_REVISION,
+        )
+        self.assertEqual(
+            result['metadata']['load_driver_revision'],
+            DISTRIBUTED_LOAD_DRIVER_REVISION,
+        )
+        self.assertEqual(
+            result['metadata']['measurement_revision'],
+            DISTRIBUTED_MEASUREMENT_REVISION,
+        )
+        self.assertEqual(
+            executor.stages,
+            [
+                'load_generator',
+                'frontend_probe',
+                'database_attestation',
+                'initialization',
+                'initialization_status',
+                'database_attestation',
+                'workload_snapshot',
+                'warmup',
+                'measurement',
+                'workload_snapshot',
+            ],
+        )
+        readiness = next(
+            command
+            for stage, command, _ in executor.calls
+            if stage is None and 'GCP benchmark guest' in command
+        )
+        self.assertIn('Rocky Linux 9', readiness)
+        loadgen_calls = [
+            kwargs
+            for stage, _, kwargs in executor.calls
+            if stage in {
+                'load_generator',
+                'frontend_probe',
+                'initialization',
+                'initialization_status',
+                'warmup',
+                'measurement',
+            }
+        ]
+        self.assertTrue(all(
+            kwargs['host_key']
+            == 'gcp_dsb_load_generator_public_ip'
+            for kwargs in loadgen_calls
+        ))
 
 
 if __name__ == '__main__':

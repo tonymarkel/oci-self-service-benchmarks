@@ -1114,6 +1114,204 @@ def azure_deathstarbench_database_volume_attestation_command(
     )
 
 
+def gcp_deathstarbench_database_volume_mount_command(
+    device_name: str,
+) -> str:
+    """Mount only the manifest-owned GCE database disk at its fixed path.
+
+    GCE exposes the attachment ``deviceName`` as a stable
+    ``/dev/disk/by-id/google-*`` link for both SCSI and NVMe guests.  The
+    provider persists that exact device name before creating the attachment;
+    this command never enumerates or guesses among otherwise-unused disks.
+    """
+
+    normalized_name = str(device_name).strip()
+    if not _GCE_DEVICE_NAME_RE.fullmatch(normalized_name):
+        raise ValueError(
+            'The GCP DeathStarBench database device name is invalid.'
+        )
+    device_link = f'/dev/disk/by-id/google-{normalized_name}'
+    return (
+        'set -euo pipefail; '
+        f'DEVICE_NAME={shlex.quote(normalized_name)}; '
+        f'DEVICE_LINK={shlex.quote(device_link)}; '
+        'MOUNT_POINT=/var/lib/deathstarbench/database; '
+        'DEVICE_READY=false; for attempt in $(seq 1 60); do '
+        'if [ -b "$DEVICE_LINK" ]; then DEVICE_READY=true; break; fi; '
+        'echo "Waiting for exact GCP DeathStarBench database disk '
+        '$DEVICE_LINK ($attempt/60)."; '
+        'if [ "$attempt" -lt 60 ]; then sleep 2; fi; done; '
+        'if [ "$DEVICE_READY" != true ]; then '
+        'echo "The exact GCP DeathStarBench database disk did not appear: '
+        '$DEVICE_LINK" >&2; exit 1; fi; '
+        'DEVICE=$(readlink -f "$DEVICE_LINK"); '
+        'if [ ! -b "$DEVICE" ]; then '
+        'echo "The GCP DeathStarBench database-disk link does not resolve '
+        'to a block device." >&2; exit 1; fi; '
+        'if [ "$(lsblk -dnro TYPE "$DEVICE")" != disk ]; then '
+        'echo "The GCP DeathStarBench database attachment is not a whole '
+        'disk." >&2; exit 1; fi; '
+        'ROOT_SOURCE=$(sudo findmnt -rn -o SOURCE --mountpoint /); '
+        'ROOT_DEVICE=$(readlink -f "$ROOT_SOURCE"); '
+        'if [ ! -b "$ROOT_DEVICE" ]; then '
+        'echo "The GCP guest root filesystem did not resolve to a block '
+        'device." >&2; exit 1; fi; '
+        'ROOT_ANCESTRY=$(lsblk -srnpo NAME "$ROOT_DEVICE"); '
+        'test -n "$ROOT_ANCESTRY"; '
+        'if printf "%s\\n" "$ROOT_ANCESTRY" | grep -Fxq "$DEVICE"; then '
+        'echo "Refusing to format or mount the GCP boot disk as the '
+        'DeathStarBench database volume." >&2; exit 1; fi; '
+        'DEVICE_TREE=$(lsblk -nrpo NAME "$DEVICE"); test -n "$DEVICE_TREE"; '
+        'CHILD_COUNT=$(printf "%s\\n" "$DEVICE_TREE" | tail -n +2 '
+        '| awk \'NF { count++ } END { print count + 0 }\'); '
+        'if [ "$CHILD_COUNT" -ne 0 ]; then '
+        'echo "The GCP DeathStarBench database disk already has partitions '
+        'or child devices; refusing to format it." >&2; exit 1; fi; '
+        'if [ -L "$MOUNT_POINT" ] '
+        '|| { [ -e "$MOUNT_POINT" ] && [ ! -d "$MOUNT_POINT" ]; }; then '
+        'echo "The DeathStarBench database mount point is not a trusted '
+        'directory." >&2; exit 1; fi; '
+        'sudo install -d -o root -g root -m 0755 "$MOUNT_POINT"; '
+        'if [ "$(readlink -f "$MOUNT_POINT")" != "$MOUNT_POINT" ]; then '
+        'echo "The DeathStarBench database mount point resolves outside its '
+        'fixed path." >&2; exit 1; fi; '
+        'DEVICE_MOUNTS=$(lsblk -dnro MOUNTPOINTS "$DEVICE" '
+        '| sed \'/^[[:space:]]*$/d\'); '
+        'if [ -n "$DEVICE_MOUNTS" ] '
+        '&& [ "$DEVICE_MOUNTS" != "$MOUNT_POINT" ]; then '
+        'echo "The GCP DeathStarBench database disk is already mounted at an '
+        'unexpected path." >&2; exit 1; fi; '
+        'FSTYPE=$(sudo blkid -s TYPE -o value "$DEVICE" 2>/dev/null || true); '
+        'if [ -z "$FSTYPE" ]; then sudo mkfs.xfs "$DEVICE"; '
+        'elif [ "$FSTYPE" != xfs ]; then '
+        'echo "Refusing to replace unexpected $FSTYPE filesystem on the GCP '
+        'DeathStarBench database disk." >&2; exit 1; fi; '
+        'UUID=$(sudo blkid -s UUID -o value "$DEVICE"); '
+        'if [ -z "$UUID" ]; then '
+        'echo "The GCP DeathStarBench database disk has no filesystem UUID." '
+        '>&2; exit 1; fi; '
+        'MOUNTED_SOURCE=$(sudo findmnt -rn -o SOURCE '
+        '--mountpoint "$MOUNT_POINT" 2>/dev/null || true); '
+        'MOUNTED_UUID=$(sudo findmnt -rn -o UUID '
+        '--mountpoint "$MOUNT_POINT" 2>/dev/null || true); '
+        'if [ -n "$MOUNTED_SOURCE" ] '
+        '&& { [ -z "$MOUNTED_UUID" ] '
+        '|| [ "$MOUNTED_UUID" != "$UUID" ]; }; then '
+        'echo "A different filesystem is already mounted at '
+        '/var/lib/deathstarbench/database." >&2; exit 1; fi; '
+        'if sudo awk -v mount="$MOUNT_POINT" '
+        "'$0 !~ /^[[:space:]]*#/ && NF >= 2 && $2 == mount "
+        "&& $0 !~ /# cloud-benchmark-dsb-database$/ { found=1 } "
+        "END { exit found ? 0 : 1 }' /etc/fstab; then "
+        'echo "Refusing to replace a non-benchmark DeathStarBench database '
+        'fstab entry." >&2; exit 1; fi; '
+        'FSTAB_TMP=$(mktemp); '
+        "sudo awk '$0 !~ /# cloud-benchmark-dsb-database$/' /etc/fstab "
+        '>"$FSTAB_TMP"; '
+        'printf "UUID=%s /var/lib/deathstarbench/database xfs '
+        'discard,nofail 0 2 # cloud-benchmark-dsb-database\\n" '
+        '"$UUID" >>"$FSTAB_TMP"; '
+        'sudo install -m 0644 "$FSTAB_TMP" /etc/fstab; '
+        'rm -f "$FSTAB_TMP"; '
+        'if [ -z "$MOUNTED_UUID" ]; then sudo mount "$MOUNT_POINT"; fi; '
+        'VERIFY_UUID=$(sudo findmnt -rn -o UUID --mountpoint "$MOUNT_POINT"); '
+        'if [ "$VERIFY_UUID" != "$UUID" ]; then '
+        'echo "The GCP DeathStarBench database disk did not mount by its '
+        'expected UUID." >&2; exit 1; fi; '
+        'sudo chown root:root "$MOUNT_POINT"; sudo chmod 0755 "$MOUNT_POINT"; '
+        'if command -v restorecon >/dev/null 2>&1; then '
+        'sudo restorecon -F "$MOUNT_POINT"; fi; '
+        'printf "GCP_DSB_DATABASE_VOLUME device_name=%s device_link=%s uuid=%s '
+        'mount_point=/var/lib/deathstarbench/database filesystem=xfs\\n" '
+        '"$DEVICE_NAME" "$DEVICE_LINK" "$UUID"'
+    )
+
+
+def gcp_deathstarbench_database_workload_storage_command(
+    filesystem_uuid: str,
+) -> str:
+    """Prepare the provider-neutral MongoDB roots on an attested GCE disk."""
+
+    return azure_deathstarbench_database_workload_storage_command(
+        filesystem_uuid
+    ).replace('AZURE_DSB_WORKLOAD_STORAGE', 'GCP_DSB_WORKLOAD_STORAGE')
+
+
+def gcp_deathstarbench_database_volume_attestation_command(
+    device_name: str,
+    filesystem_uuid: str,
+) -> str:
+    """Re-attest the exact GCE database attachment without mutating it."""
+
+    normalized_name = str(device_name).strip()
+    normalized_uuid = str(filesystem_uuid).strip().lower()
+    if not _GCE_DEVICE_NAME_RE.fullmatch(normalized_name):
+        raise ValueError(
+            'The GCP DeathStarBench database device name is invalid.'
+        )
+    if not re.fullmatch(
+        r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+        normalized_uuid,
+    ):
+        raise ValueError(
+            'DeathStarBench database attestation requires an exact filesystem UUID.'
+        )
+    device_link = f'/dev/disk/by-id/google-{normalized_name}'
+    return (
+        'set -euo pipefail; '
+        f'DEVICE_NAME={shlex.quote(normalized_name)}; '
+        f'DEVICE_LINK={shlex.quote(device_link)}; '
+        'MOUNT_POINT=/var/lib/deathstarbench/database; '
+        f'EXPECTED_UUID={shlex.quote(normalized_uuid)}; '
+        'for attempt in $(seq 1 60); do '
+        'if [ -b "$DEVICE_LINK" ]; then break; fi; '
+        'if [ "$attempt" -lt 60 ]; then sleep 2; fi; done; '
+        'if [ ! -b "$DEVICE_LINK" ]; then '
+        'echo "The GCP DeathStarBench database disk is unavailable for '
+        'read-only attestation: $DEVICE_LINK" >&2; exit 1; fi; '
+        'DEVICE=$(readlink -f "$DEVICE_LINK"); test -b "$DEVICE"; '
+        'test "$(lsblk -dnro TYPE "$DEVICE")" = disk; '
+        'DEVICE_TREE=$(lsblk -nrpo NAME "$DEVICE"); test -n "$DEVICE_TREE"; '
+        'test "$(printf "%s\\n" "$DEVICE_TREE" | tail -n +2 '
+        '| awk \'NF { count++ } END { print count + 0 }\')" -eq 0; '
+        'ROOT_SOURCE=$(sudo findmnt -rn -o SOURCE --mountpoint /); '
+        'ROOT_DEVICE=$(readlink -f "$ROOT_SOURCE"); test -b "$ROOT_DEVICE"; '
+        'ROOT_ANCESTRY=$(lsblk -srnpo NAME "$ROOT_DEVICE"); '
+        'test -n "$ROOT_ANCESTRY"; '
+        'if printf "%s\\n" "$ROOT_ANCESTRY" | grep -Fxq "$DEVICE"; then '
+        'echo "The GCP DeathStarBench database attachment resolves into the '
+        'root-device ancestry." >&2; exit 1; fi; '
+        'test -d "$MOUNT_POINT"; test ! -L "$MOUNT_POINT"; '
+        'test "$(readlink -f "$MOUNT_POINT")" = "$MOUNT_POINT"; '
+        'DEVICE_TYPE=$(sudo blkid -s TYPE -o value "$DEVICE" 2>/dev/null); '
+        'test "$DEVICE_TYPE" = xfs; '
+        'DEVICE_UUID=$(sudo blkid -s UUID -o value "$DEVICE" '
+        '| tr "[:upper:]" "[:lower:]"); '
+        'if [ "$DEVICE_UUID" != "$EXPECTED_UUID" ]; then '
+        'echo "The GCP DeathStarBench database disk UUID changed." >&2; '
+        'exit 1; fi; '
+        'MOUNTED_SOURCE=$(sudo findmnt -rn -o SOURCE '
+        '--mountpoint "$MOUNT_POINT"); '
+        'MOUNTED_DEVICE=$(readlink -f "$MOUNTED_SOURCE"); '
+        'test -b "$MOUNTED_DEVICE"; test "$MOUNTED_DEVICE" = "$DEVICE"; '
+        'MOUNTED_UUID=$(sudo findmnt -rn -o UUID '
+        '--mountpoint "$MOUNT_POINT" | tr "[:upper:]" "[:lower:]"); '
+        'MOUNTED_TYPE=$(sudo findmnt -rn -o FSTYPE '
+        '--mountpoint "$MOUNT_POINT"); '
+        'test "$MOUNTED_UUID" = "$EXPECTED_UUID"; test "$MOUNTED_TYPE" = xfs; '
+        'DEVICE_MOUNTS=$(lsblk -dnro MOUNTPOINTS "$DEVICE" '
+        '| sed \'/^[[:space:]]*$/d\'); '
+        'test "$DEVICE_MOUNTS" = "$MOUNT_POINT"; '
+        'EXPECTED_FSTAB="UUID=$EXPECTED_UUID '
+        '/var/lib/deathstarbench/database xfs discard,nofail 0 2 '
+        '# cloud-benchmark-dsb-database"; '
+        'grep -Fxq "$EXPECTED_FSTAB" /etc/fstab; '
+        'printf "GCP_DSB_DATABASE_VOLUME device_name=%s device_link=%s uuid=%s '
+        'mount_point=/var/lib/deathstarbench/database filesystem=xfs\\n" '
+        '"$DEVICE_NAME" "$DEVICE_LINK" "$EXPECTED_UUID"'
+    )
+
+
 def iperf3_peer_startup_script(
     protocols: Iterable[str],
     *,

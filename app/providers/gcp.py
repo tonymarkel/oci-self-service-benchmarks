@@ -18,9 +18,38 @@ import re
 import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import replace
+from types import MappingProxyType
 from typing import Any
 
+from ..deathstarbench_contract import (
+    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+    DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
+    DISTRIBUTED_TIERED_TOPOLOGY_ID,
+    K3S_RUNTIME_ID,
+    K3S_RUNTIME_JOURNAL_KEY,
+    PODMAN_COMPOSE_RUNTIME_ID,
+    SINGLE_HOST_TOPOLOGY_ID,
+    require_released_runtime,
+)
+from ..deathstarbench_topology import (
+    BENCHMARK_INGRESS_CHANNEL,
+    DeathStarBenchTopologyManifest,
+    K3S_CONTROL_PLANE_CHANNEL,
+    K3S_OVERLAY_CHANNEL,
+    TopologyManifestError,
+    build_topology_manifest,
+)
 from ..guests import rocky_linux
+from ..resource_inventory import (
+    ROLE_NODE_INVENTORY_KEY,
+    ResourceInventoryError,
+    RoleNode,
+    RoleNodeInventory,
+    StorageResource,
+    load_role_node_inventory,
+    persist_role_node_inventory,
+)
 
 
 DEFAULT_REGION = 'us-east1'
@@ -51,6 +80,51 @@ LOADGEN_NETWORK_BANDWIDTH_GBPS = 10
 OPERATION_TIMEOUT_SECONDS = 1800
 RECONCILIATION_ATTEMPTS = 12
 RECONCILIATION_DELAY_SECONDS = 2
+
+DEATHSTARBENCH_TOPOLOGY_MANIFEST_KEY = 'deathstarbench_topology_manifest'
+DEATHSTARBENCH_TOPOLOGY_FINGERPRINT_KEY = (
+    'deathstarbench_topology_fingerprint'
+)
+DISTRIBUTED_NETWORK_CIDR = '10.240.0.0/16'
+DISTRIBUTED_CLUSTER_SUBNET_CIDR = '10.240.1.0/24'
+DISTRIBUTED_LOADGEN_SUBNET_CIDR = '10.240.2.0/24'
+DISTRIBUTED_PRIVATE_ADDRESSES = MappingProxyType({
+    'control': '10.240.1.10',
+    'database': '10.240.1.11',
+    'cache': '10.240.1.12',
+    'application': '10.240.1.13',
+    'load-generator': '10.240.2.10',
+})
+DISTRIBUTED_ROLE_MACHINE_TYPES = MappingProxyType({
+    'control': 'n2-standard-2',
+    'database': 'n2-standard-4',
+    'cache': 'n2-standard-2',
+    'load-generator': 'n2-standard-2',
+})
+DISTRIBUTED_PUBLIC_IP_NODES = frozenset({
+    'control',
+    'application',
+    'load-generator',
+})
+DISTRIBUTED_OS_DISK_SIZE_GB = 50
+DISTRIBUTED_DATABASE_DISK_TYPE = 'pd-ssd'
+DISTRIBUTED_DATABASE_DISK_INTERFACE = 'SCSI'
+DISTRIBUTED_ROUTER_ASN = 64514
+DISTRIBUTED_NODE_PREFIXES = MappingProxyType({
+    role: f'gcp_dsb_{role.replace("-", "_")}_instance'
+    for role in DISTRIBUTED_PRIVATE_ADDRESSES
+})
+DISTRIBUTED_BOOT_PREFIXES = MappingProxyType({
+    role: f'gcp_dsb_{role.replace("-", "_")}_boot_disk'
+    for role in DISTRIBUTED_PRIVATE_ADDRESSES
+})
+DISTRIBUTED_FIREWALL_PREFIXES = (
+    'gcp_dsb_public_ssh_firewall',
+    'gcp_dsb_private_ssh_firewall',
+    'gcp_dsb_k3s_api_firewall',
+    'gcp_dsb_k3s_overlay_firewall',
+    'gcp_dsb_benchmark_firewall',
+)
 
 # Fourth-generation Compute Engine series use Hyperdisk rather than
 # Persistent Disk. C4A has a deliberately supported Hyperdisk Balanced
@@ -122,6 +196,209 @@ def _forget(job: dict[str, Any], persist: PersistCallback | None, *keys: str):
     _persist(job, persist)
 
 
+def _persist_inventory(
+    job: dict[str, Any],
+    persist: PersistCallback | None,
+    inventory: RoleNodeInventory,
+) -> RoleNodeInventory:
+    persist_role_node_inventory(job.setdefault('resources', {}), inventory)
+    _persist(job, persist)
+    return inventory
+
+
+def _validate_expected_role_inventory(
+    current: RoleNodeInventory,
+    expected: RoleNodeInventory,
+):
+    """Reject topology drift without discarding accepted GCE identities."""
+
+    if current.provider != 'gcp' or expected.provider != 'gcp':
+        raise ResourceInventoryError(
+            'GCP role-node inventory has a conflicting provider.'
+        )
+    if current.topology_fingerprint != expected.topology_fingerprint:
+        raise ResourceInventoryError(
+            'GCP role-node inventory has a conflicting topology fingerprint.'
+        )
+    if tuple(node.key for node in current.nodes) != tuple(
+        node.key for node in expected.nodes
+    ):
+        raise ResourceInventoryError(
+            'GCP role-node inventory has conflicting logical nodes.'
+        )
+    stable_node_fields = (
+        'role',
+        'provider_resource_name',
+        'private_addresses',
+        'zone',
+        'shape',
+        'architecture',
+        'capacity_class',
+    )
+    stable_storage_fields = (
+        'key',
+        'kind',
+        'provider_resource_name',
+        'device',
+        'mount_point',
+        'filesystem',
+        'size_gb',
+        'provisioned_iops',
+        'provisioned_throughput_mibps',
+        'ephemeral',
+    )
+    for expected_node in expected.nodes:
+        current_node = current.node(expected_node.key)
+        if current_node is None:
+            raise ResourceInventoryError(
+                f'GCP role-node inventory is missing {expected_node.key}.'
+            )
+        for field_name in stable_node_fields:
+            if getattr(current_node, field_name) != getattr(
+                expected_node, field_name
+            ):
+                raise ResourceInventoryError(
+                    f'GCP role node {expected_node.key} has conflicting '
+                    f'{field_name}.'
+                )
+        current_storage = {item.key: item for item in current_node.storage}
+        expected_storage = {item.key: item for item in expected_node.storage}
+        if set(current_storage) != set(expected_storage):
+            raise ResourceInventoryError(
+                f'GCP role node {expected_node.key} has conflicting storage.'
+            )
+        for storage_key, expected_item in expected_storage.items():
+            current_item = current_storage[storage_key]
+            for field_name in stable_storage_fields:
+                if getattr(current_item, field_name) != getattr(
+                    expected_item, field_name
+                ):
+                    raise ResourceInventoryError(
+                        f'GCP storage {storage_key} has conflicting '
+                        f'{field_name}.'
+                    )
+
+
+def _initialize_distributed_candidate_contract(
+    job: dict[str, Any],
+    persist: PersistCallback | None,
+    manifest: DeathStarBenchTopologyManifest,
+    expected_inventory: RoleNodeInventory,
+    values: Mapping[str, Any],
+) -> RoleNodeInventory:
+    """Persist every deterministic role identity before the first GCE write."""
+
+    resources = job.setdefault('resources', {})
+    topology_keys = (
+        DEATHSTARBENCH_TOPOLOGY_MANIFEST_KEY,
+        DEATHSTARBENCH_TOPOLOGY_FINGERPRINT_KEY,
+        ROLE_NODE_INVENTORY_KEY,
+    )
+    has_contract = any(
+        key in resources
+        for key in (*topology_keys, 'gcp_distributed_candidate')
+    )
+    if has_contract:
+        if not all(key in resources for key in topology_keys):
+            raise ResourceInventoryError(
+                'GCP distributed candidate contract is incomplete.'
+            )
+        if resources.get('gcp_distributed_candidate') is not True:
+            raise ResourceInventoryError(
+                'GCP distributed candidate marker is invalid.'
+            )
+        saved_manifest = DeathStarBenchTopologyManifest.from_dict(
+            resources[DEATHSTARBENCH_TOPOLOGY_MANIFEST_KEY]
+        )
+        if saved_manifest != manifest or resources.get(
+            DEATHSTARBENCH_TOPOLOGY_FINGERPRINT_KEY
+        ) != manifest.fingerprint:
+            raise ResourceInventoryError(
+                'GCP distributed candidate topology conflicts with the saved run.'
+            )
+        for key, expected in values.items():
+            if key not in resources:
+                raise ResourceInventoryError(
+                    f'GCP distributed candidate contract is missing {key}.'
+                )
+            current = resources[key]
+            if isinstance(expected, str):
+                matches = isinstance(current, str) and current == expected
+            else:
+                matches = current == expected
+            if not matches:
+                raise ResourceInventoryError(
+                    f'GCP distributed candidate contract conflicts at {key}.'
+                )
+        current = load_role_node_inventory(resources)
+        _validate_expected_role_inventory(current, expected_inventory)
+        return current
+
+    resources.update(dict(values))
+    resources[DEATHSTARBENCH_TOPOLOGY_MANIFEST_KEY] = manifest.as_dict()
+    resources[DEATHSTARBENCH_TOPOLOGY_FINGERPRINT_KEY] = manifest.fingerprint
+    persist_role_node_inventory(resources, expected_inventory)
+    _persist(job, persist)
+    return expected_inventory
+
+
+def _set_inventory_node_status(
+    job: dict[str, Any],
+    persist: PersistCallback | None,
+    node_key: str,
+    status: str,
+    *,
+    provider_resource_id: str | None = None,
+    public_address: str | None = None,
+    private_address: str | None = None,
+) -> RoleNodeInventory:
+    inventory = load_role_node_inventory(job.setdefault('resources', {}))
+    node = inventory.node(node_key)
+    if node is None:
+        raise ResourceInventoryError(
+            f'GCP role-node inventory is missing {node_key}.'
+        )
+    update = RoleNode(
+        key=node.key,
+        role=node.role,
+        provider_resource_id=provider_resource_id,
+        public_addresses=(public_address,) if public_address else (),
+        private_addresses=(private_address,) if private_address else (),
+        lifecycle_status=status,
+    )
+    return _persist_inventory(job, persist, inventory.upsert(update))
+
+
+def _set_inventory_storage_status(
+    job: dict[str, Any],
+    persist: PersistCallback | None,
+    node_key: str,
+    storage_key: str,
+    status: str,
+    *,
+    provider_resource_id: str | None = None,
+) -> RoleNodeInventory:
+    inventory = load_role_node_inventory(job.setdefault('resources', {}))
+    node = inventory.node(node_key)
+    if node is None:
+        raise ResourceInventoryError(
+            f'GCP role-node inventory is missing {node_key}.'
+        )
+    storage = node.storage_resource(storage_key)
+    if storage is None:
+        raise ResourceInventoryError(
+            f'GCP role node {node_key} is missing storage {storage_key}.'
+        )
+    updated = node.upsert_storage(replace(
+        storage,
+        provider_resource_id=(
+            provider_resource_id or storage.provider_resource_id
+        ),
+        lifecycle_status=status,
+    ))
+    return _persist_inventory(job, persist, inventory.upsert(updated))
+
+
 def _load_adc(project_id: str | None = None, credentials=None):
     if credentials is None:
         try:
@@ -163,6 +440,7 @@ def create_clients(credentials=None) -> dict[str, Any]:
         'images': compute_v1.ImagesClient(**kwargs),
         'networks': compute_v1.NetworksClient(**kwargs),
         'subnetworks': compute_v1.SubnetworksClient(**kwargs),
+        'routers': compute_v1.RoutersClient(**kwargs),
         'firewalls': compute_v1.FirewallsClient(**kwargs),
         'instances': compute_v1.InstancesClient(**kwargs),
         'disks': compute_v1.DisksClient(**kwargs),
@@ -804,6 +1082,7 @@ def _create_named_resource(
                     project_id=str(insert_values.get('project') or ''),
                     zone=str(insert_values.get('zone') or ''),
                 )
+                _assert_saved_identity(prefix, resource, resources)
                 resource_id, self_link = _required_resource_identity(
                     prefix, resource
                 )
@@ -868,6 +1147,7 @@ def _create_named_resource(
             project_id=str(insert_values.get('project') or ''),
             zone=str(insert_values.get('zone') or ''),
         )
+        _assert_saved_identity(prefix, resource, resources)
         resource_id, self_link = _required_resource_identity(prefix, resource)
         _record(
             job,
@@ -894,6 +1174,7 @@ def _create_named_resource(
             project_id=str(insert_values.get('project') or ''),
             zone=str(insert_values.get('zone') or ''),
         )
+        _assert_saved_identity(prefix, resource, resources)
     except Exception:
         # The insert operation succeeded, so visibility/matcher failures must
         # retain the original ambiguity contract for deterministic replay.
@@ -1020,14 +1301,21 @@ def _assert_insert_resource_matches(
             raise RuntimeError(
                 f'Refusing to use GCP {label}: its {field} relationship differs.'
             )
-    for field in (
-        'ip_cidr_range',
-        'size_gb',
-        'provisioned_iops',
-        'provisioned_throughput',
-    ):
+    for field in ('ip_cidr_range', 'size_gb'):
         wanted = _value(expected, field)
         if wanted is not None and str(_value(actual, field, '') or '') != str(wanted):
+            raise RuntimeError(
+                f'Refusing to use GCP {label}: its {field} differs.'
+            )
+    for field in ('provisioned_iops', 'provisioned_throughput'):
+        wanted = _value(expected, field)
+        # Proto-plus exposes an unset integer scalar as zero.  Zero is never a
+        # provisioned performance request in this provider; treat it as absent
+        # so GCE's reported baseline pd-ssd capability is not mistaken for
+        # drift. Positive Hyperdisk values remain exact and fail closed.
+        if int(wanted or 0) and int(_value(actual, field, 0) or 0) != int(
+            wanted
+        ):
             raise RuntimeError(
                 f'Refusing to use GCP {label}: its {field} differs.'
             )
@@ -1044,7 +1332,7 @@ def _assert_insert_resource_matches(
         raise RuntimeError(
             f'Refusing to use GCP {label}: its allowed ports differ.'
         )
-    if prefix == 'gcp_network':
+    if prefix in {'gcp_network', 'gcp_dsb_network'}:
         actual_routing = _value(actual, 'routing_config', {}) or {}
         expected_routing = _value(expected, 'routing_config', {}) or {}
         if (
@@ -1056,7 +1344,11 @@ def _assert_insert_resource_matches(
             raise RuntimeError(
                 f'Refusing to use GCP {label}: custom network mode differs.'
             )
-    if prefix == 'gcp_subnet':
+    if prefix in {
+        'gcp_subnet',
+        'gcp_dsb_cluster_subnet',
+        'gcp_dsb_loadgen_subnet',
+    }:
         for field in ('private_ip_google_access', 'stack_type'):
             if str(_value(actual, field, '') or '') != str(
                 _value(expected, field, '') or ''
@@ -1068,6 +1360,7 @@ def _assert_insert_resource_matches(
         'gcp_ssh_firewall',
         'gcp_iperf_firewall',
         'gcp_web_firewall',
+        *DISTRIBUTED_FIREWALL_PREFIXES,
     }:
         for field in ('direction', 'priority', 'disabled'):
             if str(_value(actual, field, '') or '') != str(
@@ -1080,6 +1373,7 @@ def _assert_insert_resource_matches(
         'gcp_instance',
         'gcp_peer_instance',
         'gcp_loadgen_instance',
+        *DISTRIBUTED_NODE_PREFIXES.values(),
     }:
         actual_tags = _string_set(
             _value(_value(actual, 'tags', {}) or {}, 'items', ())
@@ -1123,6 +1417,20 @@ def _assert_insert_resource_matches(
         ):
             raise RuntimeError(
                 f'Refusing to use GCP {label}: NIC stack_type differs.'
+            )
+        expected_private_ip = (
+            _value(expected_nics[0], 'network_i_p')
+            or _value(expected_nics[0], 'network_ip')
+        )
+        actual_private_ip = (
+            _value(actual_nics[0], 'network_i_p')
+            or _value(actual_nics[0], 'network_ip')
+        )
+        if expected_private_ip and str(actual_private_ip or '') != str(
+            expected_private_ip
+        ):
+            raise RuntimeError(
+                f'Refusing to use GCP {label}: private IP address differs.'
             )
         expected_nic_type = str(
             _value(expected_nics[0], 'nic_type', '') or ''
@@ -1201,6 +1509,59 @@ def _assert_insert_resource_matches(
                 raise RuntimeError(
                     f'Refusing to use GCP {label}: disk {device_name} source differs.'
                 )
+    if prefix == 'gcp_dsb_router':
+        expected_bgp = _value(expected, 'bgp', {}) or {}
+        actual_bgp = _value(actual, 'bgp', {}) or {}
+        if int(_value(actual_bgp, 'asn', 0) or 0) != int(
+            _value(expected_bgp, 'asn', 0) or 0
+        ):
+            raise RuntimeError(
+                'Refusing to use GCP distributed router: BGP ASN differs.'
+            )
+        expected_nats = list(_value(expected, 'nats', ()) or ())
+        actual_nats = list(_value(actual, 'nats', ()) or ())
+        if len(actual_nats) != len(expected_nats):
+            raise RuntimeError(
+                'Refusing to use GCP distributed router: NAT count differs.'
+            )
+        if not expected_nats:
+            return
+        for field in (
+            'name',
+            'nat_ip_allocate_option',
+            'source_subnetwork_ip_ranges_to_nat',
+            'enable_endpoint_independent_mapping',
+        ):
+            if str(_value(actual_nats[0], field, '') or '') != str(
+                _value(expected_nats[0], field, '') or ''
+            ):
+                raise RuntimeError(
+                    'Refusing to use GCP distributed router: '
+                    f'NAT {field} differs.'
+                )
+        expected_subnets = list(
+            _value(expected_nats[0], 'subnetworks', ()) or ()
+        )
+        actual_subnets = list(
+            _value(actual_nats[0], 'subnetworks', ()) or ()
+        )
+        subnet_matches = (
+            len(actual_subnets) == 1
+            and len(expected_subnets) == 1
+            and _link_equal(
+                _value(actual_subnets[0], 'name'),
+                _value(expected_subnets[0], 'name'),
+            )
+            and _string_set(
+                _value(actual_subnets[0], 'source_ip_ranges_to_nat')
+            ) == _string_set(
+                _value(expected_subnets[0], 'source_ip_ranges_to_nat')
+            )
+        )
+        if not subnet_matches:
+            raise RuntimeError(
+                'Refusing to use GCP distributed router: NAT subnet differs.'
+            )
 
 
 def _machine_type_details(
@@ -1351,26 +1712,494 @@ def _loadgen_machine_details(
     return details
 
 
-def _network_resource(clients: Mapping[str, Any], job_id: str, name: str):
+def _deathstarbench_contract_ids(plan: Any) -> tuple[str, str]:
+    options = _value(plan, 'deathstarbench', {}) or {}
+    return (
+        str(
+            _value(options, 'topology_id', SINGLE_HOST_TOPOLOGY_ID)
+            or SINGLE_HOST_TOPOLOGY_ID
+        ),
+        str(
+            _value(options, 'runtime_id', PODMAN_COMPOSE_RUNTIME_ID)
+            or PODMAN_COMPOSE_RUNTIME_ID
+        ),
+    )
+
+
+def _validate_manifest_capacity(node: Any, details: Mapping[str, Any]):
+    if node.selected_shape and details['machine_type'] != node.selected_shape:
+        raise ValueError(
+            f'GCP role {node.key} resolved a machine type outside its '
+            'topology contract.'
+        )
+    if (
+        node.capacity.minimum_vcpus is not None
+        and int(details['vcpu']) < node.capacity.minimum_vcpus
+    ):
+        raise ValueError(
+            f'GCP machine type {details["machine_type"]} does not satisfy '
+            f'the {node.key} vCPU capacity contract.'
+        )
+    if (
+        node.capacity.minimum_memory_gib is not None
+        and float(details['memory_gb']) < node.capacity.minimum_memory_gib
+    ):
+        raise ValueError(
+            f'GCP machine type {details["machine_type"]} does not satisfy '
+            f'the {node.key} memory capacity contract.'
+        )
+    required_architecture = node.capacity.required_architecture
+    if (
+        required_architecture is not None
+        and details['architecture'] != required_architecture
+    ):
+        raise ValueError(
+            f'GCP machine type {details["machine_type"]} does not satisfy '
+            f'the {node.key} architecture contract.'
+        )
+    if node.architecture and details['architecture'] != node.architecture:
+        raise ValueError(
+            f'GCP machine type {details["machine_type"]} architecture '
+            f'conflicts with the {node.key} topology contract.'
+        )
+
+
+def _distributed_role_details(
+    manifest: DeathStarBenchTopologyManifest,
+    *,
+    project_id: str,
+    zone: str,
+    application_details: Mapping[str, Any],
+    clients: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    details_by_key: dict[str, dict[str, Any]] = {}
+    for node in manifest.nodes:
+        details = (
+            dict(application_details)
+            if node.key == 'application'
+            else _machine_type_details(
+                project_id,
+                zone,
+                DISTRIBUTED_ROLE_MACHINE_TYPES[node.key],
+                clients,
+                missing_architecture_fallback='x86_64',
+            )
+        )
+        expected_machine = (
+            application_details['machine_type']
+            if node.key == 'application'
+            else DISTRIBUTED_ROLE_MACHINE_TYPES[node.key]
+        )
+        if details['machine_type'] != expected_machine:
+            raise ValueError(
+                f'GCP distributed role {node.key} resolved an unexpected '
+                'machine type.'
+            )
+        _validate_manifest_capacity(node, details)
+        details_by_key[node.key] = details
+    return details_by_key
+
+
+def _distributed_candidate_image(
+    resources: Mapping[str, Any],
+    *,
+    key_prefix: str,
+    architecture: str,
+    clients: Mapping[str, Any],
+) -> dict[str, str]:
+    architecture = normalize_architecture(architecture)
+    keys = {
+        'image_id': f'{key_prefix}_id',
+        'name': f'{key_prefix}_name',
+        'self_link': f'{key_prefix}_self_link',
+        'family': f'{key_prefix}_family',
+        'architecture': f'{key_prefix}_architecture',
+    }
+    present = [key for key in keys.values() if key in resources]
+    if present:
+        if len(present) != len(keys):
+            raise ResourceInventoryError(
+                f'GCP distributed image contract {key_prefix} is incomplete.'
+            )
+        image = {field: str(resources[key]) for field, key in keys.items()}
+        if image['architecture'] != architecture:
+            raise ResourceInventoryError(
+                f'GCP distributed image contract {key_prefix} has a '
+                'conflicting architecture.'
+            )
+        if image['family'] != IMAGE_FAMILIES[architecture]:
+            raise ResourceInventoryError(
+                f'GCP distributed image contract {key_prefix} has a '
+                'conflicting family.'
+            )
+        expected_link = f'projects/{IMAGE_PROJECT}/global/images/{image["name"]}'
+        if not _scoped_link_equal(image['self_link'], expected_link):
+            raise ResourceInventoryError(
+                f'GCP distributed image contract {key_prefix} has an '
+                'unexpected project or image.'
+            )
+        return image
+    return latest_rocky_linux_9_image(architecture, clients=clients)
+
+
+def _planned_gcp_inventory(
+    manifest: DeathStarBenchTopologyManifest,
+    *,
+    zone: str,
+    names: Mapping[str, str],
+    details_by_key: Mapping[str, Mapping[str, Any]],
+    database_disk_name: str,
+    database_disk_device: str,
+) -> RoleNodeInventory:
+    inventory = manifest.planned_inventory('gcp')
+    for node in inventory.nodes:
+        storage = node.storage
+        if node.key == 'database':
+            storage_contract = next(
+                item for item in manifest.nodes
+                if item.key == 'database'
+            ).storage[0]
+            storage = (StorageResource(
+                key=storage_contract.key,
+                kind='persistent_block_volume',
+                provider_resource_name=database_disk_name,
+                device=database_disk_device,
+                mount_point=storage_contract.mount_point,
+                filesystem=storage_contract.filesystem,
+                size_gb=storage_contract.size_gib,
+                provisioned_iops=storage_contract.minimum_iops,
+                provisioned_throughput_mibps=(
+                    storage_contract.minimum_throughput_mibps
+                ),
+                ephemeral=False,
+                lifecycle_status='planned',
+            ),)
+        details = details_by_key[node.key]
+        inventory = inventory.upsert(RoleNode(
+            key=node.key,
+            role=node.role,
+            provider_resource_name=names[node.key],
+            private_addresses=(DISTRIBUTED_PRIVATE_ADDRESSES[node.key],),
+            zone=zone,
+            shape=str(details['machine_type']),
+            architecture=str(details['architecture']),
+            capacity_class=node.capacity_class,
+            storage=storage,
+            lifecycle_status='planned',
+        ))
+    return inventory
+
+
+def _distributed_firewall_specs(
+    manifest: DeathStarBenchTopologyManifest,
+    *,
+    job_id: str,
+    network: str,
+    tags: Mapping[str, str],
+    clients: Mapping[str, Any],
+) -> tuple[tuple[str, str, Any], ...]:
+    channels = {
+        channel.key: channel
+        for channel in manifest.network_policy.channels
+    }
+
+    def allowed(channel_key: str) -> list[dict[str, Any]]:
+        channel = channels[channel_key]
+        return [{
+            'I_p_protocol': channel.protocol,
+            'ports': [str(port) for port in channel.ports],
+        }]
+
+    cluster_roles = ('control', 'database', 'cache', 'application')
+    definitions = (
+        (
+            'gcp_dsb_public_ssh_firewall',
+            'dsb-public-ssh',
+            ('control', 'application', 'load-generator'),
+            (SSH_SOURCE_CIDR,),
+            (),
+            [{'I_p_protocol': 'tcp', 'ports': ['22']}],
+        ),
+        (
+            'gcp_dsb_private_ssh_firewall',
+            'dsb-private-ssh',
+            ('database', 'cache'),
+            (),
+            ('control', 'application'),
+            [{'I_p_protocol': 'tcp', 'ports': ['22']}],
+        ),
+        (
+            'gcp_dsb_k3s_api_firewall',
+            'dsb-k3s-api',
+            ('control',),
+            (),
+            ('database', 'cache', 'application'),
+            allowed(K3S_CONTROL_PLANE_CHANNEL),
+        ),
+        (
+            'gcp_dsb_k3s_overlay_firewall',
+            'dsb-k3s-overlay',
+            cluster_roles,
+            (),
+            cluster_roles,
+            allowed(K3S_OVERLAY_CHANNEL),
+        ),
+        (
+            'gcp_dsb_benchmark_firewall',
+            'dsb-benchmark',
+            ('application',),
+            (),
+            ('load-generator',),
+            allowed(BENCHMARK_INGRESS_CHANNEL),
+        ),
+    )
+    result = []
+    for prefix, suffix, targets, source_ranges, sources, rules in definitions:
+        name = _resource_name(job_id, suffix)
+        body = _distributed_firewall_resource(
+            clients,
+            job_id,
+            name,
+            network,
+            role=suffix,
+            target_tags=(tags[key] for key in targets),
+            source_ranges=source_ranges,
+            source_tags=(tags[key] for key in sources),
+            allowed=rules,
+        )
+        result.append((prefix, name, body))
+    return tuple(result)
+
+
+def _network_resource(
+    clients: Mapping[str, Any],
+    job_id: str,
+    name: str,
+    *,
+    role: str = 'network',
+):
     return _message(clients, 'Network', {
         'name': name,
-        'description': _description(job_id, 'network'),
+        'description': _description(job_id, role),
         'auto_create_subnetworks': False,
         'routing_config': {'routing_mode': 'REGIONAL'},
     })
 
 
 def _subnet_resource(
-    clients: Mapping[str, Any], job_id: str, name: str, network: str
+    clients: Mapping[str, Any],
+    job_id: str,
+    name: str,
+    network: str,
+    *,
+    role: str = 'subnet',
+    cidr: str = SUBNET_CIDR,
 ):
     return _message(clients, 'Subnetwork', {
         'name': name,
-        'description': _description(job_id, 'subnet'),
+        'description': _description(job_id, role),
         'network': network,
-        'ip_cidr_range': SUBNET_CIDR,
+        'ip_cidr_range': cidr,
         'private_ip_google_access': False,
         'stack_type': 'IPV4_ONLY',
     })
+
+
+def _router_resource(
+    clients: Mapping[str, Any],
+    job_id: str,
+    name: str,
+    network: str,
+    cluster_subnet: str,
+    *,
+    include_nat: bool = True,
+):
+    """Build the regional router, optionally with its Cloud NAT feature.
+
+    Compute Engine refuses a router insert that enables BGP and Cloud NAT in
+    the same create operation.  Provisioning therefore inserts the base
+    router first and applies this exact NAT body with a separate idempotent
+    patch.
+    """
+
+    values = {
+        'name': name,
+        'description': _description(job_id, 'distributed-router'),
+        'network': network,
+        'bgp': {'asn': DISTRIBUTED_ROUTER_ASN},
+    }
+    if include_nat:
+        values['nats'] = [{
+            'name': f'{name}-nat',
+            'nat_ip_allocate_option': 'AUTO_ONLY',
+            'source_subnetwork_ip_ranges_to_nat': 'LIST_OF_SUBNETWORKS',
+            'subnetworks': [{
+                'name': cluster_subnet,
+                'source_ip_ranges_to_nat': ['ALL_IP_RANGES'],
+            }],
+            'enable_endpoint_independent_mapping': True,
+        }]
+    return _message(clients, 'Router', values)
+
+
+def _ensure_distributed_router(
+    job: dict[str, Any],
+    persist: PersistCallback | None,
+    *,
+    clients: Mapping[str, Any],
+    project_id: str,
+    region: str,
+    name: str,
+    network: str,
+    cluster_subnet: str,
+):
+    """Create the base router, then idempotently enable its exact NAT."""
+
+    prefix = 'gcp_dsb_router'
+    resources = job['resources']
+    base = _router_resource(
+        clients,
+        str(job['id']).lower(),
+        name,
+        network,
+        cluster_subnet,
+        include_nat=False,
+    )
+    complete = _router_resource(
+        clients,
+        str(job['id']).lower(),
+        name,
+        network,
+        cluster_subnet,
+    )
+    get_values = {
+        'project': project_id,
+        'region': region,
+        'router': name,
+    }
+
+    router = None
+    if resources.get(f'{prefix}_name') == name:
+        router = _get_or_none(
+            clients['routers'],
+            clients,
+            'GetRouterRequest',
+            **get_values,
+        )
+        if router is not None:
+            actual_nats = list(_value(router, 'nats', ()) or ())
+            _assert_insert_resource_matches(
+                prefix,
+                router,
+                complete if actual_nats else base,
+                project_id=project_id,
+            )
+            _assert_saved_identity(prefix, router, resources)
+            _persist_recovered_identity(job, persist, prefix, router)
+    if router is None:
+        router = _create_named_resource(
+            job,
+            persist,
+            prefix=prefix,
+            name=name,
+            client=clients['routers'],
+            clients=clients,
+            insert_request_type='InsertRouterRequest',
+            insert_values={
+                'project': project_id,
+                'region': region,
+                'router_resource': base,
+            },
+            get_request_type='GetRouterRequest',
+            get_values=get_values,
+        )
+
+    if list(_value(router, 'nats', ()) or ()):
+        _assert_insert_resource_matches(
+            prefix,
+            router,
+            complete,
+            project_id=project_id,
+        )
+        _record(
+            job,
+            persist,
+            gcp_dsb_router_nat_configured=True,
+            gcp_dsb_router_nat_update_ambiguous=False,
+        )
+        return router
+    if resources.get('gcp_dsb_router_nat_configured') is True:
+        raise RuntimeError(
+            'The GCP distributed router lost its recorded Cloud NAT feature.'
+        )
+    _assert_insert_resource_matches(
+        prefix,
+        router,
+        base,
+        project_id=project_id,
+    )
+
+    request_key = 'gcp_dsb_router_nat_request_id'
+    ambiguous_key = 'gcp_dsb_router_nat_update_ambiguous'
+    request_id = str(resources.get(request_key) or uuid.uuid4())
+    if resources.get(request_key) is not None and not _valid_request_id(
+        request_id
+    ):
+        raise ResourceInventoryError(
+            'The GCP distributed router NAT request ID is invalid.'
+        )
+    _record(
+        job,
+        persist,
+        **{
+            request_key: request_id,
+            ambiguous_key: True,
+            'gcp_dsb_router_nat_configured': False,
+        },
+    )
+    try:
+        operation = _call(
+            clients['routers'],
+            'patch',
+            clients,
+            'PatchRouterRequest',
+            project=project_id,
+            region=region,
+            router=name,
+            router_resource=complete,
+            request_id=request_id,
+        )
+    except Exception as exc:
+        if _confirmed_rejection(exc):
+            _forget(job, persist, request_key, ambiguous_key)
+        raise
+    try:
+        _wait(operation)
+    except Exception:
+        if _operation_completed_with_error(operation):
+            _forget(job, persist, request_key, ambiguous_key)
+        raise
+    router = _call(
+        clients['routers'],
+        'get',
+        clients,
+        'GetRouterRequest',
+        **get_values,
+    )
+    _assert_saved_identity(prefix, router, resources)
+    _assert_insert_resource_matches(
+        prefix,
+        router,
+        complete,
+        project_id=project_id,
+    )
+    _record(
+        job,
+        persist,
+        gcp_dsb_router_nat_configured=True,
+        gcp_dsb_router_nat_update_ambiguous=False,
+    )
+    return router
 
 
 def _firewall_resource(
@@ -1435,6 +2264,42 @@ def _firewall_resource(
     })
 
 
+def _distributed_firewall_resource(
+    clients: Mapping[str, Any],
+    job_id: str,
+    name: str,
+    network: str,
+    *,
+    role: str,
+    target_tags: Iterable[str],
+    allowed: Iterable[Mapping[str, Any]],
+    source_ranges: Iterable[str] = (),
+    source_tags: Iterable[str] = (),
+):
+    targets = tuple(dict.fromkeys(str(item) for item in target_tags if item))
+    sources = tuple(dict.fromkeys(str(item) for item in source_ranges if item))
+    source_role_tags = tuple(dict.fromkeys(
+        str(item) for item in source_tags if item
+    ))
+    rules = [dict(item) for item in allowed]
+    if not targets or not rules or (not sources and not source_role_tags):
+        raise ValueError(
+            'A distributed GCP firewall requires targets, sources, and rules.'
+        )
+    return _message(clients, 'Firewall', {
+        'name': name,
+        'description': _description(job_id, role),
+        'network': network,
+        'direction': 'INGRESS',
+        'priority': 1000,
+        'source_ranges': list(sources),
+        'source_tags': list(source_role_tags),
+        'target_tags': list(targets),
+        'allowed': rules,
+        'disabled': False,
+    })
+
+
 def _data_disk_resource(
     clients: Mapping[str, Any],
     job_id: str,
@@ -1443,16 +2308,17 @@ def _data_disk_resource(
     zone: str,
     size_gb: int,
     *,
+    role: str = 'data',
     disk_type: str = DEFAULT_DISK_TYPE,
     provisioned_iops: int | None = None,
     provisioned_throughput_mibps: int | None = None,
 ):
     body = {
         'name': name,
-        'description': _description(job_id, 'data'),
+        'description': _description(job_id, role),
         'size_gb': int(size_gb),
         'type_': f'projects/{project_id}/zones/{zone}/diskTypes/{disk_type}',
-        'labels': _labels(job_id, 'data'),
+        'labels': _labels(job_id, role),
         # No encryption key is supplied: Compute Engine encrypts the disk at
         # rest with Google-owned and Google-managed keys by default.
     }
@@ -1475,7 +2341,8 @@ def _instance_resource(
     zone: str,
     network: str,
     subnet: str,
-    network_tag: str,
+    network_tag: str | None = None,
+    network_tags: Iterable[str] = (),
     boot_size_gb: int,
     disk_type: str = DEFAULT_DISK_TYPE,
     disk_interface: str | None = None,
@@ -1486,17 +2353,16 @@ def _instance_resource(
     iperf3_protocols: Iterable[str] = (),
     data_disk_self_link: str | None = None,
     data_device_name: str | None = None,
+    data_disk_interface: str | None = None,
+    private_ip_address: str | None = None,
+    assign_public_ip: bool = True,
 ):
     metadata = [
         {'key': 'block-project-ssh-keys', 'value': 'TRUE'},
         {'key': 'enable-oslogin', 'value': 'FALSE'},
         {'key': 'serial-port-enable', 'value': 'FALSE'},
     ]
-    if role in {'runner', 'load-generator'}:
-        if not public_key:
-            raise ValueError(
-                f'An SSH public key is required for the GCP {role}.'
-            )
+    if public_key:
         ssh_items = rocky_linux.ssh_metadata_items(
             public_key, username=SSH_USER
         )
@@ -1504,6 +2370,10 @@ def _instance_resource(
             item for item in ssh_items
             if item['key'] not in {'block-project-ssh-keys', 'enable-oslogin'}
         ] + metadata
+    elif role in {'runner', 'load-generator'}:
+        raise ValueError(
+            f'An SSH public key is required for the GCP {role}.'
+        )
     else:
         metadata.append({
             'key': 'startup-script',
@@ -1549,20 +2419,27 @@ def _instance_resource(
             'source': data_disk_self_link,
             'device_name': data_device_name,
         }
-        if disk_interface:
-            data_attachment['interface'] = disk_interface
+        attachment_interface = data_disk_interface or disk_interface
+        if attachment_interface:
+            data_attachment['interface'] = attachment_interface
         disks.append(data_attachment)
 
     network_interface = {
         'network': network,
         'subnetwork': subnet,
         'stack_type': 'IPV4_ONLY',
-        'access_configs': [{
+        'access_configs': ([{
             'name': 'External NAT',
             'type_': 'ONE_TO_ONE_NAT',
             'network_tier': 'PREMIUM',
-        }],
+        }] if assign_public_ip else []),
     }
+    if private_ip_address:
+        # Proto-plus preserves Compute's historical ``networkIP`` field as
+        # ``network_i_p``.  The dictionary-only provider fakes accept either
+        # spelling, but the real NetworkInterface constructor rejects
+        # ``network_ip`` as unknown.
+        network_interface['network_i_p'] = private_ip_address
     family = _machine_family(_basename(machine_type))
     h3_machine = family == 'h3'
     requested_nic_type = network_interface_type or (
@@ -1573,6 +2450,14 @@ def _instance_resource(
         # includes the gVNIC driver for both supported architectures.
         network_interface['nic_type'] = requested_nic_type
 
+    tags = tuple(dict.fromkeys(
+        str(tag)
+        for tag in ((*network_tags, network_tag) if network_tag else network_tags)
+        if str(tag)
+    ))
+    if not tags:
+        raise ValueError('At least one GCP instance network tag is required.')
+
     return _message(clients, 'Instance', {
         'name': name,
         'description': _description(job_id, role),
@@ -1580,7 +2465,7 @@ def _instance_resource(
         'can_ip_forward': False,
         'deletion_protection': False,
         'labels': _labels(job_id, role),
-        'tags': {'items': [network_tag]},
+        'tags': {'items': list(tags)},
         'metadata': {'items': metadata},
         'disks': disks,
         'network_interfaces': [network_interface],
@@ -1623,12 +2508,17 @@ def _instance_ips(instance: Any) -> tuple[str | None, str | None]:
 def _expected_disk_profile(
     resources: Mapping[str, Any], prefix: str
 ) -> tuple[str, int | None, int | None, int | None]:
-    if prefix == 'gcp_data_disk':
+    if prefix in {'gcp_data_disk', 'gcp_dsb_database_data_disk'}:
+        key_stem = (
+            'gcp_data_disk'
+            if prefix == 'gcp_data_disk'
+            else 'gcp_dsb_database_data_disk'
+        )
         return (
-            str(resources.get('gcp_data_disk_type') or DEFAULT_DISK_TYPE),
-            resources.get('gcp_data_disk_size_gb'),
-            resources.get('gcp_data_disk_provisioned_iops'),
-            resources.get('gcp_data_disk_provisioned_throughput_mibps'),
+            str(resources.get(f'{key_stem}_type') or DEFAULT_DISK_TYPE),
+            resources.get(f'{key_stem}_size_gb'),
+            resources.get(f'{key_stem}_provisioned_iops'),
+            resources.get(f'{key_stem}_provisioned_throughput_mibps'),
         )
     if prefix == 'gcp_runner_boot_disk':
         fallback_size_gb = resources.get('gcp_boot_disk_size_gb')
@@ -1636,6 +2526,13 @@ def _expected_disk_profile(
         fallback_size_gb = resources.get('gcp_peer_boot_disk_size_gb')
     elif prefix == 'gcp_loadgen_boot_disk':
         fallback_size_gb = resources.get('gcp_loadgen_boot_disk_size_gb')
+    elif prefix in DISTRIBUTED_BOOT_PREFIXES.values():
+        return (
+            str(resources.get(f'{prefix}_type') or DEFAULT_DISK_TYPE),
+            resources.get(f'{prefix}_size_gb'),
+            resources.get(f'{prefix}_provisioned_iops'),
+            resources.get(f'{prefix}_provisioned_throughput_mibps'),
+        )
     else:  # pragma: no cover - internal invariant
         raise KeyError(prefix)
     return (
@@ -1728,13 +2625,29 @@ def _verify_disk_relationship(
             f'Refusing GCP cleanup because the recorded {label} belongs to a '
             'different project or zone. No resources were changed.'
         )
-    if prefix not in {
+    compact_boot_prefixes = {
         'gcp_runner_boot_disk',
         'gcp_peer_boot_disk',
         'gcp_loadgen_boot_disk',
-    }:
+    }
+    distributed_boot_prefixes = set(DISTRIBUTED_BOOT_PREFIXES.values())
+    if prefix not in compact_boot_prefixes | distributed_boot_prefixes:
         return
-    if prefix == 'gcp_loadgen_boot_disk':
+    if prefix in distributed_boot_prefixes:
+        role = next(
+            key for key, value in DISTRIBUTED_BOOT_PREFIXES.items()
+            if value == prefix
+        )
+        image_prefix = (
+            'gcp_dsb_application_image'
+            if role == 'application'
+            else 'gcp_dsb_support_image'
+        )
+        expected_image_id = str(resources.get(f'{image_prefix}_id') or '')
+        expected_image_link = str(
+            resources.get(f'{image_prefix}_self_link') or ''
+        )
+    elif prefix == 'gcp_loadgen_boot_disk':
         expected_image_id = str(resources.get('gcp_loadgen_image_id') or '')
         expected_image_link = str(
             resources.get('gcp_loadgen_image_self_link') or ''
@@ -1785,7 +2698,7 @@ def _capture_boot_disk_identity(
     _verify_disk_relationship(prefix, disk, resources)
     _required_labels(
         str(job['id']).lower(),
-        _label_role(prefix),
+        _label_role(prefix) or '',
         disk,
         prefix.removeprefix('gcp_').replace('_', ' '),
     )
@@ -1819,6 +2732,10 @@ def provision(
     clients=None,
 ):
     """Create one isolated GCP benchmark stack and persist every exact name."""
+    benchmarks = tuple(_value(plan, 'benchmarks', ()) or ())
+    if 'deathstarbench' in benchmarks:
+        topology_id, runtime_id = _deathstarbench_contract_ids(plan)
+        require_released_runtime(topology_id, runtime_id)
     requested_project = _project_id(plan)
     project_id, _, clients = _runtime(requested_project or None, credentials, clients)
     region = _region(plan)
@@ -1830,7 +2747,6 @@ def provision(
         raise ValueError('An SSH public key is required to launch GCP instances.')
     protocols = _selected_iperf3_protocols(plan)
     web_benchmarks = _selected_web_benchmarks(plan)
-    benchmarks = tuple(_value(plan, 'benchmarks', ()) or ())
     sysbench = _value(plan, 'sysbench', {}) or {}
     phoronix = _value(plan, 'phoronix', {}) or {}
     rocky_linux.validate_benchmark_selection(
@@ -2516,6 +3432,613 @@ def provision(
     return resources
 
 
+def provision_distributed_deathstarbench_candidate(
+    job: dict[str, Any],
+    plan: Any,
+    *,
+    public_key: str | None = None,
+    emit: EventCallback | None = None,
+    persist: PersistCallback | None = None,
+    credentials=None,
+    clients=None,
+):
+    """Create the unreleased five-node GCP DeathStarBench candidate.
+
+    The ordinary provider dispatcher never calls this entry point while the
+    distributed runtime profile is unreleased.  It exists for explicit,
+    operator-driven qualification of the same K3s workload used on Azure.
+    """
+
+    plan_provider = str(_value(plan, 'provider', '') or '').strip().casefold()
+    if plan_provider and plan_provider != 'gcp':
+        raise ValueError('The GCP distributed candidate requires a GCP plan.')
+    if tuple(_value(plan, 'benchmarks', ()) or ()) != ('deathstarbench',):
+        raise ValueError(
+            'The GCP distributed candidate requires DeathStarBench as its '
+            'only selected benchmark.'
+        )
+    deathstarbench = _value(plan, 'deathstarbench', {}) or {}
+    if _value(deathstarbench, 'workload', None) != 'social_network':
+        raise ValueError(
+            'The GCP distributed candidate currently requires the exact '
+            'DeathStarBench Social Network workload.'
+        )
+    topology_id, runtime_id = _deathstarbench_contract_ids(plan)
+    if (
+        topology_id != DISTRIBUTED_TIERED_TOPOLOGY_ID
+        or runtime_id != K3S_RUNTIME_ID
+    ):
+        raise ValueError(
+            'The GCP distributed candidate requires the exact '
+            'distributed_tiered_v1/k3s_v1 contract.'
+        )
+    resources = job.setdefault('resources', {})
+    saved_provider = str(resources.get('provider') or '').strip().casefold()
+    if (
+        (saved_provider and saved_provider != 'gcp')
+        or (resources and not saved_provider)
+    ):
+        raise ResourceInventoryError(
+            'The GCP distributed candidate refuses pre-existing resource '
+            'state without an exact GCP provider identity.'
+        )
+    requested_project = _project_id(plan)
+    project_id, _, clients = _runtime(
+        requested_project or None, credentials, clients
+    )
+    if 'routers' not in clients:
+        raise RuntimeError(
+            'The GCP distributed candidate requires the Compute Routers API '
+            'client for private cluster egress.'
+        )
+    region = _region(plan)
+    application_machine = _machine_type_name(plan)
+    if not application_machine:
+        raise ValueError(
+            'Select a GCP machine type for the distributed application role.'
+        )
+    public_key = str(public_key or job.get('_public_key') or '').strip()
+    if not public_key:
+        raise ValueError('An SSH public key is required to launch GCP instances.')
+    rocky_linux.ssh_metadata_items(public_key, username=SSH_USER)
+
+    project = _call(
+        clients['projects'],
+        'get',
+        clients,
+        'GetProjectRequest',
+        project=project_id,
+    )
+    compute_project_id = str(_value(project, 'id', '') or '')
+    if not compute_project_id:
+        raise RuntimeError(
+            f'Compute Engine did not return an ID for project {project_id}.'
+        )
+    requested_zone = str(
+        resources.get('gcp_zone')
+        or _value(plan, 'gcp_zone')
+        or _value(plan, 'availability_zone')
+        or _value(plan, 'availability_domain')
+        or ''
+    ).strip() or None
+    zone, application_details = _resolve_zone_and_machine(
+        project_id,
+        region,
+        application_machine,
+        requested_zone,
+        clients,
+    )
+    _validate_plan_capacity(plan, application_details)
+    manifest = build_topology_manifest(
+        topology_id,
+        runtime_id,
+        selected_shape=application_machine,
+        selected_architecture=application_details['architecture'],
+    )
+    role_details = _distributed_role_details(
+        manifest,
+        project_id=project_id,
+        zone=zone,
+        application_details=application_details,
+        clients=clients,
+    )
+    application_image = _distributed_candidate_image(
+        resources,
+        key_prefix='gcp_dsb_application_image',
+        architecture=application_details['architecture'],
+        clients=clients,
+    )
+    support_image = _distributed_candidate_image(
+        resources,
+        key_prefix='gcp_dsb_support_image',
+        architecture='x86_64',
+        clients=clients,
+    )
+
+    job_id = str(job.get('id') or '').lower()
+    base_name = _resource_name(job_id, 'dsb')
+    network_name = base_name
+    cluster_subnet_name = _resource_name(job_id, 'dsb-cluster')
+    loadgen_subnet_name = _resource_name(job_id, 'dsb-loadgen')
+    router_name = _resource_name(job_id, 'dsb-router')
+    node_names = {
+        role: _resource_name(job_id, f'dsb-{role}')
+        for role in DISTRIBUTED_PRIVATE_ADDRESSES
+    }
+    role_tags = dict(node_names)
+    database_disk_name = _resource_name(job_id, 'dsb-database-data')
+    database_disk_device = (
+        f'/dev/disk/by-id/google-{database_disk_name}'
+    )
+    firewall_contracts = _distributed_firewall_specs(
+        manifest,
+        job_id=job_id,
+        network=(
+            f'projects/{project_id}/global/networks/{network_name}'
+        ),
+        tags=role_tags,
+        clients=clients,
+    )
+    expected_names = {
+        'gcp_dsb_network': network_name,
+        'gcp_dsb_cluster_subnet': cluster_subnet_name,
+        'gcp_dsb_loadgen_subnet': loadgen_subnet_name,
+        'gcp_dsb_router': router_name,
+        'gcp_dsb_database_data_disk': database_disk_name,
+        **{
+            prefix: name
+            for prefix, name, _ in firewall_contracts
+        },
+    }
+    for role, name in node_names.items():
+        expected_names[DISTRIBUTED_NODE_PREFIXES[role]] = name
+        expected_names[DISTRIBUTED_BOOT_PREFIXES[role]] = f'{name}-boot'
+    expected_inventory = _planned_gcp_inventory(
+        manifest,
+        zone=zone,
+        names=node_names,
+        details_by_key=role_details,
+        database_disk_name=database_disk_name,
+        database_disk_device=database_disk_device,
+    )
+
+    def image_values(prefix: str, image: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            f'{prefix}_id': image['image_id'],
+            f'{prefix}_name': image['name'],
+            f'{prefix}_self_link': image['self_link'],
+            f'{prefix}_family': image['family'],
+            f'{prefix}_architecture': image['architecture'],
+        }
+
+    contract_values: dict[str, Any] = {
+        'provider': 'gcp',
+        'gcp_distributed_candidate': True,
+        'gcp_project_id': project_id,
+        'gcp_compute_project_id': compute_project_id,
+        'gcp_resource_prefix': base_name,
+        'gcp_dsb_expected_names': expected_names,
+        'region': region,
+        'gcp_zone': zone,
+        'availability_zone': zone,
+        'gcp_machine_type': application_machine,
+        'instance_type': application_machine,
+        'architecture': application_details['architecture'],
+        'ocpus': application_details['vcpu'],
+        'memory_gb': application_details['memory_gb'],
+        'image_id': application_image['image_id'],
+        'image_name': application_image['name'],
+        'gcp_image_family': application_image['family'],
+        'gcp_image_self_link': application_image['self_link'],
+        'ssh_user': SSH_USER,
+        'gcp_web_benchmarks': ['deathstarbench'],
+        'gcp_dsb_network_cidr': DISTRIBUTED_NETWORK_CIDR,
+        'gcp_dsb_cluster_subnet_cidr': DISTRIBUTED_CLUSTER_SUBNET_CIDR,
+        'gcp_dsb_loadgen_subnet_cidr': DISTRIBUTED_LOADGEN_SUBNET_CIDR,
+        'gcp_dsb_database_disk_device': database_disk_device,
+        'gcp_dsb_database_data_disk_type': (
+            DISTRIBUTED_DATABASE_DISK_TYPE
+        ),
+        'gcp_dsb_database_data_disk_size_gb': int(
+            next(
+                node for node in manifest.nodes if node.key == 'database'
+            ).storage[0].size_gib
+        ),
+        # pd-ssd performance is baseline, not provisioned. The topology and
+        # nested inventory retain the required 3000 IOPS / 125 MiB/s minima.
+        'gcp_dsb_database_data_disk_provisioned_iops': None,
+        'gcp_dsb_database_data_disk_provisioned_throughput_mibps': None,
+        **image_values('gcp_dsb_application_image', application_image),
+        **image_values('gcp_dsb_support_image', support_image),
+    }
+    for role, details in role_details.items():
+        normalized = role.replace('-', '_')
+        contract_values.update({
+            f'gcp_dsb_{normalized}_machine_type': details['machine_type'],
+            f'gcp_dsb_{normalized}_architecture': details['architecture'],
+            f'gcp_dsb_{normalized}_private_ip': (
+                DISTRIBUTED_PRIVATE_ADDRESSES[role]
+            ),
+            f'gcp_dsb_{normalized}_tag': role_tags[role],
+        })
+    _initialize_distributed_candidate_contract(
+        job,
+        persist,
+        manifest,
+        expected_inventory,
+        contract_values,
+    )
+
+    network = _create_named_resource(
+        job,
+        persist,
+        prefix='gcp_dsb_network',
+        name=network_name,
+        client=clients['networks'],
+        clients=clients,
+        insert_request_type='InsertNetworkRequest',
+        insert_values={
+            'project': project_id,
+            'network_resource': _network_resource(
+                clients,
+                job_id,
+                network_name,
+                role='distributed-network',
+            ),
+        },
+        get_request_type='GetNetworkRequest',
+        get_values={'project': project_id, 'network': network_name},
+    )
+    network_link = str(_value(network, 'self_link', '') or '')
+    _emit(job, emit, 'Provision', f'Created GCP distributed VPC {network_name}.')
+
+    subnet_specs = (
+        (
+            'gcp_dsb_cluster_subnet',
+            cluster_subnet_name,
+            'distributed-cluster-subnet',
+            DISTRIBUTED_CLUSTER_SUBNET_CIDR,
+        ),
+        (
+            'gcp_dsb_loadgen_subnet',
+            loadgen_subnet_name,
+            'distributed-loadgen-subnet',
+            DISTRIBUTED_LOADGEN_SUBNET_CIDR,
+        ),
+    )
+    subnet_links: dict[str, str] = {}
+    for prefix, name, role, cidr in subnet_specs:
+        subnet = _create_named_resource(
+            job,
+            persist,
+            prefix=prefix,
+            name=name,
+            client=clients['subnetworks'],
+            clients=clients,
+            insert_request_type='InsertSubnetworkRequest',
+            insert_values={
+                'project': project_id,
+                'region': region,
+                'subnetwork_resource': _subnet_resource(
+                    clients,
+                    job_id,
+                    name,
+                    network_link,
+                    role=role,
+                    cidr=cidr,
+                ),
+            },
+            get_request_type='GetSubnetworkRequest',
+            get_values={
+                'project': project_id,
+                'region': region,
+                'subnetwork': name,
+            },
+        )
+        subnet_links[prefix] = str(_value(subnet, 'self_link', '') or '')
+
+    _ensure_distributed_router(
+        job,
+        persist,
+        clients=clients,
+        project_id=project_id,
+        region=region,
+        name=router_name,
+        network=network_link,
+        cluster_subnet=subnet_links['gcp_dsb_cluster_subnet'],
+    )
+
+    # Rebuild bodies with the authoritative returned network link before each
+    # insert; the deterministic expected-name version above was contract-only.
+    firewall_contracts = _distributed_firewall_specs(
+        manifest,
+        job_id=job_id,
+        network=network_link,
+        tags=role_tags,
+        clients=clients,
+    )
+    for prefix, name, body in firewall_contracts:
+        _create_named_resource(
+            job,
+            persist,
+            prefix=prefix,
+            name=name,
+            client=clients['firewalls'],
+            clients=clients,
+            insert_request_type='InsertFirewallRequest',
+            insert_values={
+                'project': project_id,
+                'firewall_resource': body,
+            },
+            get_request_type='GetFirewallRequest',
+            get_values={'project': project_id, 'firewall': name},
+        )
+
+    database_storage = next(
+        node for node in manifest.nodes if node.key == 'database'
+    ).storage[0]
+    _set_inventory_storage_status(
+        job,
+        persist,
+        'database',
+        database_storage.key,
+        'creating',
+    )
+    try:
+        database_disk = _create_named_resource(
+            job,
+            persist,
+            prefix='gcp_dsb_database_data_disk',
+            name=database_disk_name,
+            client=clients['disks'],
+            clients=clients,
+            insert_request_type='InsertDiskRequest',
+            insert_values={
+                'project': project_id,
+                'zone': zone,
+                'disk_resource': _data_disk_resource(
+                    clients,
+                    job_id,
+                    database_disk_name,
+                    project_id,
+                    zone,
+                    int(database_storage.size_gib),
+                    role='database-data',
+                    disk_type=DISTRIBUTED_DATABASE_DISK_TYPE,
+                ),
+            },
+            get_request_type='GetDiskRequest',
+            get_values={
+                'project': project_id,
+                'zone': zone,
+                'disk': database_disk_name,
+            },
+        )
+    except Exception:
+        _set_inventory_storage_status(
+            job,
+            persist,
+            'database',
+            database_storage.key,
+            (
+                'create_ambiguous'
+                if resources.get('gcp_dsb_database_data_disk_name')
+                else 'failed'
+            ),
+        )
+        raise
+    database_disk_id = str(_value(database_disk, 'id', '') or '')
+    _set_inventory_storage_status(
+        job,
+        persist,
+        'database',
+        database_storage.key,
+        'running',
+        provider_resource_id=database_disk_id,
+    )
+
+    for node_key in manifest.creation_order:
+        details = role_details[node_key]
+        name = node_names[node_key]
+        prefix = DISTRIBUTED_NODE_PREFIXES[node_key]
+        boot_prefix = DISTRIBUTED_BOOT_PREFIXES[node_key]
+        image = application_image if node_key == 'application' else support_image
+        subnet_prefix = (
+            'gcp_dsb_loadgen_subnet'
+            if node_key == 'load-generator'
+            else 'gcp_dsb_cluster_subnet'
+        )
+        body = _instance_resource(
+            clients,
+            job_id=job_id,
+            name=name,
+            role=node_key,
+            machine_type=details['self_link'] or (
+                f'projects/{project_id}/zones/{zone}/machineTypes/'
+                f'{details["machine_type"]}'
+            ),
+            image=image,
+            project_id=project_id,
+            zone=zone,
+            network=network_link,
+            subnet=subnet_links[subnet_prefix],
+            network_tags=(role_tags[node_key],),
+            boot_size_gb=DISTRIBUTED_OS_DISK_SIZE_GB,
+            disk_type=details['disk_type'],
+            disk_interface=details.get('disk_interface'),
+            network_interface_type=details.get('network_interface_type'),
+            disk_provisioned_iops=details.get('disk_provisioned_iops'),
+            disk_provisioned_throughput_mibps=details.get(
+                'disk_provisioned_throughput_mibps'
+            ),
+            public_key=public_key,
+            data_disk_self_link=(
+                str(_value(database_disk, 'self_link', '') or '')
+                if node_key == 'database'
+                else None
+            ),
+            data_device_name=(
+                database_disk_name if node_key == 'database' else None
+            ),
+            data_disk_interface=(
+                DISTRIBUTED_DATABASE_DISK_INTERFACE
+                if node_key == 'database'
+                else None
+            ),
+            private_ip_address=DISTRIBUTED_PRIVATE_ADDRESSES[node_key],
+            assign_public_ip=node_key in DISTRIBUTED_PUBLIC_IP_NODES,
+        )
+        instance_had_contract = any(
+            key in resources
+            for key in (
+                f'{prefix}_name',
+                f'{prefix}_id',
+                f'{prefix}_self_link',
+                f'{prefix}_request_id',
+                f'{prefix}_create_ambiguous',
+            )
+        )
+        request_id = str(
+            resources.get(f'{prefix}_request_id') or uuid.uuid4()
+        )
+        _record(
+            job,
+            persist,
+            **{
+                f'{boot_prefix}_name': f'{name}-boot',
+                f'{boot_prefix}_request_id': request_id,
+                f'{boot_prefix}_create_ambiguous': True,
+                f'{boot_prefix}_type': details['disk_type'],
+                f'{boot_prefix}_size_gb': DISTRIBUTED_OS_DISK_SIZE_GB,
+                f'{boot_prefix}_provisioned_iops': details.get(
+                    'disk_provisioned_iops'
+                ),
+                f'{boot_prefix}_provisioned_throughput_mibps': details.get(
+                    'disk_provisioned_throughput_mibps'
+                ),
+                f'{prefix}_name': name,
+                f'{prefix}_request_id': request_id,
+                f'{prefix}_create_ambiguous': True,
+            },
+        )
+        _set_inventory_node_status(
+            job, persist, node_key, 'creating'
+        )
+        try:
+            instance = _create_named_resource(
+                job,
+                persist,
+                prefix=prefix,
+                name=name,
+                client=clients['instances'],
+                clients=clients,
+                insert_request_type='InsertInstanceRequest',
+                insert_values={
+                    'project': project_id,
+                    'zone': zone,
+                    'instance_resource': body,
+                },
+                get_request_type='GetInstanceRequest',
+                get_values={
+                    'project': project_id,
+                    'zone': zone,
+                    'instance': name,
+                },
+                clear_contract_on_confirmed_rejection=(
+                    not instance_had_contract
+                ),
+            )
+        except Exception:
+            if not resources.get(f'{prefix}_name'):
+                _forget(job, persist, *_contract_keys(boot_prefix))
+            _set_inventory_node_status(
+                job,
+                persist,
+                node_key,
+                (
+                    'failed'
+                    if not resources.get(f'{prefix}_name')
+                    else 'create_ambiguous'
+                ),
+            )
+            raise
+        instance_id = str(_value(instance, 'id', '') or '')
+        public_ip, private_ip = _instance_ips(instance)
+        if private_ip != DISTRIBUTED_PRIVATE_ADDRESSES[node_key]:
+            raise RuntimeError(
+                f'GCP distributed {node_key} received private address '
+                f'{private_ip or "none"}, expected '
+                f'{DISTRIBUTED_PRIVATE_ADDRESSES[node_key]}.'
+            )
+        if node_key in DISTRIBUTED_PUBLIC_IP_NODES and not public_ip:
+            raise RuntimeError(
+                f'GCP distributed {node_key} did not receive its required '
+                'public management address.'
+            )
+        if node_key not in DISTRIBUTED_PUBLIC_IP_NODES and public_ip:
+            raise RuntimeError(
+                f'GCP distributed {node_key} unexpectedly received a public '
+                'address.'
+            )
+        normalized = node_key.replace('-', '_')
+        values: dict[str, Any] = {
+            f'gcp_dsb_{normalized}_instance_id': instance_id,
+            f'gcp_dsb_{normalized}_public_ip': public_ip,
+            f'gcp_dsb_{normalized}_private_ip': private_ip,
+            f'{prefix}_public_ip': public_ip,
+            f'{prefix}_private_ip': private_ip,
+        }
+        if node_key == 'application':
+            values.update({
+                'instance_id': instance_id,
+                'public_ip': public_ip,
+                'private_ip': private_ip,
+            })
+        elif node_key == 'load-generator':
+            values.update({
+                'loadgen_instance_id': instance_id,
+                'loadgen_public_ip': public_ip,
+                'loadgen_private_ip': private_ip,
+                'loadgen_shape': details['machine_type'],
+                'loadgen_vcpus': details['vcpu'],
+                'loadgen_memory_gb': details['memory_gb'],
+                'loadgen_architecture': details['architecture'],
+                'loadgen_image_id': support_image['image_id'],
+                'loadgen_image_name': support_image['name'],
+                'loadgen_network_bandwidth_gbps': (
+                    LOADGEN_NETWORK_BANDWIDTH_GBPS
+                ),
+                'loadgen_network_capacity_kind': 'maximum',
+            })
+        _record(job, persist, **values)
+        _capture_boot_disk_identity(job, persist, boot_prefix, clients)
+        _set_inventory_node_status(
+            job,
+            persist,
+            node_key,
+            'running',
+            provider_resource_id=instance_id,
+            public_address=public_ip,
+            private_address=private_ip,
+        )
+        _emit(
+            job,
+            emit,
+            'Provision',
+            f'Launched GCP distributed {node_key} role on '
+            f'{details["machine_type"]} at {private_ip}.',
+        )
+
+    _emit(
+        job,
+        emit,
+        'Provision',
+        'GCP distributed candidate infrastructure reached the five-node '
+        'lifecycle boundary; no benchmark workload was installed.',
+    )
+    return resources
+
+
 RESOURCE_PREFIXES = (
     'gcp_loadgen_instance',
     'gcp_peer_instance',
@@ -2529,6 +4052,17 @@ RESOURCE_PREFIXES = (
     'gcp_ssh_firewall',
     'gcp_subnet',
     'gcp_network',
+)
+
+DISTRIBUTED_RESOURCE_PREFIXES = (
+    *DISTRIBUTED_NODE_PREFIXES.values(),
+    'gcp_dsb_database_data_disk',
+    *DISTRIBUTED_BOOT_PREFIXES.values(),
+    *DISTRIBUTED_FIREWALL_PREFIXES,
+    'gcp_dsb_router',
+    'gcp_dsb_loadgen_subnet',
+    'gcp_dsb_cluster_subnet',
+    'gcp_dsb_network',
 )
 
 
@@ -2602,6 +4136,7 @@ def _resource_get_spec(
         'gcp_instance',
         'gcp_peer_instance',
         'gcp_loadgen_instance',
+        *DISTRIBUTED_NODE_PREFIXES.values(),
     }:
         return clients['instances'], 'GetInstanceRequest', {
             'project': project_id,
@@ -2613,6 +4148,8 @@ def _resource_get_spec(
         'gcp_runner_boot_disk',
         'gcp_peer_boot_disk',
         'gcp_loadgen_boot_disk',
+        'gcp_dsb_database_data_disk',
+        *DISTRIBUTED_BOOT_PREFIXES.values(),
     }:
         return clients['disks'], 'GetDiskRequest', {
             'project': project_id,
@@ -2623,18 +4160,29 @@ def _resource_get_spec(
         'gcp_ssh_firewall',
         'gcp_iperf_firewall',
         'gcp_web_firewall',
+        *DISTRIBUTED_FIREWALL_PREFIXES,
     }:
         return clients['firewalls'], 'GetFirewallRequest', {
             'project': project_id,
             'firewall': name,
         }
-    if prefix == 'gcp_subnet':
+    if prefix in {
+        'gcp_subnet',
+        'gcp_dsb_cluster_subnet',
+        'gcp_dsb_loadgen_subnet',
+    }:
         return clients['subnetworks'], 'GetSubnetworkRequest', {
             'project': project_id,
             'region': region,
             'subnetwork': name,
         }
-    if prefix == 'gcp_network':
+    if prefix == 'gcp_dsb_router':
+        return clients['routers'], 'GetRouterRequest', {
+            'project': project_id,
+            'region': region,
+            'router': name,
+        }
+    if prefix in {'gcp_network', 'gcp_dsb_network'}:
         return clients['networks'], 'GetNetworkRequest', {
             'project': project_id,
             'network': name,
@@ -2730,7 +4278,7 @@ def _description_role(prefix: str) -> str | None:
 
 
 def _label_role(prefix: str) -> str | None:
-    return {
+    role = {
         'gcp_instance': 'runner',
         'gcp_peer_instance': 'iperf-peer',
         'gcp_loadgen_instance': 'load-generator',
@@ -2738,7 +4286,14 @@ def _label_role(prefix: str) -> str | None:
         'gcp_runner_boot_disk': 'runner-boot',
         'gcp_peer_boot_disk': 'iperf-peer-boot',
         'gcp_loadgen_boot_disk': 'load-generator-boot',
+        'gcp_dsb_database_data_disk': 'database-data',
     }.get(prefix)
+    if role:
+        return role
+    for node_role, boot_prefix in DISTRIBUTED_BOOT_PREFIXES.items():
+        if prefix == boot_prefix:
+            return f'{node_role}-boot'
+    return None
 
 
 def _verify_cleanup_resources(
@@ -3358,6 +4913,7 @@ def _delete_resource(
         'gcp_instance',
         'gcp_peer_instance',
         'gcp_loadgen_instance',
+        *DISTRIBUTED_NODE_PREFIXES.values(),
     }:
         client, request_type, values = (
             clients['instances'],
@@ -3369,6 +4925,8 @@ def _delete_resource(
         'gcp_runner_boot_disk',
         'gcp_peer_boot_disk',
         'gcp_loadgen_boot_disk',
+        'gcp_dsb_database_data_disk',
+        *DISTRIBUTED_BOOT_PREFIXES.values(),
     }:
         client, request_type, values = (
             clients['disks'],
@@ -3379,19 +4937,30 @@ def _delete_resource(
         'gcp_ssh_firewall',
         'gcp_iperf_firewall',
         'gcp_web_firewall',
+        *DISTRIBUTED_FIREWALL_PREFIXES,
     }:
         client, request_type, values = (
             clients['firewalls'],
             'DeleteFirewallRequest',
             {'project': project_id, 'firewall': name},
         )
-    elif prefix == 'gcp_subnet':
+    elif prefix in {
+        'gcp_subnet',
+        'gcp_dsb_cluster_subnet',
+        'gcp_dsb_loadgen_subnet',
+    }:
         client, request_type, values = (
             clients['subnetworks'],
             'DeleteSubnetworkRequest',
             {'project': project_id, 'region': region, 'subnetwork': name},
         )
-    elif prefix == 'gcp_network':
+    elif prefix == 'gcp_dsb_router':
+        client, request_type, values = (
+            clients['routers'],
+            'DeleteRouterRequest',
+            {'project': project_id, 'region': region, 'router': name},
+        )
+    elif prefix in {'gcp_network', 'gcp_dsb_network'}:
         client, request_type, values = (
             clients['networks'],
             'DeleteNetworkRequest',
@@ -3437,7 +5006,12 @@ def _delete_resource(
                     )
                     if current is None:
                         return
-                    _verify_cleanup_resources(job, {prefix: current})
+                    if resources.get('gcp_distributed_candidate') is True:
+                        _verify_distributed_cleanup_resources(
+                            job, {prefix: current}
+                        )
+                    else:
+                        _verify_cleanup_resources(job, {prefix: current})
                     request_id = str(uuid.uuid4())
                     _record(job, persist, **{request_key: request_id})
                 time.sleep(RECONCILIATION_DELAY_SECONDS)
@@ -3479,6 +5053,689 @@ def _valid_request_id(value: Any) -> bool:
     return parsed.int != 0
 
 
+def _load_distributed_cleanup_contract(
+    job: Mapping[str, Any],
+) -> tuple[DeathStarBenchTopologyManifest, RoleNodeInventory, dict[str, str]]:
+    resources = job.get('resources', {})
+    if resources.get('gcp_distributed_candidate') is not True:
+        raise ResourceInventoryError(
+            'GCP distributed cleanup marker is missing or invalid.'
+        )
+    required = (
+        DEATHSTARBENCH_TOPOLOGY_MANIFEST_KEY,
+        DEATHSTARBENCH_TOPOLOGY_FINGERPRINT_KEY,
+        ROLE_NODE_INVENTORY_KEY,
+        'gcp_project_id',
+        'gcp_compute_project_id',
+        'gcp_zone',
+        'gcp_dsb_expected_names',
+    )
+    missing = [key for key in required if key not in resources]
+    if missing:
+        raise ResourceInventoryError(
+            'GCP distributed cleanup contract is incomplete: '
+            + ', '.join(missing)
+            + '.'
+        )
+    manifest = DeathStarBenchTopologyManifest.from_dict(
+        resources[DEATHSTARBENCH_TOPOLOGY_MANIFEST_KEY]
+    )
+    if (
+        manifest.topology_id != DISTRIBUTED_TIERED_TOPOLOGY_ID
+        or manifest.runtime_id != K3S_RUNTIME_ID
+        or resources[DEATHSTARBENCH_TOPOLOGY_FINGERPRINT_KEY]
+        != manifest.fingerprint
+    ):
+        raise ResourceInventoryError(
+            'GCP distributed cleanup topology is inconsistent.'
+        )
+    inventory = load_role_node_inventory(resources)
+    if (
+        inventory.provider != 'gcp'
+        or inventory.topology_fingerprint != manifest.fingerprint
+        or tuple(node.key for node in inventory.nodes)
+        != tuple(sorted(DISTRIBUTED_PRIVATE_ADDRESSES))
+    ):
+        raise ResourceInventoryError(
+            'GCP distributed cleanup inventory is inconsistent.'
+        )
+    raw_names = resources['gcp_dsb_expected_names']
+    if not isinstance(raw_names, Mapping):
+        raise ResourceInventoryError(
+            'GCP distributed expected-name allowlist must be an object.'
+        )
+    expected_names = {
+        str(key): str(value) for key, value in raw_names.items()
+    }
+    if set(expected_names) != set(DISTRIBUTED_RESOURCE_PREFIXES):
+        raise ResourceInventoryError(
+            'GCP distributed expected-name allowlist is incomplete or unknown.'
+        )
+    job_id = str(job.get('id') or '').lower()
+    base_name = _resource_name(job_id, 'dsb')
+    deterministic = {
+        'gcp_dsb_network': base_name,
+        'gcp_dsb_cluster_subnet': _resource_name(job_id, 'dsb-cluster'),
+        'gcp_dsb_loadgen_subnet': _resource_name(job_id, 'dsb-loadgen'),
+        'gcp_dsb_router': _resource_name(job_id, 'dsb-router'),
+        'gcp_dsb_database_data_disk': _resource_name(
+            job_id, 'dsb-database-data'
+        ),
+    }
+    firewall_suffixes = {
+        'gcp_dsb_public_ssh_firewall': 'dsb-public-ssh',
+        'gcp_dsb_private_ssh_firewall': 'dsb-private-ssh',
+        'gcp_dsb_k3s_api_firewall': 'dsb-k3s-api',
+        'gcp_dsb_k3s_overlay_firewall': 'dsb-k3s-overlay',
+        'gcp_dsb_benchmark_firewall': 'dsb-benchmark',
+    }
+    deterministic.update({
+        prefix: _resource_name(job_id, suffix)
+        for prefix, suffix in firewall_suffixes.items()
+    })
+    for role in DISTRIBUTED_PRIVATE_ADDRESSES:
+        name = _resource_name(job_id, f'dsb-{role}')
+        deterministic[DISTRIBUTED_NODE_PREFIXES[role]] = name
+        deterministic[DISTRIBUTED_BOOT_PREFIXES[role]] = f'{name}-boot'
+    if expected_names != deterministic:
+        raise ResourceInventoryError(
+            'GCP distributed expected-name allowlist conflicts with the job ID.'
+        )
+    if resources.get('gcp_resource_prefix') != base_name:
+        raise ResourceInventoryError(
+            'GCP distributed resource prefix conflicts with the job ID.'
+        )
+    for prefix, expected_name in expected_names.items():
+        saved_name = resources.get(f'{prefix}_name')
+        if saved_name is not None and saved_name != expected_name:
+            raise ResourceInventoryError(
+                f'GCP distributed {prefix} name conflicts with the allowlist.'
+            )
+    for node in inventory.nodes:
+        role = node.key
+        if (
+            node.provider_resource_name != expected_names[
+                DISTRIBUTED_NODE_PREFIXES[role]
+            ]
+            or node.private_addresses
+            != (DISTRIBUTED_PRIVATE_ADDRESSES[role],)
+            or node.zone != resources['gcp_zone']
+            or node.shape != resources.get(
+                f'gcp_dsb_{role.replace("-", "_")}_machine_type'
+            )
+            or node.architecture != resources.get(
+                f'gcp_dsb_{role.replace("-", "_")}_architecture'
+            )
+        ):
+            raise ResourceInventoryError(
+                f'GCP distributed inventory role {role} conflicts with the '
+                'provider contract.'
+            )
+        prefix = DISTRIBUTED_NODE_PREFIXES[role]
+        flat_id = resources.get(f'{prefix}_id')
+        if flat_id and node.provider_resource_id != str(flat_id):
+            raise ResourceInventoryError(
+                f'GCP distributed inventory role {role} has a conflicting ID.'
+            )
+    database = inventory.node('database')
+    storage = database.storage_resource('database-data') if database else None
+    disk_prefix = 'gcp_dsb_database_data_disk'
+    if (
+        storage is None
+        or storage.provider_resource_name != expected_names[disk_prefix]
+        or storage.device != resources.get('gcp_dsb_database_disk_device')
+    ):
+        raise ResourceInventoryError(
+            'GCP distributed database storage inventory is inconsistent.'
+        )
+    flat_disk_id = resources.get(f'{disk_prefix}_id')
+    if flat_disk_id and storage.provider_resource_id != str(flat_disk_id):
+        raise ResourceInventoryError(
+            'GCP distributed database storage has a conflicting ID.'
+        )
+    return manifest, inventory, expected_names
+
+
+def _distributed_description_role(prefix: str) -> str:
+    direct = {
+        'gcp_dsb_network': 'distributed-network',
+        'gcp_dsb_cluster_subnet': 'distributed-cluster-subnet',
+        'gcp_dsb_loadgen_subnet': 'distributed-loadgen-subnet',
+        'gcp_dsb_router': 'distributed-router',
+        'gcp_dsb_database_data_disk': 'database-data',
+        'gcp_dsb_public_ssh_firewall': 'dsb-public-ssh',
+        'gcp_dsb_private_ssh_firewall': 'dsb-private-ssh',
+        'gcp_dsb_k3s_api_firewall': 'dsb-k3s-api',
+        'gcp_dsb_k3s_overlay_firewall': 'dsb-k3s-overlay',
+        'gcp_dsb_benchmark_firewall': 'dsb-benchmark',
+    }
+    if prefix in direct:
+        return direct[prefix]
+    for role, node_prefix in DISTRIBUTED_NODE_PREFIXES.items():
+        if prefix == node_prefix:
+            return role
+    for role, boot_prefix in DISTRIBUTED_BOOT_PREFIXES.items():
+        if prefix == boot_prefix:
+            return f'{role}-boot'
+    raise KeyError(prefix)
+
+
+def _verify_distributed_cleanup_resources(
+    job: dict[str, Any],
+    found: Mapping[str, Any],
+    *,
+    manifest: DeathStarBenchTopologyManifest | None = None,
+):
+    resources = job['resources']
+    if manifest is None:
+        manifest, _, expected_names = _load_distributed_cleanup_contract(job)
+    else:
+        expected_names = dict(resources['gcp_dsb_expected_names'])
+    job_id = str(job['id']).lower()
+    project_id = str(resources['gcp_project_id'])
+    zone = str(resources['gcp_zone'])
+    region = str(resources.get('region') or DEFAULT_REGION)
+    for prefix, resource in found.items():
+        if resource is None:
+            continue
+        _assert_saved_identity(prefix, resource, resources)
+        role = _distributed_description_role(prefix)
+        if str(_value(resource, 'description', '') or '') != _description(
+            job_id, role
+        ):
+            raise RuntimeError(
+                f'Refusing GCP distributed cleanup because {prefix} has an '
+                'unexpected ownership description. No resources were changed.'
+            )
+        if prefix in {
+            *DISTRIBUTED_NODE_PREFIXES.values(),
+            *DISTRIBUTED_BOOT_PREFIXES.values(),
+            'gcp_dsb_database_data_disk',
+        }:
+            _required_labels(job_id, role, resource, prefix)
+
+    network = found.get('gcp_dsb_network')
+    network_link = (
+        _value(network, 'self_link')
+        if network is not None
+        else resources.get('gcp_dsb_network_self_link')
+    ) or (
+        f'projects/{project_id}/global/networks/'
+        f'{expected_names["gcp_dsb_network"]}'
+    )
+    if network is not None:
+        _assert_insert_resource_matches(
+            'gcp_dsb_network',
+            network,
+            _network_resource(
+                {}, job_id, resources['gcp_dsb_network_name'],
+                role='distributed-network',
+            ),
+            project_id=project_id,
+            zone=zone,
+        )
+
+    subnet_specs = {
+        'gcp_dsb_cluster_subnet': (
+            'distributed-cluster-subnet', DISTRIBUTED_CLUSTER_SUBNET_CIDR
+        ),
+        'gcp_dsb_loadgen_subnet': (
+            'distributed-loadgen-subnet', DISTRIBUTED_LOADGEN_SUBNET_CIDR
+        ),
+    }
+    subnet_links: dict[str, str] = {}
+    for prefix, (role, cidr) in subnet_specs.items():
+        subnet = found.get(prefix)
+        expected_name = str(
+            resources.get(f'{prefix}_name') or expected_names[prefix]
+        )
+        expected_link = (
+            f'projects/{project_id}/regions/{region}/subnetworks/{expected_name}'
+        )
+        subnet_links[prefix] = str(
+            _value(subnet, 'self_link') if subnet is not None else (
+                resources.get(f'{prefix}_self_link') or expected_link
+            )
+        )
+        if subnet is not None:
+            _assert_insert_resource_matches(
+                prefix,
+                subnet,
+                _subnet_resource(
+                    {}, job_id, expected_name, network_link,
+                    role=role, cidr=cidr,
+                ),
+                project_id=project_id,
+                zone=zone,
+            )
+
+    router = found.get('gcp_dsb_router')
+    if router is not None:
+        actual_nats = list(_value(router, 'nats', ()) or ())
+        if (
+            resources.get('gcp_dsb_router_nat_configured') is True
+            and not actual_nats
+        ):
+            raise RuntimeError(
+                'Refusing GCP distributed cleanup because the router lost '
+                'its recorded Cloud NAT feature. No resources were changed.'
+            )
+        _assert_insert_resource_matches(
+            'gcp_dsb_router',
+            router,
+            _router_resource(
+                {},
+                job_id,
+                resources['gcp_dsb_router_name'],
+                network_link,
+                subnet_links['gcp_dsb_cluster_subnet'],
+                include_nat=bool(actual_nats),
+            ),
+            project_id=project_id,
+            zone=zone,
+        )
+
+    role_tags = {
+        role: str(resources[f'gcp_dsb_{role.replace("-", "_")}_tag'])
+        for role in DISTRIBUTED_PRIVATE_ADDRESSES
+    }
+    expected_firewalls = {
+        prefix: body
+        for prefix, _, body in _distributed_firewall_specs(
+            manifest,
+            job_id=job_id,
+            network=network_link,
+            tags=role_tags,
+            clients={},
+        )
+    }
+    for prefix in DISTRIBUTED_FIREWALL_PREFIXES:
+        firewall = found.get(prefix)
+        if firewall is not None:
+            _assert_insert_resource_matches(
+                prefix,
+                firewall,
+                expected_firewalls[prefix],
+                project_id=project_id,
+                zone=zone,
+            )
+
+    for role, prefix in DISTRIBUTED_NODE_PREFIXES.items():
+        instance = found.get(prefix)
+        if instance is None:
+            continue
+        expected_machine = resources[
+            f'gcp_dsb_{role.replace("-", "_")}_machine_type'
+        ]
+        if _basename(_value(instance, 'machine_type')) != expected_machine:
+            raise RuntimeError(
+                f'Refusing GCP distributed cleanup because {role} has a '
+                'different machine type. No resources were changed.'
+            )
+        tags = _string_set(_value(_value(instance, 'tags', {}), 'items', ()))
+        if tags != {role_tags[role]}:
+            raise RuntimeError(
+                f'Refusing GCP distributed cleanup because {role} tags '
+                'changed. No resources were changed.'
+            )
+        if _value(instance, 'service_accounts', ()) or ():
+            raise RuntimeError(
+                f'Refusing GCP distributed cleanup because {role} has a '
+                'service account. No resources were changed.'
+            )
+        metadata = {
+            str(_value(item, 'key', '')): str(_value(item, 'value', '') or '')
+            for item in (
+                _value(_value(instance, 'metadata', {}) or {}, 'items', ()) or ()
+            )
+        }
+        if (
+            metadata.get('block-project-ssh-keys') != 'TRUE'
+            or metadata.get('enable-oslogin') != 'FALSE'
+            or not metadata.get('ssh-keys', '').startswith(f'{SSH_USER}:')
+        ):
+            raise RuntimeError(
+                f'Refusing GCP distributed cleanup because {role} SSH '
+                'metadata changed. No resources were changed.'
+            )
+        interfaces = list(_value(instance, 'network_interfaces', ()) or ())
+        subnet_prefix = (
+            'gcp_dsb_loadgen_subnet'
+            if role == 'load-generator'
+            else 'gcp_dsb_cluster_subnet'
+        )
+        if len(interfaces) != 1 or not _link_equal(
+            _value(interfaces[0], 'network'), network_link
+        ) or not _link_equal(
+            _value(interfaces[0], 'subnetwork'), subnet_links[subnet_prefix]
+        ):
+            raise RuntimeError(
+                f'Refusing GCP distributed cleanup because {role} network '
+                'relationships changed. No resources were changed.'
+            )
+        private_ip = (
+            _value(interfaces[0], 'network_i_p')
+            or _value(interfaces[0], 'network_ip')
+        )
+        if str(private_ip or '') != DISTRIBUTED_PRIVATE_ADDRESSES[role]:
+            raise RuntimeError(
+                f'Refusing GCP distributed cleanup because {role} private '
+                'address changed. No resources were changed.'
+            )
+        access = list(_value(interfaces[0], 'access_configs', ()) or ())
+        expected_public = role in DISTRIBUTED_PUBLIC_IP_NODES
+        if bool(access) != expected_public or len(access) > 1:
+            raise RuntimeError(
+                f'Refusing GCP distributed cleanup because {role} public '
+                'access changed. No resources were changed.'
+            )
+        boot_name = resources[f'{DISTRIBUTED_BOOT_PREFIXES[role]}_name']
+        expected_devices = {boot_name}
+        if role == 'database':
+            expected_devices.add(resources['gcp_dsb_database_data_disk_name'])
+        disks = list(_value(instance, 'disks', ()) or ())
+        if {
+            str(_value(item, 'device_name', '') or '') for item in disks
+        } != expected_devices:
+            raise RuntimeError(
+                f'Refusing GCP distributed cleanup because {role} disk set '
+                'changed. No resources were changed.'
+            )
+        for disk in disks:
+            device_name = str(_value(disk, 'device_name', '') or '')
+            expected_link = _zonal_resource_link(
+                project_id, zone, 'disks', device_name
+            )
+            if not _scoped_link_equal(_value(disk, 'source'), expected_link):
+                raise RuntimeError(
+                    f'Refusing GCP distributed cleanup because {role} disk '
+                    'source changed. No resources were changed.'
+                )
+            if device_name == boot_name:
+                safe = bool(_value(disk, 'boot', False)) and bool(
+                    _value(disk, 'auto_delete', False)
+                )
+            else:
+                safe = (
+                    not bool(_value(disk, 'boot', False))
+                    and not bool(_value(disk, 'auto_delete', True))
+                    and str(_value(disk, 'interface', '') or '')
+                    == DISTRIBUTED_DATABASE_DISK_INTERFACE
+                )
+            if not safe:
+                raise RuntimeError(
+                    f'Refusing GCP distributed cleanup because {role} disk '
+                    'attachment semantics changed. No resources were changed.'
+                )
+
+    for prefix in (
+        'gcp_dsb_database_data_disk',
+        *DISTRIBUTED_BOOT_PREFIXES.values(),
+    ):
+        disk = found.get(prefix)
+        if disk is None:
+            continue
+        _verify_disk_relationship(prefix, disk, resources)
+        _verify_disk_profile(prefix, disk, resources)
+        users = list(_value(disk, 'users', ()) or ())
+        role = (
+            'database'
+            if prefix == 'gcp_dsb_database_data_disk'
+            else next(
+                key for key, value in DISTRIBUTED_BOOT_PREFIXES.items()
+                if value == prefix
+            )
+        )
+        if users:
+            parent_name = resources.get(
+                f'{DISTRIBUTED_NODE_PREFIXES[role]}_name'
+            )
+            if not parent_name:
+                raise RuntimeError(
+                    f'Refusing GCP distributed cleanup because {prefix} is '
+                    'attached but its parent VM contract is absent. No '
+                    'resources were changed.'
+                )
+            expected_parent = _zonal_resource_link(
+                project_id,
+                zone,
+                'instances',
+                parent_name,
+            )
+            if (
+                len(users) != 1
+                or not _scoped_link_equal(users[0], expected_parent)
+            ):
+                raise RuntimeError(
+                    f'Refusing GCP distributed cleanup because {prefix} is '
+                    'attached to another VM. No resources were changed.'
+                )
+
+
+def _destroy_distributed_deathstarbench_candidate(
+    job: dict[str, Any],
+    *,
+    emit: EventCallback | None,
+    persist: PersistCallback | None,
+    credentials: Any,
+    clients: Mapping[str, Any] | None,
+    preserve_status: bool,
+):
+    resources = job.setdefault('resources', {})
+    try:
+        manifest, inventory, expected_names = (
+            _load_distributed_cleanup_contract(job)
+        )
+    except (ResourceInventoryError, TopologyManifestError, ValueError) as exc:
+        raise RuntimeError(
+            'Refusing GCP distributed cleanup because the persisted '
+            f'ownership inventory is invalid: {exc}'
+        ) from exc
+    project_id, _, clients = _runtime(
+        str(resources['gcp_project_id']), credentials, clients
+    )
+    project = _call(
+        clients['projects'], 'get', clients, 'GetProjectRequest',
+        project=project_id,
+    )
+    current_project_id = str(_value(project, 'id', '') or '')
+    if current_project_id != str(resources['gcp_compute_project_id']):
+        raise RuntimeError(
+            'Refusing GCP distributed cleanup because the immutable Compute '
+            'project ID changed. No resources were changed.'
+        )
+
+    for prefix in DISTRIBUTED_RESOURCE_PREFIXES:
+        if not resources.get(f'{prefix}_name'):
+            continue
+        ambiguous = resources.get(f'{prefix}_create_ambiguous') is True
+        request_id = resources.get(f'{prefix}_request_id')
+        if prefix in DISTRIBUTED_BOOT_PREFIXES.values():
+            role = next(
+                key for key, value in DISTRIBUTED_BOOT_PREFIXES.items()
+                if value == prefix
+            )
+            parent_request = resources.get(
+                f'{DISTRIBUTED_NODE_PREFIXES[role]}_request_id'
+            )
+            if request_id and parent_request and request_id != parent_request:
+                raise RuntimeError(
+                    f'Refusing GCP distributed cleanup because {prefix} has '
+                    'a request ID different from its parent VM.'
+                )
+            request_id = request_id or parent_request
+        if ambiguous and not _valid_request_id(request_id):
+            raise RuntimeError(
+                f'Refusing GCP distributed cleanup because {prefix} has an '
+                'invalid response-loss request ID. No resources were changed.'
+            )
+        if not ambiguous and (
+            not resources.get(f'{prefix}_id')
+            or not resources.get(f'{prefix}_self_link')
+        ):
+            raise RuntimeError(
+                f'Refusing GCP distributed cleanup because {prefix} lacks '
+                'immutable identity. No resources were changed.'
+            )
+
+    found = {
+        prefix: _get_cleanup_resource(prefix, resources, clients)
+        for prefix in DISTRIBUTED_RESOURCE_PREFIXES
+        if resources.get(f'{prefix}_name')
+    }
+    missing = [prefix for prefix, resource in found.items() if resource is None]
+    if missing:
+        found.update(_bounded_cleanup_lookup(
+            missing,
+            resources,
+            clients,
+        ))
+    unresolved = [
+        prefix for prefix, resource in found.items()
+        if resource is None
+        and resources.get(f'{prefix}_create_ambiguous') is True
+    ]
+    if unresolved:
+        raise RuntimeError(
+            'GCP distributed cleanup cannot yet prove whether response-lost '
+            'creates exist for: '
+            + ', '.join(unresolved)
+            + '. No resources were changed; retry cleanup.'
+        )
+    _verify_distributed_cleanup_resources(
+        job, found, manifest=manifest
+    )
+    for prefix, resource in found.items():
+        if resource is not None:
+            _persist_recovered_identity(job, persist, prefix, resource)
+
+    if not preserve_status:
+        job['status'] = 'destroying'
+        _persist(job, persist)
+    _emit(
+        job, emit, 'Destroy',
+        'Removing exact GCP distributed benchmark infrastructure.',
+    )
+    delete_order = (
+        *(DISTRIBUTED_NODE_PREFIXES[key] for key in manifest.deletion_order),
+        'gcp_dsb_database_data_disk',
+        *(DISTRIBUTED_BOOT_PREFIXES[key] for key in manifest.deletion_order),
+        *DISTRIBUTED_FIREWALL_PREFIXES,
+        'gcp_dsb_router',
+        'gcp_dsb_loadgen_subnet',
+        'gcp_dsb_cluster_subnet',
+        'gcp_dsb_network',
+    )
+    errors: list[str] = []
+    for prefix in delete_order:
+        if not resources.get(f'{prefix}_name') or found.get(prefix) is None:
+            continue
+        role = next((
+            key for key, value in DISTRIBUTED_NODE_PREFIXES.items()
+            if value == prefix
+        ), None)
+        try:
+            if role:
+                _set_inventory_node_status(
+                    job, persist, role, 'deleting'
+                )
+            elif prefix == 'gcp_dsb_database_data_disk':
+                _set_inventory_storage_status(
+                    job, persist, 'database', 'database-data', 'deleting'
+                )
+            current = _get_cleanup_resource(prefix, resources, clients)
+            if current is not None:
+                check_found = dict(found)
+                check_found[prefix] = current
+                _verify_distributed_cleanup_resources(
+                    job, check_found, manifest=manifest
+                )
+                _delete_resource(job, persist, prefix, clients)
+            if role:
+                _set_inventory_node_status(
+                    job, persist, role, 'deleted'
+                )
+            elif prefix == 'gcp_dsb_database_data_disk':
+                _set_inventory_storage_status(
+                    job, persist, 'database', 'database-data', 'deleted'
+                )
+            _emit(
+                job,
+                emit,
+                'Destroy',
+                f'Deleted GCP distributed resource '
+                f'{resources.get(f"{prefix}_name")}.',
+            )
+        except Exception as exc:
+            errors.append(
+                f'Unable to delete GCP distributed resource '
+                f'{resources.get(f"{prefix}_name")}: {exc}'
+            )
+
+    final_resources = dict(resources)
+    for prefix, name in expected_names.items():
+        final_resources[f'{prefix}_name'] = name
+    remaining = []
+    for prefix in DISTRIBUTED_RESOURCE_PREFIXES:
+        try:
+            if _get_cleanup_resource(prefix, final_resources, clients) is not None:
+                remaining.append(prefix)
+        except Exception as exc:
+            errors.append(f'Unable to prove {prefix} absent: {exc}')
+    if remaining:
+        errors.append(
+            'GCP distributed resources remain: ' + ', '.join(remaining)
+        )
+    if errors:
+        raise RuntimeError('; '.join(dict.fromkeys(errors)))
+
+    # Every GCP-prefixed value in this operator-only contract is either a
+    # cloud ownership anchor or provider metadata derived from that graph.
+    # Clear the complete provider contract only after the independent final
+    # absence sweep above succeeds.  Leaving generic values such as the
+    # project/zone or pinned-image fields behind would make the run appear
+    # recoverable even though no GCE resources remain.
+    cleanup_keys = [
+        key for key in tuple(resources)
+        if key.startswith('gcp_')
+    ]
+    cleanup_keys.extend((
+        'gcp_distributed_candidate',
+        'gcp_resource_prefix',
+        'gcp_web_benchmarks',
+        'instance_id',
+        'public_ip',
+        'private_ip',
+        'loadgen_instance_id',
+        'loadgen_public_ip',
+        'loadgen_private_ip',
+        'loadgen_shape',
+        'loadgen_vcpus',
+        'loadgen_memory_gb',
+        'loadgen_architecture',
+        'loadgen_image_id',
+        'loadgen_image_name',
+        'loadgen_network_bandwidth_gbps',
+        'loadgen_network_capacity_kind',
+        ROLE_NODE_INVENTORY_KEY,
+        DEATHSTARBENCH_TOPOLOGY_MANIFEST_KEY,
+        DEATHSTARBENCH_TOPOLOGY_FINGERPRINT_KEY,
+        K3S_RUNTIME_JOURNAL_KEY,
+        DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
+        DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+    ))
+    _forget(job, persist, *cleanup_keys)
+    if not preserve_status:
+        job['status'] = 'destroyed'
+        job['cleanup_error'] = None
+        _persist(job, persist)
+        _emit(
+            job, emit, 'Complete',
+            'GCP distributed infrastructure was destroyed.',
+        )
+    return resources
+
+
 def destroy_resources(
     job: dict[str, Any],
     *,
@@ -3490,6 +5747,15 @@ def destroy_resources(
 ):
     """Delete the exact, ownership-verified GCP resource graph for one job."""
     resources = job.setdefault('resources', {})
+    if resources.get('gcp_distributed_candidate') is True:
+        return _destroy_distributed_deathstarbench_candidate(
+            job,
+            emit=emit,
+            persist=persist,
+            credentials=credentials,
+            clients=clients,
+            preserve_status=preserve_status,
+        )
     if job.get('status') == 'destroyed' and not _managed_resources_remain(resources):
         return resources
     project_id = str(
@@ -3951,6 +6217,8 @@ cleanup = destroy_resources
 __all__ = [
     'DEFAULT_DISK_TYPE',
     'DEFAULT_REGION',
+    'DISTRIBUTED_PRIVATE_ADDRESSES',
+    'DISTRIBUTED_ROLE_MACHINE_TYPES',
     'HYPERDISK_BALANCED_IOPS',
     'HYPERDISK_BALANCED_THROUGHPUT_MIBPS',
     'HYPERDISK_BALANCED_TYPE',
@@ -3974,5 +6242,6 @@ __all__ = [
     'normalize_architecture',
     'placement',
     'provision',
+    'provision_distributed_deathstarbench_candidate',
     'destroy_resources',
 ]

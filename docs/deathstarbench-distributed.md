@@ -1,17 +1,20 @@
 # Distributed DeathStarBench design
 
-Status: the foundation, Azure five-node infrastructure, internal four-node
-K3s bootstrap, deterministic Social Network deployment, candidate-image
-publication, deterministic Reed98 initialization, bounded warm-up, measured
-traffic, reporting, exact Azure cleanup, shared cross-process ownership, and
+Status: the foundation, Azure five-node infrastructure, the unreleased GCP
+five-node Compute Engine candidate, provider-neutral four-node K3s bootstrap,
+deterministic Social Network deployment, candidate-image publication,
+deterministic Reed98 initialization, bounded warm-up, measured traffic,
+reporting, exact provider cleanup, shared cross-process ownership, and
 failure-injection machinery are implemented. One safe pre-initialization Azure
 hard-exit/reacquisition/resume/cleanup path has also passed live qualification.
-`distributed_tiered_v1` is still unreleased for normal cloud provisioning.
-The UI does not offer it, and the normal API/provider path rejects it before
-creating a run or making a cloud write. Representative negative network
-probes, live post-initialization cleanup-only and signal paths, immutable
-load-driver publication or equivalent qualification, and qualification on the
-other providers remain release gates.
+The GCP candidate has also passed positive live workload and measured-result
+qualification. `distributed_tiered_v1` is still unreleased for normal cloud
+provisioning. The UI does not offer it, and the normal API/provider path rejects
+it before creating a run or making a cloud write. Representative negative
+network probes, live post-initialization cleanup-only and signal paths,
+immutable load-driver publication or equivalent qualification, GCP recovery
+and failure-path qualification, and qualification on AWS and OCI remain release
+gates.
 
 ## Benchmark modes
 
@@ -44,7 +47,7 @@ Every result records:
 - workload, warm-up, duration, threads, connections, and offered rate; and
 - provider-observed hardware and storage as provenance.
 
-The measured Azure candidate additionally pins dataset revision
+The shared Azure/GCP candidate pipeline additionally pins dataset revision
 `social-network-socfb-reed98-compose-seed1-v1`, load-driver revision
 `wrk2-6ecb097-native-v1`, and measurement revision
 `social-network-distributed-measurement-v1`. It records the exact hashes of
@@ -161,23 +164,109 @@ the persisted contract makes that state recoverable. In addition to synthetic
 lifecycle and failure-injection coverage, runtime v5 has now completed the
 internal live Azure qualification described below.
 
-## Internal Azure K3s bootstrap
+## GCP synthetic infrastructure candidate
+
+GCP now has an internal, unreleased five-node Compute Engine candidate. Like
+the Azure pilot, it is callable only from the operator qualification harness
+and internal hooks; the normal UI, API, and provider dispatcher remain closed.
+It persists the provider-neutral topology manifest, fingerprint, role-node
+inventory, deterministic resource names, request UUIDs, and pinned Rocky Linux
+9 image identities before the corresponding cloud writes. The same topology,
+K3s runtime, rendered Social Network workload, dataset, measurement, and result
+contracts used by Azure are then selected through provider-neutral dispatch.
+GCP-specific code owns only the cloud lifecycle and guest device discovery.
+
+All five instances are placed in one selected zone. The exact role contract is:
+
+- `control`, `cache`, and `load_generator`: `n2-standard-2`, x86_64;
+- `database`: `n2-standard-4`, x86_64, plus the database disk described below;
+  and
+- `application`: the supported machine type and architecture selected by the
+  operator. The qualifier defaults to Arm64 `c4a-standard-8` with 8 vCPUs and
+  32 GiB, but this default is not a release promise for every region.
+
+Every node receives a 50-GiB boot disk and the Rocky Linux 9 image pinned for
+its architecture. N2 support nodes use `pd-balanced`; the default C4A
+application uses its required Hyperdisk Balanced, NVMe, and gVNIC profile with
+3,000 provisioned IOPS and 140 MiB/s. A different selected application shape
+must pass the provider's exact architecture, capacity, disk-interface, and NIC
+profile validation before the first instance write. Support roles remain x86_64
+even when the application role is Arm64.
+
+The database receives a separate 100-GiB zonal `pd-ssd` attached over SCSI with
+`autoDelete` disabled. Persistent Disk performance is service-derived rather
+than provisioned per disk, so the flat GCP fields deliberately record no
+provisioned IOPS or throughput while the provider-neutral inventory retains the
+topology minimum of 3,000 IOPS and 125 MiB/s. The attachment has a deterministic
+device name, `benchmark-<job-id>-dsb-database-data`, and the guest resolves only
+its exact `/dev/disk/by-id/google-<device-name>` link. It never enumerates or
+guesses among unused disks. The preparation hook rejects the boot-device
+ancestry, partitions or child devices, foreign mounts and fstab entries, and
+non-XFS filesystems. It formats only a blank whole disk, mounts it by UUID at
+`/var/lib/deathstarbench/database`, and persists the device name, link,
+filesystem, UUID, and mount point as a non-secret attestation. Every later
+workload retry re-attests those values read-only before touching MongoDB paths.
+
+The custom-mode VPC is `10.240.0.0/16`, with a `10.240.1.0/24` cluster subnet
+and `10.240.2.0/24` load-generator subnet. As on Azure, neither range overlaps
+the pinned K3s pod CIDR `10.42.0.0/16` or service CIDR `10.43.0.0/16`. The
+deterministic addresses are:
+
+| Role | Private address | Public address |
+| --- | --- | --- |
+| `control` | `10.240.1.10` | ephemeral Premium-tier IPv4 |
+| `database` | `10.240.1.11` | none |
+| `cache` | `10.240.1.12` | none |
+| `application` | `10.240.1.13` | ephemeral Premium-tier IPv4 |
+| `load_generator` | `10.240.2.10` | ephemeral Premium-tier IPv4 |
+
+A regional Cloud Router and auto-allocated Cloud NAT serve only the cluster
+subnet, so private database and cache nodes can retrieve the pinned runtime and
+images without public addresses. The load generator uses its own public
+address for outbound access. Five run-owned ingress firewall rules use exact
+role tags: public SSH reaches control, application, and load generator from the
+currently configured `0.0.0.0/0` management scope; private SSH reaches database
+and cache only from control and application; workers reach control on TCP/6443;
+cluster nodes exchange Flannel traffic on UDP/8472; and only the load generator
+reaches the application NodePort on TCP/8080. Kubernetes NetworkPolicies remain
+the independent pod-level boundary.
+
+Unlike Azure, GCP has no run-owned resource group to use as one atomic deletion
+boundary. The cleanup boundary is therefore the exact persisted graph: five
+instances, five auto-delete boot disks, the non-auto-delete database disk, five
+firewall rules, Cloud Router/NAT, two subnets, and the VPC. Cleanup first proves
+the immutable project identity, topology and inventory fingerprints,
+deterministic names, resource IDs and self-links, ownership labels and
+descriptions, network relationships, machine types, tags, addresses, public-IP
+policy, disk attachments, and response-loss request UUIDs. A missing resource
+with an unresolved create is ambiguous and causes cleanup to retain ownership
+for retry instead of guessing. After revalidation, cleanup deletes nodes in the
+manifest's frontend-first order, then the database disk, boot disks, firewall
+rules, router, subnets, and VPC. It clears the GCP ownership and runtime journals
+only after independent lookups prove every expected resource absent.
+
+## Internal K3s bootstrap (Azure and GCP candidates)
 
 The internal runtime hook reloads and validates the persisted topology,
-fingerprint, five-node role inventory, fixed Azure role identities, private
+fingerprint, five-node role inventory, fixed provider role identities, private
 addresses, shapes, architectures, and database disk before its first SSH
 process. Control is reached directly; database, cache, and application are
 reached at their private addresses through a local OpenSSH proxy on the exact
-control public address. The private key never leaves the orchestrator, and the
-jump and destination share the run-owned known-hosts database and cancellation
-boundary.
+control public address. The GCP application has a public address for its cloud
+contract, but runtime and workload management deliberately use its private
+address through control so the execution path matches Azure. The private key
+never leaves the orchestrator, and the jump and destination share the run-owned
+known-hosts database and cancellation boundary.
 
 The four cluster hosts are prepared in manifest order. Rocky Linux 9 and its
-exact SELinux policy are verified, firewalld is disabled inside the existing
-strict Azure NSG boundary, required modules/sysctls are persisted, and the
-architecture-specific K3s binary plus air-gap bundle are checksum-verified.
-The database disk is resolved only through Azure LUN 0's fixed NVMe/SCSI links,
-formatted only when blank, mounted by XFS UUID at
+exact SELinux policy are verified, and firewalld is disabled inside the strict
+provider firewall boundary: the existing Azure NSGs or the role-tagged GCP
+rules. Required modules/sysctls are persisted, and the architecture-specific
+K3s binary plus air-gap bundle are checksum-verified.
+On Azure the database disk is resolved only through LUN 0's fixed NVMe/SCSI
+links. On GCP it is resolved only through the persisted
+`/dev/disk/by-id/google-*` link described above. In both cases it is formatted
+only when blank, mounted by XFS UUID at
 `/var/lib/deathstarbench/database`, and recorded as a non-secret attestation.
 
 The control plane uses exact pod/service CIDRs and Flannel VXLAN. Traefik,
@@ -244,11 +333,11 @@ and node placement and rejects missing or extra workload objects.
 The six MongoDB instances each receive a static PersistentVolume and
 PersistentVolumeClaim rooted at
 `/var/lib/deathstarbench/database/mongodb/<component>`. Before applying them,
-the database guest hook re-attests the Azure LUN 0 XFS mount and UUID, creates
-only the owned MongoDB directories, persists their SELinux `container_file_t`
-labeling, and fails closed on an unowned or mismatched path. Live readiness
-requires every volume and claim to be bound to the expected host path on the
-database node.
+the provider-specific database guest hook re-attests the Azure LUN 0 or exact
+GCP device-name XFS mount and UUID. The shared path then creates only the owned
+MongoDB directories, persists their SELinux `container_file_t` labeling, and
+fails closed on an unowned or mismatched path. Live readiness requires every
+volume and claim to be bound to the expected host path on the database node.
 
 The bundle applies namespace, storage, policy, service, and workload phases in
 that fixed order. A default-deny baseline is paired with allow rules generated
@@ -285,8 +374,11 @@ gate.
 
 ## Internal dataset and measurement candidate
 
-The Azure candidate has a separate operator-only execution hook outside the
-normal run path. Its cleanup-owned journal advances monotonically through
+The Azure and GCP candidates expose the same provider-neutral operator-only
+execution hook outside the normal run path. Provider adapters supply only the
+validated inventory and SSH routes; the initialization, warm-up, wrk2 command,
+parsing, evidence, result, and comparison logic is shared. Its cleanup-owned
+journal advances monotonically through
 `preparing_load_generator`, `load_generator_ready`,
 `initialization_started`, `dataset_ready`, `warmup_started`,
 `warmup_complete`, `measurement_started`, and `measurement_complete`.
@@ -345,7 +437,7 @@ already-running remote process was killed. Graceful injection raises the same
 cooperative cancellation used by the application and attempts cleanup. Hard
 injection first atomically writes `qualification-interruption.json`, then exits
 the process with status 86 without cleanup. SIGINT and SIGTERM interrupt
-synchronous Azure waits; evidence is then recorded during normal unwinding,
+synchronous provider waits; evidence is then recorded during normal unwinding,
 including a separate immutable record of the first later signal that arrives
 during recovery or cleanup.
 
@@ -364,6 +456,158 @@ Synthetic coverage exercises every checkpoint and replay decision, both
 injection modes, real subprocess exit-86 and fresh-process reacquisition,
 SIGINT/SIGTERM during blocked waits, historical/current lock exclusion, and
 the normal web-run, destroy, and history-deletion ownership races.
+
+## GCP operator qualification
+
+The GCP harness requires Application Default Credentials with Compute Engine
+access, an enabled Compute API, an accessible project, enough regional quota,
+and the same checked-in candidate image lock used by Azure. A new run always
+creates a persisted job and holds the shared per-run lease. In the normal path
+the harness always attempts exact cleanup, whether qualification succeeds or
+fails; a zero exit requires both the requested readiness/result boundary and a
+proof that every GCP ownership key and expected cloud resource is gone.
+
+This workload-only example provisions the complete GCP graph, reaches exact
+`cluster_ready` and `workload_ready`, and then destroys it without initializing
+the dataset or producing a benchmark result:
+
+```bash
+.venv/bin/python scripts/qualify_gcp_deathstarbench_distributed.py \
+  --image-lock docs/qualification/deathstarbench-social-network-images-v1.json \
+  --project-id <project-id> \
+  --region us-east1 \
+  --zone us-east1-b \
+  --application-machine-type c4a-standard-8 \
+  --application-vcpus 8 \
+  --application-memory-gib 32
+```
+
+Add `--measure` to initialize Reed98 exactly once, warm up, measure, require the
+strict distributed result and saved report, and then destroy the graph:
+
+```bash
+.venv/bin/python scripts/qualify_gcp_deathstarbench_distributed.py \
+  --image-lock docs/qualification/deathstarbench-social-network-images-v1.json \
+  --project-id <project-id> \
+  --region us-east1 \
+  --zone us-east1-b \
+  --application-machine-type c4a-standard-8 \
+  --application-vcpus 8 \
+  --application-memory-gib 32 \
+  --measure
+```
+
+Unless explicitly overridden, the shared measurement contract uses a
+30-second warm-up, 60-second measured interval, four threads, four connections,
+and an offered rate of 100 requests/second.
+
+An intentionally interrupted or transport-failed run retains its job ID and
+ownership contract. Resume reloads the saved plan, image-lock copy, topology,
+runtime, workload, and execution journals instead of constructing a new run:
+
+```bash
+.venv/bin/python scripts/qualify_gcp_deathstarbench_distributed.py \
+  --resume <job-id> \
+  --measure
+```
+
+Omit `--measure` only when resuming a workload-only run that has no execution
+journal. If the original run used non-default warm-up, duration, thread,
+connection, or request-rate values, repeat those exact options on resume.
+Measurement recovery is allowed only before dataset mutation: no execution
+journal, `preparing_load_generator`, or `load_generator_ready`. Once
+`initialization_started` is durable, replay is unsafe and the harness requires
+cleanup-only followed by fresh infrastructure.
+
+Cleanup-only never needs SSH credentials or a live guest. It reloads and
+validates the exact cloud ownership graph and uses the Compute control plane:
+
+```bash
+.venv/bin/python scripts/qualify_gcp_deathstarbench_distributed.py \
+  --cleanup-only <job-id>
+```
+
+If cloud state is ambiguous, foreign, or temporarily unavailable, cleanup
+fails closed and retains the journal for another cleanup-only attempt. It does
+not discard ownership merely because a delete request or lookup failed.
+
+## GCP live qualification evidence
+
+The first exact `workload_ready` GCP qualification completed on 2026-09-21.
+This is deployment evidence, not a benchmark result.
+
+- The operator qualification records associate job `29d77a6f1c05` and the
+  later measured run with branch `codex/gcp-dsb-k3s`; the reviewed slice is
+  frozen at implementation commit
+  `50634c09eb353d83c982cb60ec2c99434c2063c7`. This is operator/external source
+  association because the retained result does not yet embed Git revision and
+  dirty-tree identity.
+- Job `29d77a6f1c05` ran in GCP region `us-east1`, zone `us-east1-b`. Control,
+  cache, and load generator used x86_64 `n2-standard-2`; database used x86_64
+  `n2-standard-4` plus a 100-GiB `pd-ssd` data disk; and the Arm application
+  role used `c4a-standard-8` with 8 vCPUs and 32 GiB.
+- The database mount accepted only the run-owned SCSI disk name
+  `benchmark-29d77a6f1c05-dsb-database-data` and stable device link
+  `/dev/disk/by-id/google-benchmark-29d77a6f1c05-dsb-database-data`. It proved
+  an XFS filesystem mounted at `/var/lib/deathstarbench/database`; workload
+  storage then re-attested the same filesystem UUID and exactly six owned
+  MongoDB directories. The UUID itself is deliberately not retained after
+  successful cleanup.
+- The candidate proved exact four-node K3s membership, architectures, role
+  labels, control taint, CoreDNS placement, and Ready state. It applied all
+  five workload phases and attested all 27 Deployments and Pods, six bound
+  MongoDB PV/PVC pairs, exact images, placements, Services, and NetworkPolicies
+  at `workload_ready`. It intentionally emitted no benchmark result.
+- Automatic cleanup reached persisted `destroyed` state with no error, cleanup
+  error, GCP ownership key, runtime journal, topology journal, or inventory
+  journal remaining.
+
+The first complete measured GCP qualification also passed on 2026-09-21:
+
+- Job `71ab67519fa4` used the same region, zone, role shapes, architectures,
+  network boundaries, and 100-GiB database storage contract. Its exact database
+  disk was
+  `/dev/disk/by-id/google-benchmark-71ab67519fa4-dsb-database-data`, mounted as
+  XFS at `/var/lib/deathstarbench/database` and UUID-bound to the six MongoDB
+  directories.
+- Workload provenance bound upstream revision
+  `6ecb09706140f8730b5385c08f1386c654c3c526`, image-lock fingerprint
+  `sha256:e5435057d7813e563f6c4f40e7d877660326d83a87ce1df805f9440e161487d4`,
+  topology fingerprint
+  `sha256:1687ad84d1fe7e8748727604f5ce7607d820e2cd3d3b675b603f724b61a14a1e`,
+  manifest-source hash
+  `sha256:6d397ff6d633d627bb2ae115b6bb031e6db0715bdb13eb3885adce2f74151df6`,
+  and rendered-manifest hash
+  `sha256:a2dfff62061af974a14688ffa698faa77b6b03995914293c0382d95da8615ef8`.
+- Independent pre- and post-initialization database queries proved an initially
+  empty dataset followed by 962 users, 962 social-graph users, 37,624 followers,
+  37,624 followees, 9,424 posts, 908 user-timeline documents, and 9,424 timeline
+  post references. The durable initializer invocation was
+  `a68810fa1e87447cb90e5440576ebfd9`; its payload SHA-256 was
+  `9962898bebb7ebbfd82cfed8fb916461b79783d6f4ee8646368b0a0d516f153e`.
+- Warm-up completed 3,000 of 3,000 requests in 30.002386 seconds at
+  99.992047 requests/second, with p50/p95/p99 latency of 3.093/5.675/7.087 ms.
+  Measurement completed 5,994 of 5,994 requests in 60.003758 seconds at
+  99.893743 requests/second, with p50/p95/p99 latency of
+  3.085/5.391/7.023 ms. Both intervals had zero HTTP, socket, connect, read,
+  write, timeout, or incomplete-request errors.
+- The measured x86_64 load generator observed two logical CPUs, 1.0 percent CPU,
+  0.5 percent capacity use, and 9,088 KiB peak RSS. All 27 Pod identities were
+  unchanged across measurement and every restart count remained zero. The
+  workload execution attestation hash was
+  `sha256:a46a0ee1b939c36ae9543207dcc9ee9ee7d56910c58773bd4a2f31c7eefc7547`.
+- Measurement evidence, normalized metrics, and raw benchmark hashes were
+  `sha256:e99c181b295e8a485a36e566f78f6003aa90c4afd977af296c3a7f8d6548df4f`,
+  `sha256:def694cdc7773c4782b4aabfcd970fe3e03c7c4bb0039a3d093bae6cc8868687`,
+  and
+  `sha256:fb02ae611e6216238b778ecf7a6672e5bd8f21abbda3b06c796eab46107570f3`.
+  Both `results.json` and `report.html` were generated, and comparison accepted
+  fingerprint
+  `ef61988d881204d765e8ffe698f2f88d880b83f19534f4ede3b7b3ad17bb3898`.
+- Automatic cleanup reached `destroyed` with no error, cleanup error, or
+  recoverable ownership state. Independent `gcloud` inventory queries found no
+  matching instances, disks, firewall rules, router or Cloud NAT, subnets, or
+  VPC after cleanup.
 
 ## Azure live qualification evidence
 
@@ -524,11 +768,12 @@ independent SSH transport timeout during the measured wrk2 command, after
 initialization and warm-up. Both attempts failed closed, released their leases,
 completed cleanup, and had absent resource groups afterward.
 
-The release and UI gates remain closed. Positive Azure deployment,
-measurement, and safe pre-initialization recovery do not replace representative
-forbidden-path probes, live post-initialization cleanup-only and signal paths,
-publication or equivalent qualification of an immutable load-driver artifact,
-or the same qualification on AWS, GCP, and OCI.
+The release and UI gates remain closed. Positive Azure and GCP deployment and
+measurement, plus Azure safe pre-initialization recovery, do not replace
+representative forbidden-path probes, live post-initialization cleanup-only and
+signal paths, publication or equivalent qualification of an immutable
+load-driver artifact, GCP recovery qualification, or the same core
+qualification on AWS and OCI.
 
 ## Network and access policy
 
@@ -589,6 +834,15 @@ complete top-level inventory is re-read and verified immediately before
 deletion, and an unexpected sibling still fails closed without deleting the
 group.
 
+For GCP, cleanup uses no guest dependency and has no resource-group shortcut.
+It reconciles every deterministic resource in the persisted graph, recovers
+immutable IDs after response loss only when exact ownership and configuration
+match, and rejects an unexpected project, relationship, label, description,
+shape, address, tag, disk, or service account. It then deletes in dependency
+order and performs fresh absence lookups across the complete graph before
+forgetting any ownership metadata. Partial deletion leaves the remaining
+contract recoverable by `--cleanup-only`.
+
 ## Release sequence
 
 1. **Implemented:** versioned model, result fingerprint, immutable runtime
@@ -600,39 +854,45 @@ group.
    using its run-owned resource group as the cleanup boundary, then qualify the
    same lifecycle on every provider. Azure synthetic coverage, positive live
    deployment and measurement, and the safe pre-initialization hard-exit,
-   reacquisition, resume, and cleanup path are complete; the other providers
-   and additional live failure paths remain.
-4. **Implemented for the Azure candidate:** the internal K3s bootstrap, OS
-   preparation, exact database mount, secure node joining, and cluster
-   placement attestation are covered synthetically and passed live
-   qualification. Runtime v5 uses the smallest valid NodePort range,
-   normalizes only audited Kubernetes API round trips, and attests the
-   runtime's exact public image identities.
+   reacquisition, resume, and cleanup path are complete. The GCP explicit-graph
+   lifecycle and operator harness are implemented with synthetic coverage, and
+   positive live workload and measurement qualification passed. GCP live
+   recovery and failure paths, AWS and OCI implementations, and additional live
+   failure paths remain.
+4. **Implemented for the Azure and GCP candidates:** the provider-neutral K3s
+   bootstrap, OS preparation, provider-specific exact database mount, secure
+   node joining, and cluster-placement attestation are covered synthetically.
+   Both Azure and GCP paths passed positive live qualification. Runtime v5 uses
+   the smallest valid NodePort range, normalizes only
+   audited Kubernetes API round trips, and attests the runtime's exact public
+   image identities.
 5. **In progress:** the checked-in, pinned Social Network manifest and
    component-policy bundle, MongoDB storage preparation, role- and
    architecture-aware image selection, phased retry journal, and exact live
    attestation are implemented with synthetic coverage. The manual GHCR image
    workflow published the candidate, the exact digest lock is checked in, and
-   positive Azure qualification passed. Representative negative live network
-   probes and the other providers remain. The release and UI gates stay
-   closed.
-6. **Implemented for the Azure candidate, with the core path live-qualified:**
-   deterministic Reed98 initialization, durable at-most-once dispatch and
-   reconciliation, exact database cardinality checks, bounded warm-up and
-   measurement from the dedicated x86 load generator, result/report
+   positive Azure and GCP qualification passed with the same renderer and
+   attestor. Representative negative live network probes and AWS/OCI remain.
+   The release and UI gates stay closed.
+6. **Implemented for the Azure and GCP candidates, with both core paths
+   live-qualified:** deterministic Reed98 initialization, durable
+   at-most-once dispatch and reconciliation, exact database cardinality checks,
+   bounded warm-up and measurement from the dedicated x86 load generator,
+   result/report
    generation, comparison fingerprinting, and cleanup. Shared run ownership,
    all four checkpoint/replay decisions, hard and graceful injection, and
    signal unwinding have synthetic coverage. Live job `f6131578cb93` also
    passed the safe `load_generator_ready` hard-exit, cross-process resume,
    strict measurement, report, and cleanup path. The two post-run
-   ownership/identity hardenings, post-initialization cleanup-only behavior,
-   and signal paths still require live failure-path qualification.
+   ownership/identity hardenings, GCP recovery, post-initialization cleanup-only
+   behavior, and signal paths still require live failure-path qualification.
    Initialization is not resumable after partial dataset mutation: an
    interrupted initialization fails closed and requires fresh infrastructure
    rather than continuing from an unknown database state. Those remaining
    representative paths remain release gates.
-7. **Planned:** equivalent deployment and qualification on the other three
-   providers.
+7. **In progress:** run and retain GCP recovery and representative
+   negative-path evidence; then implement and qualify the equivalent provider
+   lifecycle on AWS and OCI.
 8. **Planned:** per-role CPU, memory, network, disk, restart, and readiness
    telemetry.
 9. **Planned:** offered-load sweeps, repeated trials, and
@@ -640,6 +900,7 @@ group.
 10. **Planned:** advanced per-role shape selection and later topology
    revisions.
 
-The UI exposes only released profiles. Until the remaining provider
-qualification and all network, interruption, and cleanup release gates pass,
-the existing compact mode remains the only runnable option.
+The UI exposes only released profiles. Until the remaining GCP failure-path
+qualification, AWS and OCI qualification, and all network, interruption, and
+cleanup release gates pass, the existing compact mode remains the only runnable
+option.

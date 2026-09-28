@@ -269,6 +269,91 @@ class RockyLinuxGuestContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'owner'):
             rocky_linux.data_volume_mount_command(owner='root')
 
+    def test_gcp_distributed_database_mount_is_exact_and_fail_closed(self):
+        command = (
+            rocky_linux.gcp_deathstarbench_database_volume_mount_command(
+                'benchmark-facefeed-dsb-database-data'
+            )
+        )
+
+        self.assertIn(
+            'DEVICE_NAME=benchmark-facefeed-dsb-database-data',
+            command,
+        )
+        self.assertIn(
+            'DEVICE_LINK=/dev/disk/by-id/'
+            'google-benchmark-facefeed-dsb-database-data',
+            command,
+        )
+        self.assertNotIn('/dev/disk/by-id/google-*', command)
+        self.assertIn('lsblk -srnpo NAME "$ROOT_DEVICE"', command)
+        self.assertIn('lsblk -nrpo NAME "$DEVICE"', command)
+        self.assertIn('sudo mkfs.xfs "$DEVICE"', command)
+        self.assertNotIn('mkfs.xfs -f', command)
+        self.assertIn(
+            'UUID=%s /var/lib/deathstarbench/database xfs '
+            'discard,nofail 0 2 # cloud-benchmark-dsb-database',
+            command,
+        )
+        self.assertIn(
+            'GCP_DSB_DATABASE_VOLUME device_name=%s device_link=%s uuid=%s',
+            command,
+        )
+        self.assert_valid_bash(command)
+
+    def test_gcp_distributed_database_attestation_never_mutates_storage(self):
+        filesystem_uuid = '12345678-1234-1234-1234-123456789abc'
+        command = (
+            rocky_linux.gcp_deathstarbench_database_volume_attestation_command(
+                'benchmark-facefeed-dsb-database-data',
+                filesystem_uuid,
+            )
+        )
+
+        self.assertIn(
+            'DEVICE_LINK=/dev/disk/by-id/'
+            'google-benchmark-facefeed-dsb-database-data',
+            command,
+        )
+        self.assertIn(f'EXPECTED_UUID={filesystem_uuid}', command)
+        self.assertIn('grep -Fxq "$EXPECTED_FSTAB" /etc/fstab', command)
+        self.assertNotIn('mkfs', command)
+        self.assertNotIn(' mount ', command)
+        self.assertNotIn('install -m 0644', command)
+        self.assertIn(
+            'GCP_DSB_DATABASE_VOLUME device_name=%s device_link=%s uuid=%s',
+            command,
+        )
+        self.assert_valid_bash(command)
+
+    def test_gcp_distributed_workload_storage_uses_gcp_attestation_marker(self):
+        command = (
+            rocky_linux.gcp_deathstarbench_database_workload_storage_command(
+                '12345678-1234-1234-1234-123456789abc'
+            )
+        )
+
+        self.assertIn('GCP_DSB_WORKLOAD_STORAGE', command)
+        self.assertNotIn('AZURE_DSB_WORKLOAD_STORAGE', command)
+        self.assertIn('container_file_t', command)
+        self.assert_valid_bash(command)
+
+    def test_gcp_distributed_database_commands_reject_untrusted_identity(self):
+        with self.assertRaisesRegex(ValueError, 'device name'):
+            rocky_linux.gcp_deathstarbench_database_volume_mount_command(
+                'database; id'
+            )
+        with self.assertRaisesRegex(ValueError, 'device name'):
+            rocky_linux.gcp_deathstarbench_database_volume_attestation_command(
+                '../database',
+                '12345678-1234-1234-1234-123456789abc',
+            )
+        with self.assertRaisesRegex(ValueError, 'filesystem UUID'):
+            rocky_linux.gcp_deathstarbench_database_volume_attestation_command(
+                'database-data',
+                'not-a-uuid',
+            )
+
     def test_peer_startup_supports_tcp_udp_and_sctp(self):
         script = rocky_linux.iperf3_peer_startup_script(
             ['tcp', 'udp', 'sctp']

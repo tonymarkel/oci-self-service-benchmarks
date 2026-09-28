@@ -3,6 +3,7 @@ from dataclasses import replace
 import hashlib
 import json
 import re
+import subprocess
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -19,6 +20,7 @@ from app.deathstarbench_distributed import (
     NETWORK_POLICY_PROBE_DEADLINE_SECONDS,
     NETWORK_POLICY_PROBE_POD,
     NETWORK_POLICY_PROBE_SERVICE,
+    NETWORK_POLICY_PROBE_SETTLE_SECONDS,
     NETWORK_POLICY_POSITIVE_CONTROL_POD,
     NETWORK_QUALIFICATION_SCHEMA_VERSION,
     NETWORK_TCP_PROBE_TIMEOUT_SECONDS,
@@ -26,7 +28,10 @@ from app.deathstarbench_distributed import (
     WORKLOAD_JOURNAL_KEY,
     AzureK3sCandidatePlan,
     DistributedRuntimeError,
+    _network_policy_positive_control_command,
+    _network_policy_probe_command,
     _network_policy_probe_cleanup_command,
+    _network_policy_probe_manifest,
     azure_k3s_candidate_plan,
     distributed_k3s_candidate_plan,
     gcp_k3s_candidate_plan,
@@ -359,6 +364,8 @@ class NetworkQualificationExecutor:
         fail_final_cleanup=False,
         initial_probe=None,
         initial_positive_probe=None,
+        negative_mode='drop',
+        fail_positive_attempt=None,
     ):
         self.calls = []
         self.fail_on = fail_on
@@ -368,16 +375,44 @@ class NetworkQualificationExecutor:
         self.delete_count = 0
         self.probe_state = initial_probe
         self.positive_probe_state = initial_positive_probe
+        self.negative_mode = negative_mode
+        self.fail_positive_attempt = fail_positive_attempt
+        self.positive_attempt_count = 0
+        self.negative_attempt_count = 0
 
     def __call__(self, job, command, **kwargs):
         self.calls.append((command, kwargs))
-        marker_match = self.MARKER_RE.search(command)
-        if marker_match is None:
+        markers = self.MARKER_RE.findall(command)
+        if not markers:
             raise AssertionError('network qualification sent an unknown command')
-        marker = marker_match.group(1)
+        marker = markers[0]
+        if (
+            'DISTRIBUTED_DSB_DEFAULT_DENY ' in marker
+            and 'CLEANUP' not in marker
+        ):
+            self.negative_attempt_count += 1
+            if self.negative_mode == 'reject':
+                marker = next(
+                    value for value in markers if 'block_mode=reject' in value
+                )
+            elif self.negative_mode == 'success':
+                self.probe_state = 'exact'
+                raise RuntimeError('The default-deny probe reached Redis.')
+            elif self.negative_mode == 'invalid_exit':
+                self.probe_state = 'exact'
+                raise RuntimeError(
+                    'The default-deny probe exit status is invalid.'
+                )
+            elif self.negative_mode == 'invalid_reason':
+                self.probe_state = 'exact'
+                raise RuntimeError(
+                    'The default-deny probe termination reason is invalid.'
+                )
+            elif self.negative_mode != 'drop':
+                raise AssertionError('unsupported negative probe mode')
         if 'DISTRIBUTED_DSB_DEFAULT_DENY_CLEANUP ' in marker:
             self.cleanup_count += 1
-            if self.fail_final_cleanup and self.cleanup_count == 3:
+            if self.fail_final_cleanup and self.cleanup_count == 4:
                 raise RuntimeError('injected final cleanup failure')
             positive = f'pod={NETWORK_POLICY_POSITIVE_CONTROL_POD} ' in marker
             state_name = 'positive_probe_state' if positive else 'probe_state'
@@ -390,7 +425,10 @@ class NetworkQualificationExecutor:
                 self.delete_count += 1
                 setattr(self, state_name, None)
         elif 'DISTRIBUTED_DSB_POSITIVE_CONTROL ' in marker:
+            self.positive_attempt_count += 1
             self.positive_probe_state = 'exact'
+            if self.fail_positive_attempt == self.positive_attempt_count:
+                raise RuntimeError('injected positive control failure')
         elif 'DISTRIBUTED_DSB_DEFAULT_DENY ' in marker:
             self.probe_state = 'exact'
         if self.fail_on is not None and self.fail_on in marker:
@@ -1427,7 +1465,7 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
                 'namespace',
                 'required_path',
                 'forbidden_paths',
-                'policy_positive_control',
+                'policy_positive_controls',
                 'default_deny_path',
             },
         )
@@ -1435,6 +1473,7 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
             attestation['schema_version'],
             NETWORK_QUALIFICATION_SCHEMA_VERSION,
         )
+        self.assertEqual(NETWORK_QUALIFICATION_SCHEMA_VERSION, 2)
         self.assertEqual(attestation['provider'], 'azure')
         self.assertEqual(attestation['required_path'], {
             'source_role': 'load-generator',
@@ -1464,7 +1503,7 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
             )
         image_reference = lock['platforms']['linux/amd64']['images']['redis']
         image_digest = image_reference.rsplit('@', 1)[1]
-        self.assertEqual(attestation['policy_positive_control'], {
+        positive_control = {
             'source_kind': 'Pod',
             'source_name': NETWORK_POLICY_POSITIVE_CONTROL_POD,
             'source_node': 'dsb-cache',
@@ -1479,7 +1518,11 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
             'response': 'PONG',
             'deadline_seconds': NETWORK_POLICY_PROBE_DEADLINE_SECONDS,
             'cleanup_confirmed': True,
-        })
+        }
+        self.assertEqual(attestation['policy_positive_controls'], [
+            {'position': 'before_negative', **positive_control},
+            {'position': 'after_negative', **positive_control},
+        ])
         self.assertEqual(attestation['default_deny_path'], {
             'source_kind': 'Pod',
             'source_name': NETWORK_POLICY_PROBE_POD,
@@ -1491,6 +1534,8 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
             'protocol': 'TCP',
             'port': 6379,
             'outcome': 'blocked',
+            'block_mode': 'drop',
+            'settle_seconds': NETWORK_POLICY_PROBE_SETTLE_SECONDS,
             'deadline_seconds': NETWORK_POLICY_PROBE_DEADLINE_SECONDS,
             'cleanup_confirmed': True,
         })
@@ -1499,16 +1544,15 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
         for address in PRIVATE_ADDRESSES.values():
             self.assertNotIn(address, serialized)
 
-        self.assertEqual(len(execute.calls), 10)
+        self.assertEqual(len(execute.calls), 12)
         cleanup_calls = [
             (command, kwargs)
             for command, kwargs in execute.calls
             if 'DISTRIBUTED_DSB_DEFAULT_DENY_CLEANUP' in command
         ]
-        self.assertEqual(len(cleanup_calls), 4)
+        self.assertEqual(len(cleanup_calls), 5)
         self.assertEqual(execute.calls[:2], cleanup_calls[:2])
         self.assertEqual(execute.calls[-2:], cleanup_calls[-2:])
-        self.assertEqual(execute.calls[-1], cleanup_calls[-1])
         for command, kwargs in cleanup_calls:
             self.assertIn('--ignore-not-found=true', command)
             self.assertIn('--ignore-not-found=true -o name', command)
@@ -1585,7 +1629,8 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
             for command, kwargs in execute.calls
             if 'DISTRIBUTED_DSB_POSITIVE_CONTROL ' in command
         ]
-        self.assertEqual(len(positive_calls), 1)
+        self.assertEqual(len(positive_calls), 2)
+        self.assertEqual(positive_calls[0], positive_calls[1])
         positive_command, positive_kwargs = positive_calls[0]
         self.assertEqual(positive_kwargs['host_key'], 'azure_dsb_control_public_ip')
         self.assertEqual(positive_kwargs['timeout'], 90)
@@ -1593,6 +1638,11 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
         self.assertIn('test "$PHASE" = Succeeded', positive_command)
         self.assertIn('test "$POD_LOG" = PONG', positive_command)
         self.assertIn('test "$EXIT_CODE" = 0', positive_command)
+        self.assertIn('test "$ACTUAL_IMAGE" = "$EXPECTED_IMAGE"', positive_command)
+        self.assertIn('test -n "$STARTED_AT"', positive_command)
+        self.assertIn('test -n "$FINISHED_AT"', positive_command)
+        self.assertIn('test "$RESTARTS" = 0', positive_command)
+        self.assertIn('exceeded its observation bound', positive_command)
         positive_manifest = json.loads(positive_kwargs['stdin_text'])
         self.assertEqual(
             positive_manifest['metadata']['name'],
@@ -1644,12 +1694,20 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
         )
         self.assertEqual(pod_kwargs['timeout'], 90)
         self.assertNotIn('secret_stdin', pod_kwargs)
-        self.assertNotIn('registry.example', pod_command)
-        self.assertIn(image_digest, pod_command)
-        self.assertIn('for ATTEMPT in $(seq 1 20)', pod_command)
+        self.assertIn(image_reference, pod_command)
+        self.assertIn('for ATTEMPT in $(seq 1 40)', pod_command)
         self.assertIn('--request-timeout=2s', pod_command)
-        self.assertIn('test "$POD_REASON" = DeadlineExceeded', pod_command)
+        self.assertIn('DeadlineExceeded:*) BLOCK_MODE=drop', pod_command)
+        self.assertIn(':Error) test "$EXIT_CODE" = 1', pod_command)
+        self.assertIn('test "$ACTUAL_IMAGE" = "$EXPECTED_IMAGE"', pod_command)
         self.assertIn('test -n "$STARTED_AT"', pod_command)
+        self.assertIn('test -n "$FINISHED_AT"', pod_command)
+        self.assertIn('test "$RESTARTS" = 0', pod_command)
+        self.assertIn('exit status is invalid', pod_command)
+        self.assertIn('termination reason is invalid', pod_command)
+        self.assertIn('exceeded its observation bound', pod_command)
+        self.assertIn('block_mode=drop', pod_command)
+        self.assertIn('block_mode=reject', pod_command)
         manifest = json.loads(pod_kwargs['stdin_text'])
         self.assertEqual(manifest['kind'], 'Pod')
         self.assertEqual(manifest['metadata']['name'], NETWORK_POLICY_PROBE_POD)
@@ -1670,16 +1728,30 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
         self.assertEqual(container['image'], image_reference)
         self.assertRegex(container['image'], r'@sha256:[0-9a-f]{64}$')
         self.assertEqual(container['command'], [
-            'redis-cli',
-            '-h',
-            NETWORK_POLICY_PROBE_SERVICE,
-            '-p',
-            '6379',
-            'PING',
+            '/bin/sh',
+            '-c',
+            f'sleep {NETWORK_POLICY_PROBE_SETTLE_SECONDS}; exec redis-cli '
+            f'-h {NETWORK_POLICY_PROBE_SERVICE} -p 6379 PING',
         ])
+        positive_indexes = [
+            index for index, (command, _) in enumerate(execute.calls)
+            if 'DISTRIBUTED_DSB_POSITIVE_CONTROL ' in command
+        ]
+        negative_index = next(
+            index for index, (command, _) in enumerate(execute.calls)
+            if 'DISTRIBUTED_DSB_DEFAULT_DENY ' in command
+            and 'CLEANUP' not in command
+        )
+        between_cleanup_index = next(
+            index for index in range(positive_indexes[0] + 1, negative_index)
+            if 'DISTRIBUTED_DSB_DEFAULT_DENY_CLEANUP' in execute.calls[index][0]
+        )
+        self.assertLess(positive_indexes[0], between_cleanup_index)
+        self.assertLess(between_cleanup_index, negative_index)
+        self.assertLess(negative_index, positive_indexes[1])
         self.assertIsNone(execute.probe_state)
         self.assertIsNone(execute.positive_probe_state)
-        self.assertEqual(execute.delete_count, 2)
+        self.assertEqual(execute.delete_count, 3)
 
     def test_exact_interrupted_probe_is_adopted_for_cleanup(self):
         job, lock = self.ready_workload_job()
@@ -1692,21 +1764,22 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
         )
 
         self.assertTrue(attestation['default_deny_path']['cleanup_confirmed'])
-        self.assertTrue(
-            attestation['policy_positive_control']['cleanup_confirmed']
-        )
-        self.assertEqual(execute.cleanup_count, 4)
-        self.assertEqual(execute.delete_count, 3)
+        self.assertTrue(all(
+            control['cleanup_confirmed']
+            for control in attestation['policy_positive_controls']
+        ))
+        self.assertEqual(execute.cleanup_count, 5)
+        self.assertEqual(execute.delete_count, 4)
         self.assertIsNone(execute.probe_state)
         self.assertIsNone(execute.positive_probe_state)
 
-    def test_unavailable_positive_control_cannot_attest_default_deny(self):
+    def test_first_positive_control_failure_prevents_negative_probe(self):
         job, lock = self.ready_workload_job()
         execute = NetworkQualificationExecutor(
-            fail_on='DISTRIBUTED_DSB_POSITIVE_CONTROL pod=',
+            fail_positive_attempt=1,
         )
 
-        with self.assertRaisesRegex(RuntimeError, 'network probe failure'):
+        with self.assertRaisesRegex(RuntimeError, 'positive control failure'):
             qualify_distributed_network_paths(
                 job,
                 lock,
@@ -1717,9 +1790,80 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
             'DISTRIBUTED_DSB_DEFAULT_DENY pod=' in command
             for command, _ in execute.calls
         ))
+        self.assertEqual(execute.positive_attempt_count, 1)
         self.assertEqual(execute.cleanup_count, 4)
         self.assertIsNone(execute.probe_state)
         self.assertIsNone(execute.positive_probe_state)
+
+    def test_second_positive_control_failure_rejects_negative_attestation(self):
+        job, lock = self.ready_workload_job()
+        execute = NetworkQualificationExecutor(fail_positive_attempt=2)
+
+        with self.assertRaisesRegex(RuntimeError, 'positive control failure'):
+            qualify_distributed_network_paths(
+                job,
+                lock,
+                execute=execute,
+            )
+
+        self.assertEqual(execute.negative_attempt_count, 1)
+        self.assertEqual(execute.positive_attempt_count, 2)
+        self.assertEqual(execute.cleanup_count, 5)
+        self.assertIsNone(execute.probe_state)
+        self.assertIsNone(execute.positive_probe_state)
+
+    def test_reject_is_an_accepted_default_deny_result(self):
+        job, lock = self.ready_workload_job()
+        execute = NetworkQualificationExecutor(negative_mode='reject')
+
+        attestation = qualify_distributed_network_paths(
+            job,
+            lock,
+            execute=execute,
+        )
+
+        self.assertEqual(attestation['default_deny_path']['block_mode'], 'reject')
+        self.assertEqual(
+            [control['position'] for control in attestation['policy_positive_controls']],
+            ['before_negative', 'after_negative'],
+        )
+
+    def test_negative_probe_success_is_bracketed_then_rejected(self):
+        job, lock = self.ready_workload_job()
+        execute = NetworkQualificationExecutor(negative_mode='success')
+
+        with self.assertRaisesRegex(RuntimeError, 'reached Redis'):
+            qualify_distributed_network_paths(
+                job,
+                lock,
+                execute=execute,
+            )
+
+        self.assertEqual(execute.negative_attempt_count, 1)
+        self.assertEqual(execute.positive_attempt_count, 2)
+        self.assertEqual(execute.cleanup_count, 5)
+        self.assertIsNone(execute.probe_state)
+        self.assertIsNone(execute.positive_probe_state)
+
+    def test_invalid_negative_exit_or_reason_is_bracketed_then_rejected(self):
+        job, lock = self.ready_workload_job()
+        for mode, message in (
+            ('invalid_exit', 'exit status is invalid'),
+            ('invalid_reason', 'termination reason is invalid'),
+        ):
+            with self.subTest(mode=mode):
+                execute = NetworkQualificationExecutor(negative_mode=mode)
+                with self.assertRaisesRegex(RuntimeError, message):
+                    qualify_distributed_network_paths(
+                        copy.deepcopy(job),
+                        lock,
+                        execute=execute,
+                    )
+                self.assertEqual(execute.negative_attempt_count, 1)
+                self.assertEqual(execute.positive_attempt_count, 2)
+                self.assertEqual(execute.cleanup_count, 5)
+                self.assertIsNone(execute.probe_state)
+                self.assertIsNone(execute.positive_probe_state)
 
     def test_cleanup_delete_is_bound_to_the_validated_pod_uid(self):
         command, marker = _network_policy_probe_cleanup_command(
@@ -1750,6 +1894,65 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
             command.index('ACTUAL_IDENTITY=${OBSERVED_IDENTITY#*|}'),
             command.index('DELETE_STATUS=$(sudo curl'),
         )
+
+    def test_generated_network_probe_commands_are_valid_bash(self):
+        image_reference = (
+            'registry.example/deathstarbench/redis@sha256:' + 'b' * 64
+        )
+        image_digest = image_reference.rsplit('@', 1)[1]
+        fingerprint = 'sha256:' + 'a' * 64
+        positive_manifest = _network_policy_probe_manifest(
+            cache_node_name='dsb-cache',
+            image_reference=image_reference,
+            image_lock_fingerprint=fingerprint,
+            allowed=True,
+        )
+        negative_manifest = _network_policy_probe_manifest(
+            cache_node_name='dsb-cache',
+            image_reference=image_reference,
+            image_lock_fingerprint=fingerprint,
+        )
+        positive_command, _ = _network_policy_positive_control_command(
+            manifest_sha256=hashlib.sha256(
+                positive_manifest.encode('utf-8')
+            ).hexdigest(),
+            cache_node_name='dsb-cache',
+            image_reference=image_reference,
+            image_digest=image_digest,
+        )
+        negative_command, _ = _network_policy_probe_command(
+            manifest_sha256=hashlib.sha256(
+                negative_manifest.encode('utf-8')
+            ).hexdigest(),
+            cache_node_name='dsb-cache',
+            image_reference=image_reference,
+            image_digest=image_digest,
+        )
+        negative_cleanup, _ = _network_policy_probe_cleanup_command(
+            cache_node_name='dsb-cache',
+            image_reference=image_reference,
+            image_lock_fingerprint=fingerprint,
+        )
+        positive_cleanup, _ = _network_policy_probe_cleanup_command(
+            cache_node_name='dsb-cache',
+            image_reference=image_reference,
+            image_lock_fingerprint=fingerprint,
+            allowed=True,
+        )
+
+        for command in (
+            positive_command,
+            negative_command,
+            negative_cleanup,
+            positive_cleanup,
+        ):
+            with self.subTest(command=command[:80]):
+                subprocess.run(
+                    ['bash', '-n', '-c', command],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
 
     def test_foreign_probe_name_collision_refuses_without_delete(self):
         job, lock = self.ready_workload_job()
@@ -1801,7 +2004,7 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
             for command, kwargs in execute.calls
             if 'DISTRIBUTED_DSB_DEFAULT_DENY' in command
         ]
-        self.assertEqual(len(control_calls), 5)
+        self.assertEqual(len(control_calls), 6)
         self.assertTrue(all(
             kwargs['host_key'] == 'gcp_dsb_control_public_ip'
             for kwargs in control_calls
@@ -1815,7 +2018,7 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
             'timeout': 90,
             'stdin_text': mock.ANY,
             'host_key': 'gcp_dsb_control_public_ip',
-        }])
+        }] * 2)
 
     def test_requires_exact_workload_ready_before_any_remote_probe(self):
         job = candidate_job()
@@ -1893,12 +2096,13 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
 
         self.assertEqual(sum(
             'stdin_text' in kwargs for _, kwargs in execute.calls
-        ), 2)
+        ), 3)
         self.assertIn(
             'DISTRIBUTED_DSB_DEFAULT_DENY_CLEANUP',
             execute.calls[-1][0],
         )
-        self.assertEqual(execute.cleanup_count, 4)
+        self.assertEqual(execute.positive_attempt_count, 2)
+        self.assertEqual(execute.cleanup_count, 5)
 
     def test_duplicate_probe_marker_is_rejected_then_cleanup_runs(self):
         job, lock = self.ready_workload_job()
@@ -1933,7 +2137,7 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
                 execute=execute,
             )
 
-        self.assertEqual(execute.cleanup_count, 4)
+        self.assertEqual(execute.cleanup_count, 5)
         self.assertIn(
             'DISTRIBUTED_DSB_DEFAULT_DENY_CLEANUP',
             execute.calls[-1][0],

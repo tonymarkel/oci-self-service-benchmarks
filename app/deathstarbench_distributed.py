@@ -165,7 +165,7 @@ _GCP_DATABASE_DEVICE_LINK_PREFIX = '/dev/disk/by-id/google-'
 _GCP_RESOURCE_NAME_RE = re.compile(r'^[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?$')
 _DATABASE_WORKLOAD_ROOT = '/var/lib/deathstarbench/database/mongodb'
 _WORKLOAD_READY_STATE = 'workload_ready'
-NETWORK_QUALIFICATION_SCHEMA_VERSION = 2
+NETWORK_QUALIFICATION_SCHEMA_VERSION = 3
 DISTRIBUTED_NETWORK_QUALIFICATION_KEY = (
     'deathstarbench_distributed_network_qualification'
 )
@@ -175,6 +175,8 @@ NETWORK_POLICY_PROBE_SERVICE = 'home-timeline-redis'
 NETWORK_TCP_PROBE_TIMEOUT_SECONDS = 5
 NETWORK_POLICY_PROBE_SETTLE_SECONDS = 10
 NETWORK_POLICY_PROBE_DEADLINE_SECONDS = 30
+NETWORK_POLICY_POSITIVE_ATTEMPT_LIMIT = 10
+NETWORK_POLICY_POSITIVE_RETRY_INTERVAL_SECONDS = 1
 
 _NETWORK_POLICY_PROBE_CONTAINER = 'redis-default-deny-probe'
 _NETWORK_POLICY_POSITIVE_SOURCE_COMPONENT = 'home-timeline-service'
@@ -2514,20 +2516,40 @@ def _network_policy_probe_manifest(
         labels['app.kubernetes.io/component'] = (
             _NETWORK_POLICY_POSITIVE_SOURCE_COMPONENT
         )
-    redis_command = [
-        'redis-cli',
-        '-h',
-        NETWORK_POLICY_PROBE_SERVICE,
-        '-p',
-        '6379',
-        'PING',
-    ]
-    container_command = redis_command
-    if not allowed:
+    if allowed:
+        # Pod creation and policy programming are asynchronous.  Prove the
+        # exact path with a bounded retry window so a newly-created control
+        # cannot fail solely because the CNI has not observed its labels yet.
+        # Every attempt still requires an exact PONG, and the Pod-level active
+        # deadline remains an independent hard stop.
+        container_command = [
+            '/bin/sh',
+            '-c',
+            (
+                'set -eu; ATTEMPT=1; LAST_STATUS=1; LAST_RESPONSE=; '
+                f'while test "$ATTEMPT" -le '
+                f'{NETWORK_POLICY_POSITIVE_ATTEMPT_LIMIT}; do '
+                'set +e; LAST_RESPONSE=$(redis-cli '
+                f'-h {NETWORK_POLICY_PROBE_SERVICE} -p 6379 PING 2>&1); '
+                'LAST_STATUS=$?; set -e; '
+                'if test "$LAST_STATUS" -eq 0 '
+                '&& test "$LAST_RESPONSE" = PONG; then '
+                'printf "PONG\\n"; exit 0; fi; '
+                f'if test "$ATTEMPT" -lt '
+                f'{NETWORK_POLICY_POSITIVE_ATTEMPT_LIMIT}; then '
+                f'sleep {NETWORK_POLICY_POSITIVE_RETRY_INTERVAL_SECONDS}; '
+                'fi; ATTEMPT=$((ATTEMPT + 1)); done; '
+                'printf "DISTRIBUTED_DSB_POSITIVE_CONTROL_FAILED '
+                'attempts=%s exit_status=%s response=%s\\n" '
+                '"$((ATTEMPT - 1))" "$LAST_STATUS" "$LAST_RESPONSE" >&2; '
+                'exit 1'
+            ),
+        ]
+    else:
         # Give the K3s network-policy controller a deterministic window to
         # observe and program this newly-created Pod before it opens a socket.
-        # The positive controls do not sleep, so this cannot disguise broken
-        # DNS, Service routing, Redis, or general pod egress.
+        # The bracketing positive controls use only a short bounded retry
+        # window and exact PONG, so this cannot turn a broken path into a pass.
         container_command = [
             '/bin/sh',
             '-c',
@@ -2602,6 +2624,9 @@ def _network_policy_positive_control_marker(
         f'node={cache_node_name} image_digest={image_digest} '
         f'destination={NETWORK_POLICY_PROBE_SERVICE} protocol=TCP port=6379 '
         'outcome=connected response=PONG '
+        f'attempt_limit={NETWORK_POLICY_POSITIVE_ATTEMPT_LIMIT} '
+        'retry_interval_seconds='
+        f'{NETWORK_POLICY_POSITIVE_RETRY_INTERVAL_SECONDS} '
         f'deadline_seconds={NETWORK_POLICY_PROBE_DEADLINE_SECONDS}'
     )
 
@@ -2673,8 +2698,12 @@ def _network_policy_positive_control_command(
         f'{pod} -o {jsonpath_phase}); '
         'case "$PHASE" in '
         'Succeeded) break;; '
-        'Failed) echo "The network positive control could not reach Redis." '
-        '>&2; exit 1;; Pending|Running|"") ;; '
+        'Failed) POD_FAILURE_LOG=$('
+        f'{kubectl} --request-timeout=2s -n {namespace} logs '
+        f'{pod} -c {shlex.quote(_NETWORK_POLICY_PROBE_CONTAINER)} '
+        '2>&1 | tail -c 2048 || true); '
+        'echo "The network positive control could not reach Redis: '
+        '$POD_FAILURE_LOG" >&2; exit 1;; Pending|Running|"") ;; '
         '*) echo "The network positive control entered an invalid phase." >&2; '
         'exit 1;; esac; '
         'sleep 1; done; '
@@ -3142,6 +3171,10 @@ def qualify_distributed_network_paths(
             'port': 6379,
             'outcome': 'connected',
             'response': 'PONG',
+            'attempt_limit': NETWORK_POLICY_POSITIVE_ATTEMPT_LIMIT,
+            'retry_interval_seconds': (
+                NETWORK_POLICY_POSITIVE_RETRY_INTERVAL_SECONDS
+            ),
             'deadline_seconds': NETWORK_POLICY_PROBE_DEADLINE_SECONDS,
             'cleanup_confirmed': False,
         }

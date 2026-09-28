@@ -1,6 +1,7 @@
 import base64
 import copy
 import hashlib
+import subprocess
 import unittest
 from unittest import mock
 
@@ -26,6 +27,7 @@ from app.deathstarbench_distributed_measurement import (
     DATASET_TIMELINE_USER_COUNT,
     DATASET_USER_COUNT,
     EXECUTION_JOURNAL_KEY,
+    MAX_INITIALIZER_FAILURE_EXCERPT_CHARS,
     MAX_RESULT_OUTPUT_CHARS,
     DistributedMeasurementError,
     dataset_database_attestation_command,
@@ -172,7 +174,8 @@ def initializer_status_output(job, *, state='succeeded', output=None):
         invocation = 'c' * 32
         start_mono_usec = 100
         exit_mono_usec = 200
-        output = output or 'initializer failed\n'
+        if output is None:
+            output = 'initializer failed\n'
     else:
         fields = (
             'load=loaded active=active sub=exited result=success '
@@ -184,12 +187,13 @@ def initializer_status_output(job, *, state='succeeded', output=None):
         invocation = 'c' * 32
         start_mono_usec = 100
         exit_mono_usec = 200
-        output = output or (
-            'DISTRIBUTED_DSB_DATASET_READY '
-            f'graph=socfb-Reed98 users={DATASET_USER_COUNT} '
-            f'follows={DATASET_FOLLOW_COUNT} posts={DATASET_POST_COUNT} '
-            f'revision={UPSTREAM_REVISION}\n'
-        )
+        if output is None:
+            output = (
+                'DISTRIBUTED_DSB_DATASET_READY '
+                f'graph=socfb-Reed98 users={DATASET_USER_COUNT} '
+                f'follows={DATASET_FOLLOW_COUNT} posts={DATASET_POST_COUNT} '
+                f'revision={UPSTREAM_REVISION}\n'
+            )
     output_sha256 = (
         hashlib.sha256(output.encode()).hexdigest() if output else 'none'
     )
@@ -346,8 +350,32 @@ class DistributedDatasetContractTests(unittest.TestCase):
         command = social_network_initialization_command(
             APPLICATION_PRIVATE_IP
         )
+        subprocess.run(
+            ['bash', '-n'],
+            input=command,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
         self.assertIn('timeout --signal=TERM --kill-after=30s', command)
         self.assertIn('2100s bash -lc', command)
+        self.assertIn(
+            'DISTRIBUTED_DSB_INITIALIZER_FAILED phase=%s status=%s',
+            command,
+        )
+        for phase in (
+            'verify_upstream_revision',
+            'verify_initializer_source',
+            'verify_nodes_dataset',
+            'verify_edges_dataset',
+            'initialize_dataset',
+            'verify_patched_initializer',
+            'parse_initializer_counts',
+            'verify_user_count',
+            'verify_follow_count',
+            'verify_post_count',
+        ):
+            self.assertIn(f'DSB_INITIALIZER_PHASE={phase}', command)
         self.assertIn('/^Registering Users', command)
         self.assertIn('/^Adding follows', command)
         self.assertIn('/^Composing posts', command)
@@ -1346,6 +1374,53 @@ class DistributedMeasurementOrchestrationTests(unittest.TestCase):
         self.assertEqual(len(status_commands), 1)
         self.assertNotIn('systemd-run', status_commands[0])
         self.assertIn('systemctl show', status_commands[0])
+
+    def test_failed_initializer_reports_only_bounded_attested_transcript_tail(self):
+        prefix = 'x' * (MAX_INITIALIZER_FAILURE_EXCERPT_CHARS + 100)
+        failure = (
+            'DISTRIBUTED_DSB_INITIALIZER_FAILED '
+            'phase=initialize_dataset status=1\n'
+        )
+        transcript = prefix + failure
+        executor = MeasurementExecutor(
+            initializer_statuses=[initializer_status_output(
+                self.job,
+                state='failed',
+                output=transcript,
+            )],
+        )
+
+        with self.assertRaises(DistributedMeasurementError) as raised:
+            self.run_measurement(executor)
+
+        message = str(raised.exception)
+        self.assertIn(f'transcript_bytes={len(transcript.encode())}', message)
+        self.assertIn(
+            hashlib.sha256(transcript.encode()).hexdigest(),
+            message,
+        )
+        self.assertIn('earlier characters omitted', message)
+        self.assertIn('phase=initialize_dataset status=1', message)
+        self.assertNotIn('x' * (MAX_INITIALIZER_FAILURE_EXCERPT_CHARS + 1), message)
+        self.assertEqual(executor.stages.count('initialization'), 1)
+        self.assertEqual(executor.stages.count('initialization_status'), 1)
+
+    def test_failed_initializer_reports_empty_attested_transcript(self):
+        executor = MeasurementExecutor(
+            initializer_statuses=[initializer_status_output(
+                self.job,
+                state='failed',
+                output='',
+            )],
+        )
+
+        with self.assertRaisesRegex(
+            DistributedMeasurementError,
+            r'invocation_id=[0-9a-f]{32}, transcript_bytes=0, '
+            r'transcript_sha256=none, '
+            r'transcript_tail=<empty>',
+        ):
+            self.run_measurement(executor)
 
     def test_qualification_response_loss_flag_is_strictly_boolean(self):
         executor = MeasurementExecutor()

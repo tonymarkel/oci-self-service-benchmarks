@@ -17,6 +17,8 @@ from app.deathstarbench_contract import (
 )
 from app.deathstarbench_distributed import (
     DISTRIBUTED_NETWORK_QUALIFICATION_KEY,
+    NETWORK_POLICY_POSITIVE_ATTEMPT_LIMIT,
+    NETWORK_POLICY_POSITIVE_RETRY_INTERVAL_SECONDS,
     NETWORK_POLICY_PROBE_DEADLINE_SECONDS,
     NETWORK_POLICY_PROBE_POD,
     NETWORK_POLICY_PROBE_SERVICE,
@@ -1473,7 +1475,7 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
             attestation['schema_version'],
             NETWORK_QUALIFICATION_SCHEMA_VERSION,
         )
-        self.assertEqual(NETWORK_QUALIFICATION_SCHEMA_VERSION, 2)
+        self.assertEqual(NETWORK_QUALIFICATION_SCHEMA_VERSION, 3)
         self.assertEqual(attestation['provider'], 'azure')
         self.assertEqual(attestation['required_path'], {
             'source_role': 'load-generator',
@@ -1516,6 +1518,10 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
             'port': 6379,
             'outcome': 'connected',
             'response': 'PONG',
+            'attempt_limit': NETWORK_POLICY_POSITIVE_ATTEMPT_LIMIT,
+            'retry_interval_seconds': (
+                NETWORK_POLICY_POSITIVE_RETRY_INTERVAL_SECONDS
+            ),
             'deadline_seconds': NETWORK_POLICY_PROBE_DEADLINE_SECONDS,
             'cleanup_confirmed': True,
         }
@@ -1643,6 +1649,7 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
         self.assertIn('test -n "$FINISHED_AT"', positive_command)
         self.assertIn('test "$RESTARTS" = 0', positive_command)
         self.assertIn('exceeded its observation bound', positive_command)
+        self.assertIn('tail -c 2048', positive_command)
         positive_manifest = json.loads(positive_kwargs['stdin_text'])
         self.assertEqual(
             positive_manifest['metadata']['name'],
@@ -1668,16 +1675,37 @@ class DistributedNetworkQualificationTests(unittest.TestCase):
             positive_manifest['spec']['containers'][0]['image'],
             image_reference,
         )
-        self.assertEqual(
-            positive_manifest['spec']['containers'][0]['command'],
-            [
-                'redis-cli',
-                '-h',
-                NETWORK_POLICY_PROBE_SERVICE,
-                '-p',
-                '6379',
-                'PING',
-            ],
+        positive_probe_command = (
+            positive_manifest['spec']['containers'][0]['command']
+        )
+        self.assertEqual(positive_probe_command[:2], ['/bin/sh', '-c'])
+        self.assertEqual(len(positive_probe_command), 3)
+        positive_probe_script = positive_probe_command[2]
+        subprocess.run(
+            ['sh', '-n'],
+            input=positive_probe_script,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertIn(
+            f'while test "$ATTEMPT" -le '
+            f'{NETWORK_POLICY_POSITIVE_ATTEMPT_LIMIT}',
+            positive_probe_script,
+        )
+        self.assertIn(
+            f'sleep {NETWORK_POLICY_POSITIVE_RETRY_INTERVAL_SECONDS}',
+            positive_probe_script,
+        )
+        self.assertIn(
+            f'-h {NETWORK_POLICY_PROBE_SERVICE} -p 6379 PING',
+            positive_probe_script,
+        )
+        self.assertIn('test "$LAST_RESPONSE" = PONG', positive_probe_script)
+        self.assertIn('printf "PONG\\n"; exit 0', positive_probe_script)
+        self.assertIn(
+            'DISTRIBUTED_DSB_POSITIVE_CONTROL_FAILED',
+            positive_probe_script,
         )
 
         pod_calls = [

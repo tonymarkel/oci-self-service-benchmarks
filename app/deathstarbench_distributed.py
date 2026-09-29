@@ -11,7 +11,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
+import hashlib
+import ipaddress
+import json
 import re
+import shlex
 from typing import Any
 
 from .deathstarbench_contract import (
@@ -29,6 +33,7 @@ from .deathstarbench_k3s_workload import (
     WorkloadBundleError,
     parse_workload_attestation,
     render_social_network_bundle,
+    validate_image_lock,
     workload_apply_command,
     workload_readiness_command,
 )
@@ -43,6 +48,7 @@ from .guests.rocky_linux import (
 )
 from .k3s_runtime import (
     ExpectedK3sNode,
+    K3S_BINARY,
     agent_join_command,
     agent_readiness_command,
     agent_token_install_command,
@@ -159,6 +165,32 @@ _GCP_DATABASE_DEVICE_LINK_PREFIX = '/dev/disk/by-id/google-'
 _GCP_RESOURCE_NAME_RE = re.compile(r'^[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?$')
 _DATABASE_WORKLOAD_ROOT = '/var/lib/deathstarbench/database/mongodb'
 _WORKLOAD_READY_STATE = 'workload_ready'
+NETWORK_QUALIFICATION_SCHEMA_VERSION = 3
+DISTRIBUTED_NETWORK_QUALIFICATION_KEY = (
+    'deathstarbench_distributed_network_qualification'
+)
+NETWORK_POLICY_PROBE_POD = 'dsb-default-deny-probe'
+NETWORK_POLICY_POSITIVE_CONTROL_POD = 'dsb-network-positive-control'
+NETWORK_POLICY_PROBE_SERVICE = 'home-timeline-redis'
+NETWORK_TCP_PROBE_TIMEOUT_SECONDS = 5
+NETWORK_POLICY_PROBE_SETTLE_SECONDS = 10
+NETWORK_POLICY_PROBE_DEADLINE_SECONDS = 30
+NETWORK_POLICY_POSITIVE_ATTEMPT_LIMIT = 10
+NETWORK_POLICY_POSITIVE_RETRY_INTERVAL_SECONDS = 1
+
+_NETWORK_POLICY_PROBE_CONTAINER = 'redis-default-deny-probe'
+_NETWORK_POLICY_POSITIVE_SOURCE_COMPONENT = 'home-timeline-service'
+_NETWORK_POLICY_POSITIVE_READY_GATE = (
+    'deathstarbench.io/positive-control-ready'
+)
+_NETWORK_POLICY_PROBE_LABEL = 'deathstarbench.io/qualification-probe'
+_NETWORK_POLICY_LOCK_ANNOTATION = 'deathstarbench.io/image-lock-fingerprint'
+_NETWORK_POLICY_IMAGE_SET_ANNOTATION = 'deathstarbench.io/image-set-revision'
+_NETWORK_POLICY_WORKLOAD_ANNOTATION = 'deathstarbench.io/workload-revision'
+_NETWORK_QUALIFICATION_MARKER = 'DISTRIBUTED_DSB_NETWORK_PATH'
+_NETWORK_POLICY_POSITIVE_MARKER = 'DISTRIBUTED_DSB_POSITIVE_CONTROL'
+_NETWORK_POLICY_MARKER = 'DISTRIBUTED_DSB_DEFAULT_DENY'
+_NETWORK_POLICY_CLEANUP_MARKER = 'DISTRIBUTED_DSB_DEFAULT_DENY_CLEANUP'
 
 
 class DistributedRuntimeError(ValueError):
@@ -2306,3 +2338,1056 @@ def prepare_gcp_distributed_social_network_candidate(
         emit=emit,
         persist=persist,
     )
+
+
+def _network_probe_private_ipv4(value: str, label: str) -> str:
+    """Return one normalized private IPv4 address for a fixed probe target."""
+
+    if not isinstance(value, str) or value != value.strip():
+        raise DistributedRuntimeError(f'{label} is not an exact private IPv4 address.')
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        raise DistributedRuntimeError(
+            f'{label} is not an exact private IPv4 address.'
+        ) from None
+    if address.version != 4 or not address.is_private:
+        raise DistributedRuntimeError(f'{label} is not an exact private IPv4 address.')
+    return str(address)
+
+
+def _require_exact_network_marker(output: str | bytes, expected: str) -> None:
+    """Accept one exact nonsecret marker and no ambiguous extra output."""
+
+    if isinstance(output, bytes):
+        try:
+            output = output.decode('utf-8')
+        except UnicodeDecodeError as exc:
+            raise DistributedRuntimeError(
+                'A distributed network probe returned non-UTF-8 output.'
+            ) from exc
+    if not isinstance(output, str) or output.splitlines() != [expected]:
+        raise DistributedRuntimeError(
+            'A distributed network probe did not return its one exact marker.'
+        )
+
+
+def _match_exact_network_marker(
+    output: str | bytes,
+    expected: Mapping[str, str],
+) -> str:
+    """Return the sole named outcome matching one exact nonsecret marker."""
+
+    if isinstance(output, bytes):
+        try:
+            output = output.decode('utf-8')
+        except UnicodeDecodeError as exc:
+            raise DistributedRuntimeError(
+                'A distributed network probe returned non-UTF-8 output.'
+            ) from exc
+    if (
+        not isinstance(expected, Mapping)
+        or not expected
+        or any(
+            not isinstance(name, str)
+            or not name
+            or not isinstance(marker, str)
+            or not marker
+            for name, marker in expected.items()
+        )
+    ):
+        raise DistributedRuntimeError(
+            'The distributed network probe outcome markers are invalid.'
+        )
+    lines = output.splitlines() if isinstance(output, str) else []
+    matches = [name for name, marker in expected.items() if lines == [marker]]
+    if len(matches) != 1:
+        raise DistributedRuntimeError(
+            'A distributed network probe did not return one recognized exact marker.'
+        )
+    return matches[0]
+
+
+def _tcp_path_marker(
+    destination_role: str,
+    target_private_ip: str,
+    port: int,
+    *,
+    allowed: bool,
+) -> str:
+    expectation = 'allow' if allowed else 'deny'
+    outcome = 'connected' if allowed else 'blocked'
+    return (
+        f'{_NETWORK_QUALIFICATION_MARKER} source=load-generator '
+        f'destination={destination_role} target={target_private_ip} '
+        f'protocol=TCP port={port} expectation={expectation} '
+        f'outcome={outcome} '
+        f'timeout_seconds={NETWORK_TCP_PROBE_TIMEOUT_SECONDS}'
+    )
+
+
+def _tcp_path_probe_command(
+    destination_role: str,
+    target_private_ip: str,
+    port: int,
+    *,
+    allowed: bool,
+) -> tuple[str, str]:
+    """Build one bounded Bash TCP connect with a fixed expected outcome."""
+
+    if destination_role not in _CLUSTER_KEYS:
+        raise DistributedRuntimeError('The network probe destination role is invalid.')
+    target = _network_probe_private_ipv4(
+        target_private_ip,
+        f'{destination_role} network probe target',
+    )
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise DistributedRuntimeError('The network probe destination port is invalid.')
+    marker = _tcp_path_marker(
+        destination_role,
+        target,
+        port,
+        allowed=allowed,
+    )
+    connect = (
+        f'exec 3<>/dev/tcp/{target}/{port}'
+    )
+    status_check = (
+        'test "$STATUS" -eq 0 || { '
+        'echo "The required distributed TCP path is unavailable." >&2; '
+        'exit 1; }'
+        if allowed
+        else (
+            'case "$STATUS" in 1|124) ;; *) '
+            'echo "A forbidden distributed TCP path was reachable or returned '
+            'an invalid status." >&2; exit 1;; esac'
+        )
+    )
+    command = (
+        'set -euo pipefail; '
+        'command -v bash >/dev/null; command -v timeout >/dev/null; '
+        'set +e; '
+        f'timeout --foreground --signal=TERM '
+        f'{NETWORK_TCP_PROBE_TIMEOUT_SECONDS}s bash -c '
+        f'{shlex.quote(connect)} >/dev/null 2>&1; '
+        'STATUS=$?; set -e; '
+        f'{status_check}; '
+        f'printf "%s\\n" {shlex.quote(marker)}'
+    )
+    return command, marker
+
+
+def _network_policy_probe_manifest(
+    *,
+    cache_node_name: str,
+    image_reference: str,
+    image_lock_fingerprint: str,
+    allowed: bool = False,
+) -> str:
+    """Render one deterministic positive or default-deny probe Pod."""
+
+    if (
+        not isinstance(cache_node_name, str)
+        or not cache_node_name
+        or cache_node_name != cache_node_name.strip()
+    ):
+        raise DistributedRuntimeError('The cache probe node name is invalid.')
+    if (
+        not isinstance(image_reference, str)
+        or '@sha256:' not in image_reference
+        or not _PREFIXED_SHA256_RE.fullmatch(image_reference.rsplit('@', 1)[1])
+    ):
+        raise DistributedRuntimeError('The default-deny probe image is not immutable.')
+    if not _PREFIXED_SHA256_RE.fullmatch(str(image_lock_fingerprint)):
+        raise DistributedRuntimeError('The probe image-lock fingerprint is invalid.')
+    if type(allowed) is not bool:
+        raise DistributedRuntimeError('The network probe mode must be boolean.')
+    pod_name = (
+        NETWORK_POLICY_POSITIVE_CONTROL_POD
+        if allowed
+        else NETWORK_POLICY_PROBE_POD
+    )
+    probe_mode = 'allowed-control' if allowed else 'default-deny'
+    labels = {_NETWORK_POLICY_PROBE_LABEL: probe_mode}
+    if allowed:
+        # Match only the source selector of the existing allow policy.  The
+        # workload Services select three additional labels, so this temporary
+        # control can never become one of their endpoints.
+        labels['app.kubernetes.io/component'] = (
+            _NETWORK_POLICY_POSITIVE_SOURCE_COMPONENT
+        )
+    if allowed:
+        # Pod creation and policy programming are asynchronous.  Prove the
+        # exact path with a bounded retry window so a newly-created control
+        # cannot fail solely because the CNI has not observed its labels yet.
+        # Every attempt still requires an exact PONG, and the Pod-level active
+        # deadline remains an independent hard stop.
+        container_command = [
+            '/bin/sh',
+            '-c',
+            (
+                'set -eu; ATTEMPT=1; LAST_STATUS=1; LAST_RESPONSE=; '
+                f'while test "$ATTEMPT" -le '
+                f'{NETWORK_POLICY_POSITIVE_ATTEMPT_LIMIT}; do '
+                'set +e; LAST_RESPONSE=$(redis-cli '
+                f'-h {NETWORK_POLICY_PROBE_SERVICE} -p 6379 PING 2>&1); '
+                'LAST_STATUS=$?; set -e; '
+                'if test "$LAST_STATUS" -eq 0 '
+                '&& test "$LAST_RESPONSE" = PONG; then '
+                'printf "PONG\\n"; exit 0; fi; '
+                f'if test "$ATTEMPT" -lt '
+                f'{NETWORK_POLICY_POSITIVE_ATTEMPT_LIMIT}; then '
+                f'sleep {NETWORK_POLICY_POSITIVE_RETRY_INTERVAL_SECONDS}; '
+                'fi; ATTEMPT=$((ATTEMPT + 1)); done; '
+                'printf "DISTRIBUTED_DSB_POSITIVE_CONTROL_FAILED '
+                'attempts=%s exit_status=%s response=%s\\n" '
+                '"$((ATTEMPT - 1))" "$LAST_STATUS" "$LAST_RESPONSE" >&2; '
+                'exit 1'
+            ),
+        ]
+    else:
+        # Give the K3s network-policy controller a deterministic window to
+        # observe and program this newly-created Pod before it opens a socket.
+        # The bracketing positive controls use only a short bounded retry
+        # window and exact PONG, so this cannot turn a broken path into a pass.
+        container_command = [
+            '/bin/sh',
+            '-c',
+            (
+                f'sleep {NETWORK_POLICY_PROBE_SETTLE_SECONDS}; '
+                f'exec redis-cli -h {NETWORK_POLICY_PROBE_SERVICE} '
+                '-p 6379 PING'
+            ),
+        ]
+    spec: dict[str, Any] = {
+        'activeDeadlineSeconds': NETWORK_POLICY_PROBE_DEADLINE_SECONDS,
+        'automountServiceAccountToken': False,
+        'containers': [{
+            'command': container_command,
+            'image': image_reference,
+            'imagePullPolicy': 'IfNotPresent',
+            'name': _NETWORK_POLICY_PROBE_CONTAINER,
+            'resources': {
+                'limits': {'cpu': '100m', 'memory': '32Mi'},
+                'requests': {'cpu': '10m', 'memory': '16Mi'},
+            },
+            'securityContext': {
+                'allowPrivilegeEscalation': False,
+                'capabilities': {'drop': ['ALL']},
+                'readOnlyRootFilesystem': True,
+                'runAsGroup': 999,
+                'runAsNonRoot': True,
+                'runAsUser': 999,
+            },
+        }],
+        'dnsPolicy': 'ClusterFirst',
+        'enableServiceLinks': False,
+        'nodeName': cache_node_name,
+        'restartPolicy': 'Never',
+        'securityContext': {
+            'seccompProfile': {'type': 'RuntimeDefault'},
+        },
+        'terminationGracePeriodSeconds': 0,
+    }
+    if allowed:
+        # A custom readiness gate that no controller sets keeps the control
+        # unready even during its short successful execution.  This is defense
+        # in depth in addition to the deliberately incomplete Service labels.
+        spec['readinessGates'] = [{
+            'conditionType': _NETWORK_POLICY_POSITIVE_READY_GATE,
+        }]
+    document = {
+        'apiVersion': 'v1',
+        'kind': 'Pod',
+        'metadata': {
+            'annotations': {
+                _NETWORK_POLICY_LOCK_ANNOTATION: image_lock_fingerprint,
+                _NETWORK_POLICY_IMAGE_SET_ANNOTATION: DISTRIBUTED_IMAGE_SET_REVISION,
+                _NETWORK_POLICY_WORKLOAD_ANNOTATION: DISTRIBUTED_WORKLOAD_REVISION,
+            },
+            'labels': labels,
+            'name': pod_name,
+            'namespace': WORKLOAD_NAMESPACE,
+        },
+        'spec': spec,
+    }
+    return json.dumps(document, sort_keys=True, separators=(',', ':')) + '\n'
+
+
+def _network_policy_positive_control_marker(
+    cache_node_name: str,
+    image_digest: str,
+) -> str:
+    return (
+        f'{_NETWORK_POLICY_POSITIVE_MARKER} '
+        f'pod={NETWORK_POLICY_POSITIVE_CONTROL_POD} '
+        f'node={cache_node_name} image_digest={image_digest} '
+        f'destination={NETWORK_POLICY_PROBE_SERVICE} protocol=TCP port=6379 '
+        'outcome=connected response=PONG '
+        f'attempt_limit={NETWORK_POLICY_POSITIVE_ATTEMPT_LIMIT} '
+        'retry_interval_seconds='
+        f'{NETWORK_POLICY_POSITIVE_RETRY_INTERVAL_SECONDS} '
+        f'deadline_seconds={NETWORK_POLICY_PROBE_DEADLINE_SECONDS}'
+    )
+
+
+def _network_policy_positive_control_command(
+    *,
+    manifest_sha256: str,
+    cache_node_name: str,
+    image_reference: str,
+    image_digest: str,
+) -> tuple[str, str]:
+    """Prove the same image, node, DNS, Service, and Redis path work."""
+
+    if not _SHA256_RE.fullmatch(str(manifest_sha256)):
+        raise DistributedRuntimeError(
+            'The positive-control probe manifest hash is invalid.'
+        )
+    if not _PREFIXED_SHA256_RE.fullmatch(str(image_digest)):
+        raise DistributedRuntimeError(
+            'The positive-control probe image digest is invalid.'
+        )
+    if (
+        not isinstance(image_reference, str)
+        or image_reference.rsplit('@', 1)[-1] != image_digest
+    ):
+        raise DistributedRuntimeError(
+            'The positive-control probe image reference is invalid.'
+        )
+    marker = _network_policy_positive_control_marker(
+        cache_node_name,
+        image_digest,
+    )
+    kubectl = f'sudo {shlex.quote(K3S_BINARY)} kubectl'
+    namespace = shlex.quote(WORKLOAD_NAMESPACE)
+    pod = shlex.quote(NETWORK_POLICY_POSITIVE_CONTROL_POD)
+    jsonpath_phase = shlex.quote('jsonpath={.status.phase}')
+    jsonpath_node = shlex.quote('jsonpath={.spec.nodeName}')
+    jsonpath_image = shlex.quote('jsonpath={.spec.containers[0].image}')
+    jsonpath_container = shlex.quote(
+        'jsonpath={.status.containerStatuses[0].name}'
+    )
+    jsonpath_exit = shlex.quote(
+        'jsonpath={.status.containerStatuses[0].state.terminated.exitCode}'
+    )
+    jsonpath_started = shlex.quote(
+        'jsonpath={.status.containerStatuses[0].state.terminated.startedAt}'
+    )
+    jsonpath_finished = shlex.quote(
+        'jsonpath={.status.containerStatuses[0].state.terminated.finishedAt}'
+    )
+    jsonpath_restarts = shlex.quote(
+        'jsonpath={.status.containerStatuses[0].restartCount}'
+    )
+    return (
+        'set -euo pipefail; umask 077; '
+        f'EXPECTED_SHA256={shlex.quote(manifest_sha256)}; '
+        f'EXPECTED_NODE={shlex.quote(cache_node_name)}; '
+        f'EXPECTED_IMAGE={shlex.quote(image_reference)}; '
+        'MANIFEST=$(mktemp /tmp/deathstarbench-network-control.XXXXXX.json); '
+        'trap \'rm -f -- "$MANIFEST"\' EXIT; '
+        'cat > "$MANIFEST"; test -s "$MANIFEST"; '
+        'ACTUAL_SHA256=$(sha256sum "$MANIFEST" | awk \'{print $1}\'); '
+        'test "$ACTUAL_SHA256" = "$EXPECTED_SHA256" || { '
+        'echo "Positive-control probe manifest SHA-256 mismatch." >&2; exit 1; }; '
+        f'{kubectl} -n {namespace} create -f "$MANIFEST" >/dev/null; '
+        'PHASE=; '
+        'for ATTEMPT in $(seq 1 40); do '
+        f'PHASE=$({kubectl} --request-timeout=2s -n {namespace} get pod '
+        f'{pod} -o {jsonpath_phase}); '
+        'case "$PHASE" in '
+        'Succeeded) break;; '
+        'Failed) POD_FAILURE_LOG=$('
+        f'{kubectl} --request-timeout=2s -n {namespace} logs '
+        f'{pod} -c {shlex.quote(_NETWORK_POLICY_PROBE_CONTAINER)} '
+        '2>&1 | tail -c 2048 || true); '
+        'echo "The network positive control could not reach Redis: '
+        '$POD_FAILURE_LOG" >&2; exit 1;; Pending|Running|"") ;; '
+        '*) echo "The network positive control entered an invalid phase." >&2; '
+        'exit 1;; esac; '
+        'sleep 1; done; '
+        'test "$PHASE" = Succeeded || { '
+        'echo "The network positive control exceeded its observation bound." '
+        '>&2; exit 1; }; '
+        f'ACTUAL_NODE=$({kubectl} --request-timeout=2s -n {namespace} get pod '
+        f'{pod} -o {jsonpath_node}); '
+        f'ACTUAL_IMAGE=$({kubectl} --request-timeout=2s -n {namespace} get pod '
+        f'{pod} -o {jsonpath_image}); '
+        f'CONTAINER_NAME=$({kubectl} --request-timeout=2s -n {namespace} get '
+        f'pod {pod} -o {jsonpath_container}); '
+        f'EXIT_CODE=$({kubectl} --request-timeout=2s -n {namespace} get pod '
+        f'{pod} -o {jsonpath_exit}); '
+        f'STARTED_AT=$({kubectl} --request-timeout=2s -n {namespace} get pod '
+        f'{pod} -o {jsonpath_started}); '
+        f'FINISHED_AT=$({kubectl} --request-timeout=2s -n {namespace} get pod '
+        f'{pod} -o {jsonpath_finished}); '
+        f'RESTARTS=$({kubectl} --request-timeout=2s -n {namespace} get pod '
+        f'{pod} -o {jsonpath_restarts}); '
+        f'POD_LOG=$({kubectl} --request-timeout=2s -n {namespace} logs '
+        f'{pod} -c {shlex.quote(_NETWORK_POLICY_PROBE_CONTAINER)}); '
+        'test "$ACTUAL_NODE" = "$EXPECTED_NODE" || { '
+        'echo "The network positive control ran on the wrong node." >&2; '
+        'exit 1; }; '
+        'test "$ACTUAL_IMAGE" = "$EXPECTED_IMAGE" || { '
+        'echo "The positive-control probe image identity changed." >&2; '
+        'exit 1; }; '
+        f'test "$CONTAINER_NAME" = '
+        f'{shlex.quote(_NETWORK_POLICY_PROBE_CONTAINER)} || {{ '
+        'echo "The positive-control probe container identity changed." >&2; '
+        'exit 1; }; '
+        'test "$EXIT_CODE" = 0 || { '
+        'echo "The network positive control exited unsuccessfully." >&2; '
+        'exit 1; }; '
+        'test -n "$STARTED_AT" || { '
+        'echo "The network positive control has no start timestamp." >&2; '
+        'exit 1; }; '
+        'test -n "$FINISHED_AT" || { '
+        'echo "The network positive control has no finish timestamp." >&2; '
+        'exit 1; }; '
+        'test "$RESTARTS" = 0 || { '
+        'echo "The network positive control restarted unexpectedly." >&2; '
+        'exit 1; }; '
+        'test "$POD_LOG" = PONG || { '
+        'echo "The network positive control returned an invalid response." '
+        '>&2; exit 1; }; '
+        f'printf "%s\\n" {shlex.quote(marker)}',
+        marker,
+    )
+
+
+def _network_policy_probe_marker(
+    cache_node_name: str,
+    image_digest: str,
+    block_mode: str,
+) -> str:
+    if block_mode not in {'drop', 'reject'}:
+        raise DistributedRuntimeError(
+            'The default-deny probe block mode is invalid.'
+        )
+    return (
+        f'{_NETWORK_POLICY_MARKER} pod={NETWORK_POLICY_PROBE_POD} '
+        f'node={cache_node_name} image_digest={image_digest} '
+        f'destination={NETWORK_POLICY_PROBE_SERVICE} protocol=TCP port=6379 '
+        f'outcome=blocked block_mode={block_mode} '
+        f'settle_seconds={NETWORK_POLICY_PROBE_SETTLE_SECONDS} '
+        f'deadline_seconds={NETWORK_POLICY_PROBE_DEADLINE_SECONDS}'
+    )
+
+
+def _network_policy_probe_command(
+    *,
+    manifest_sha256: str,
+    cache_node_name: str,
+    image_reference: str,
+    image_digest: str,
+) -> tuple[str, dict[str, str]]:
+    """Prove default deny through an exact DROP or REJECT observation."""
+
+    if not _SHA256_RE.fullmatch(str(manifest_sha256)):
+        raise DistributedRuntimeError('The default-deny probe manifest hash is invalid.')
+    if not _PREFIXED_SHA256_RE.fullmatch(str(image_digest)):
+        raise DistributedRuntimeError('The default-deny probe image digest is invalid.')
+    if (
+        not isinstance(image_reference, str)
+        or image_reference.rsplit('@', 1)[-1] != image_digest
+    ):
+        raise DistributedRuntimeError(
+            'The default-deny probe image reference is invalid.'
+        )
+    markers = {
+        block_mode: _network_policy_probe_marker(
+            cache_node_name,
+            image_digest,
+            block_mode,
+        )
+        for block_mode in ('drop', 'reject')
+    }
+    kubectl = f'sudo {shlex.quote(K3S_BINARY)} kubectl'
+    namespace = shlex.quote(WORKLOAD_NAMESPACE)
+    pod = shlex.quote(NETWORK_POLICY_PROBE_POD)
+    jsonpath_phase = shlex.quote('jsonpath={.status.phase}')
+    jsonpath_reason = shlex.quote('jsonpath={.status.reason}')
+    jsonpath_node = shlex.quote('jsonpath={.spec.nodeName}')
+    jsonpath_image = shlex.quote('jsonpath={.spec.containers[0].image}')
+    jsonpath_container = shlex.quote(
+        'jsonpath={.status.containerStatuses[0].name}'
+    )
+    jsonpath_container_reason = shlex.quote(
+        'jsonpath={.status.containerStatuses[0].state.terminated.reason}'
+    )
+    jsonpath_exit = shlex.quote(
+        'jsonpath={.status.containerStatuses[0].state.terminated.exitCode}'
+    )
+    jsonpath_started = shlex.quote(
+        'jsonpath={.status.containerStatuses[0].state.terminated.startedAt}'
+    )
+    jsonpath_finished = shlex.quote(
+        'jsonpath={.status.containerStatuses[0].state.terminated.finishedAt}'
+    )
+    jsonpath_restarts = shlex.quote(
+        'jsonpath={.status.containerStatuses[0].restartCount}'
+    )
+    return (
+        'set -euo pipefail; umask 077; '
+        f'EXPECTED_SHA256={shlex.quote(manifest_sha256)}; '
+        f'EXPECTED_NODE={shlex.quote(cache_node_name)}; '
+        f'EXPECTED_IMAGE={shlex.quote(image_reference)}; '
+        'MANIFEST=$(mktemp /tmp/deathstarbench-network-probe.XXXXXX.json); '
+        'trap \'rm -f -- "$MANIFEST"\' EXIT; '
+        'cat > "$MANIFEST"; test -s "$MANIFEST"; '
+        'ACTUAL_SHA256=$(sha256sum "$MANIFEST" | awk \'{print $1}\'); '
+        'test "$ACTUAL_SHA256" = "$EXPECTED_SHA256" || { '
+        'echo "Default-deny probe manifest SHA-256 mismatch." >&2; exit 1; }; '
+        f'{kubectl} -n {namespace} create -f "$MANIFEST" >/dev/null; '
+        'PHASE=; '
+        'for ATTEMPT in $(seq 1 40); do '
+        f'PHASE=$({kubectl} --request-timeout=2s -n {namespace} get pod '
+        f'{pod} -o {jsonpath_phase}); '
+        'case "$PHASE" in '
+        'Succeeded) echo "The default-deny probe reached Redis." >&2; exit 1;; '
+        'Failed) break;; Pending|Running|"") ;; '
+        '*) echo "The default-deny probe entered an invalid phase." >&2; '
+        'exit 1;; esac; '
+        'sleep 1; done; '
+        'test "$PHASE" = Failed || { '
+        'echo "The default-deny probe exceeded its observation bound." >&2; '
+        'exit 1; }; '
+        f'POD_REASON=$({kubectl} --request-timeout=2s -n {namespace} get pod '
+        f'{pod} -o {jsonpath_reason}); '
+        f'ACTUAL_NODE=$({kubectl} --request-timeout=2s -n {namespace} get pod '
+        f'{pod} -o {jsonpath_node}); '
+        f'ACTUAL_IMAGE=$({kubectl} --request-timeout=2s -n {namespace} get pod '
+        f'{pod} -o {jsonpath_image}); '
+        f'CONTAINER_NAME=$({kubectl} --request-timeout=2s -n {namespace} get '
+        f'pod {pod} -o {jsonpath_container}); '
+        f'CONTAINER_REASON=$({kubectl} --request-timeout=2s -n {namespace} '
+        f'get pod {pod} -o {jsonpath_container_reason}); '
+        f'EXIT_CODE=$({kubectl} --request-timeout=2s -n {namespace} get pod '
+        f'{pod} -o {jsonpath_exit}); '
+        f'STARTED_AT=$({kubectl} --request-timeout=2s -n {namespace} get pod '
+        f'{pod} -o {jsonpath_started}); '
+        f'FINISHED_AT=$({kubectl} --request-timeout=2s -n {namespace} get pod '
+        f'{pod} -o {jsonpath_finished}); '
+        f'RESTARTS=$({kubectl} --request-timeout=2s -n {namespace} get pod '
+        f'{pod} -o {jsonpath_restarts}); '
+        'test "$ACTUAL_NODE" = "$EXPECTED_NODE" || { '
+        'echo "The default-deny probe ran on the wrong node." >&2; exit 1; }; '
+        'test "$ACTUAL_IMAGE" = "$EXPECTED_IMAGE" || { '
+        'echo "The default-deny probe image identity changed." >&2; exit 1; }; '
+        f'test "$CONTAINER_NAME" = '
+        f'{shlex.quote(_NETWORK_POLICY_PROBE_CONTAINER)} || {{ '
+        'echo "The default-deny probe container identity changed." >&2; '
+        'exit 1; }; '
+        'test -n "$STARTED_AT" || { '
+        'echo "The default-deny probe has no start timestamp." >&2; exit 1; }; '
+        'test -n "$FINISHED_AT" || { '
+        'echo "The default-deny probe has no finish timestamp." >&2; exit 1; }; '
+        'test "$RESTARTS" = 0 || { '
+        'echo "The default-deny probe restarted unexpectedly." >&2; exit 1; }; '
+        'case "$EXIT_CODE" in '
+        '""|*[!0-9]*) echo "The default-deny probe exit status is invalid." '
+        '>&2; exit 1;; '
+        '0) echo "The default-deny probe unexpectedly reached Redis." >&2; '
+        'exit 1;; esac; '
+        'case "$POD_REASON:$CONTAINER_REASON" in '
+        'DeadlineExceeded:*) BLOCK_MODE=drop;; '
+        ':Error) test "$EXIT_CODE" = 1 || { '
+        'echo "The rejected default-deny probe returned an unexpected exit '
+        'status ($EXIT_CODE)." >&2; exit 1; }; BLOCK_MODE=reject;; '
+        '*) echo "The default-deny probe termination reason is invalid '
+        '(pod=$POD_REASON container=$CONTAINER_REASON)." >&2; exit 1;; esac; '
+        'case "$BLOCK_MODE" in '
+        f'drop) printf "%s\\n" {shlex.quote(markers["drop"])};; '
+        f'reject) printf "%s\\n" {shlex.quote(markers["reject"])};; '
+        '*) echo "The default-deny probe block mode is invalid." >&2; '
+        'exit 1;; esac',
+        markers,
+    )
+
+
+def _network_policy_probe_cleanup_command(
+    *,
+    cache_node_name: str,
+    image_reference: str,
+    image_lock_fingerprint: str,
+    allowed: bool = False,
+) -> tuple[str, str]:
+    """Delete only the exact deterministic Pod with a UID precondition.
+
+    The fixed Pod name is not ownership.  An interrupted qualification may
+    leave our Pod behind, but a different object using that name must never be
+    adopted or deleted.  Read its UID and complete identity in one API
+    response, then make the API server enforce that UID on the DELETE itself.
+    """
+
+    # Reuse the manifest's strict input validation so the cleanup contract can
+    # never become less exact than the object it is allowed to remove.
+    _network_policy_probe_manifest(
+        cache_node_name=cache_node_name,
+        image_reference=image_reference,
+        image_lock_fingerprint=image_lock_fingerprint,
+        allowed=allowed,
+    )
+
+    pod_name = (
+        NETWORK_POLICY_POSITIVE_CONTROL_POD
+        if allowed
+        else NETWORK_POLICY_PROBE_POD
+    )
+    probe_mode = 'allowed-control' if allowed else 'default-deny'
+    source_component = (
+        _NETWORK_POLICY_POSITIVE_SOURCE_COMPONENT if allowed else ''
+    )
+    marker = (
+        f'{_NETWORK_POLICY_CLEANUP_MARKER} pod={pod_name} '
+        'absent=true'
+    )
+    kubectl = f'sudo {shlex.quote(K3S_BINARY)} kubectl'
+    namespace = shlex.quote(WORKLOAD_NAMESPACE)
+    pod = shlex.quote(pod_name)
+    identity_jsonpath = shlex.quote(
+        'jsonpath={.metadata.uid}'
+        '{"|"}'
+        '{.metadata.labels.deathstarbench\\.io/qualification-probe}'
+        '{"|"}'
+        '{.metadata.labels.app\\.kubernetes\\.io/component}'
+        '{"|"}'
+        '{.metadata.annotations.deathstarbench\\.io/image-lock-fingerprint}'
+        '{"|"}'
+        '{.metadata.annotations.deathstarbench\\.io/image-set-revision}'
+        '{"|"}'
+        '{.metadata.annotations.deathstarbench\\.io/workload-revision}'
+        '{"|"}'
+        '{.spec.nodeName}'
+        '{"|"}'
+        '{range .spec.containers[*]}{.name}{","}{.image}{";"}{end}'
+    )
+    expected_identity = '|'.join((
+        probe_mode,
+        source_component,
+        image_lock_fingerprint,
+        DISTRIBUTED_IMAGE_SET_REVISION,
+        DISTRIBUTED_WORKLOAD_REVISION,
+        cache_node_name,
+        f'{_NETWORK_POLICY_PROBE_CONTAINER},{image_reference};',
+    ))
+    api_url = (
+        f'https://127.0.0.1:6443/api/v1/namespaces/'
+        f'{WORKLOAD_NAMESPACE}/pods/{pod_name}'
+    )
+    command = (
+        'set -euo pipefail; command -v curl >/dev/null; '
+        f'EXPECTED_IDENTITY={shlex.quote(expected_identity)}; '
+        f'EXISTING=$({kubectl} --request-timeout=10s -n {namespace} get pod '
+        f'{pod} --ignore-not-found=true -o name); '
+        'if test -n "$EXISTING"; then '
+        f'OBSERVED_IDENTITY=$({kubectl} --request-timeout=10s -n {namespace} '
+        f'get pod {pod} -o {identity_jsonpath}); '
+        'POD_UID=${OBSERVED_IDENTITY%%|*}; '
+        'ACTUAL_IDENTITY=${OBSERVED_IDENTITY#*|}; '
+        'printf "%s\\n" "$POD_UID" | grep -Eq '
+        "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-"
+        "[0-9a-f]{12}$' || { "
+        'echo "The network probe Pod UID is invalid." >&2; exit 1; }; '
+        'test "$ACTUAL_IDENTITY" = "$EXPECTED_IDENTITY" || { '
+        'echo "Refusing to delete a foreign network qualification probe Pod." '
+        '>&2; '
+        'exit 1; }; '
+        'DELETE_OPTIONS=$(printf '
+        '\'{"apiVersion":"v1","kind":"DeleteOptions",'
+        '"gracePeriodSeconds":0,"preconditions":{"uid":"%s"},'
+        '"propagationPolicy":"Background"}\' "$POD_UID"); '
+        'DELETE_STATUS=$(sudo curl --silent --show-error '
+        '--noproxy "*" --connect-timeout 5 --max-time 15 --output /dev/null '
+        '--write-out "%{http_code}" --request DELETE '
+        '--header "Content-Type: application/json" '
+        '--cacert /var/lib/rancher/k3s/server/tls/server-ca.crt '
+        '--cert /var/lib/rancher/k3s/server/tls/client-admin.crt '
+        '--key /var/lib/rancher/k3s/server/tls/client-admin.key '
+        '--data-binary "$DELETE_OPTIONS" '
+        f'{shlex.quote(api_url)}); '
+        'case "$DELETE_STATUS" in 200|202|404) ;; *) '
+        'echo "The UID-preconditioned network probe deletion was rejected '
+        'with HTTP $DELETE_STATUS." >&2; exit 1;; esac; '
+        'ABSENT=false; '
+        'for ATTEMPT in $(seq 1 30); do '
+        f'CURRENT_UID=$({kubectl} --request-timeout=2s -n {namespace} get pod '
+        f'{pod} --ignore-not-found=true -o '
+        f'{shlex.quote("jsonpath={.metadata.uid}")}); '
+        'if test -z "$CURRENT_UID"; then ABSENT=true; break; fi; '
+        'test "$CURRENT_UID" = "$POD_UID" || { '
+        'echo "A foreign Pod replaced the network probe during cleanup." >&2; '
+        'exit 1; }; '
+        'sleep 1; done; '
+        'test "$ABSENT" = true || { '
+        'echo "The network probe Pod deletion did not finish." >&2; exit 1; }; '
+        'fi; '
+        f'REMAINING_UID=$({kubectl} --request-timeout=10s -n {namespace} get '
+        f'pod {pod} --ignore-not-found=true -o '
+        f'{shlex.quote("jsonpath={.metadata.uid}")}); '
+        'test -z "$REMAINING_UID" || { '
+        'echo "A network qualification probe Pod still occupies the fixed '
+        'name." >&2; exit 1; }; '
+        f'printf "%s\\n" {shlex.quote(marker)}'
+    )
+    return command, marker
+
+
+def qualify_distributed_network_paths(
+    job: MutableMapping[str, Any],
+    image_lock: Mapping[str, Any],
+    *,
+    execute: Callable[..., str],
+    emit: Callable[[MutableMapping[str, Any], str, str], Any] | None = None,
+) -> dict[str, Any]:
+    """Qualify required and forbidden provider-neutral network paths.
+
+    This explicit operator-only gate must run after the exact workload reaches
+    ``workload_ready``.  It does not mutate the workload journal or produce a
+    benchmark result.  Its return value is deterministic, nonsecret evidence
+    suitable for a qualification artifact.
+    """
+
+    if not isinstance(job, MutableMapping):
+        raise DistributedRuntimeError('A mutable benchmark job is required.')
+    resources = job.get('resources')
+    if not isinstance(resources, MutableMapping):
+        raise DistributedRuntimeError('The job has no mutable resource state.')
+    if not callable(execute):
+        raise DistributedRuntimeError('A network probe executor is required.')
+    plan = distributed_k3s_candidate_plan(resources)
+    runtime_journal = resources.get(RUNTIME_JOURNAL_KEY)
+    _validate_existing_journal(runtime_journal, plan)
+    if runtime_journal is None or runtime_journal['state'] != 'cluster_ready':
+        raise DistributedRuntimeError(
+            'The exact K3s candidate must be cluster_ready before network qualification.'
+        )
+    try:
+        validated_lock = validate_image_lock(image_lock)
+        bundle = render_social_network_bundle(
+            image_lock,
+            plan.host('application').architecture,
+            plan.load_generator_private_ip,
+        )
+    except WorkloadBundleError as exc:
+        raise DistributedRuntimeError(
+            f'The Social Network workload bundle is invalid: {exc}'
+        ) from exc
+    workload_journal = resources.get(WORKLOAD_JOURNAL_KEY)
+    _validate_existing_workload_journal(
+        workload_journal,
+        plan=plan,
+        bundle=bundle,
+        filesystem_uuid=runtime_journal['database_volume']['filesystem_uuid'],
+    )
+    if workload_journal is None or workload_journal['state'] != _WORKLOAD_READY_STATE:
+        raise DistributedRuntimeError(
+            'The exact Social Network workload must be workload_ready before '
+            'network qualification.'
+        )
+
+    cache = plan.host('cache')
+    if normalized_architecture(cache.architecture) != 'x86_64':
+        raise DistributedRuntimeError(
+            'The default-deny probe requires the exact x86 cache node.'
+        )
+    image_reference = validated_lock.image('x86_64', 'redis')
+    image_digest = image_reference.rsplit('@', 1)[1]
+    positive_manifest = _network_policy_probe_manifest(
+        cache_node_name=cache.node_name,
+        image_reference=image_reference,
+        image_lock_fingerprint=validated_lock.fingerprint,
+        allowed=True,
+    )
+    positive_manifest_sha256 = hashlib.sha256(
+        positive_manifest.encode('utf-8')
+    ).hexdigest()
+    probe_manifest = _network_policy_probe_manifest(
+        cache_node_name=cache.node_name,
+        image_reference=image_reference,
+        image_lock_fingerprint=validated_lock.fingerprint,
+    )
+    probe_manifest_sha256 = hashlib.sha256(
+        probe_manifest.encode('utf-8')
+    ).hexdigest()
+    cleanup_command, cleanup_marker = _network_policy_probe_cleanup_command(
+        cache_node_name=cache.node_name,
+        image_reference=image_reference,
+        image_lock_fingerprint=validated_lock.fingerprint,
+    )
+    positive_cleanup_command, positive_cleanup_marker = (
+        _network_policy_probe_cleanup_command(
+            cache_node_name=cache.node_name,
+            image_reference=image_reference,
+            image_lock_fingerprint=validated_lock.fingerprint,
+            allowed=True,
+        )
+    )
+    positive_command, positive_marker = (
+        _network_policy_positive_control_command(
+            manifest_sha256=positive_manifest_sha256,
+            cache_node_name=cache.node_name,
+            image_reference=image_reference,
+            image_digest=image_digest,
+        )
+    )
+    control = plan.host('control')
+    load_generator = plan.load_generator
+    required_path: dict[str, Any] | None = None
+    forbidden_paths: list[dict[str, Any]] = []
+    positive_control_paths: list[dict[str, Any]] = []
+    policy_path: dict[str, Any] | None = None
+    cleanup_confirmed = False
+    positive_cleanup_confirmed = False
+
+    def run_positive_control(position: str) -> dict[str, Any]:
+        if position not in {'before_negative', 'after_negative'}:
+            raise DistributedRuntimeError(
+                'The network positive-control position is invalid.'
+            )
+        positive_output = _execute(
+            execute,
+            job,
+            control,
+            positive_command,
+            timeout=90,
+            stdin_text=positive_manifest,
+        )
+        _require_exact_network_marker(positive_output, positive_marker)
+        return {
+            'position': position,
+            'source_kind': 'Pod',
+            'source_name': NETWORK_POLICY_POSITIVE_CONTROL_POD,
+            'source_node': cache.node_name,
+            'source_node_role': 'cache',
+            'source_architecture': 'x86_64',
+            'source_policy_component': (
+                _NETWORK_POLICY_POSITIVE_SOURCE_COMPONENT
+            ),
+            'probe_image_digest': image_digest,
+            'destination_service': NETWORK_POLICY_PROBE_SERVICE,
+            'protocol': 'TCP',
+            'port': 6379,
+            'outcome': 'connected',
+            'response': 'PONG',
+            'attempt_limit': NETWORK_POLICY_POSITIVE_ATTEMPT_LIMIT,
+            'retry_interval_seconds': (
+                NETWORK_POLICY_POSITIVE_RETRY_INTERVAL_SECONDS
+            ),
+            'deadline_seconds': NETWORK_POLICY_PROBE_DEADLINE_SECONDS,
+            'cleanup_confirmed': False,
+        }
+
+    try:
+        # Remove deterministic leftovers from an interrupted prior attempt
+        # before creating this attempt's Pods. The finally block repeats both
+        # operations and is the authoritative absence proof.
+        initial_positive_cleanup = _execute(
+            execute,
+            job,
+            control,
+            positive_cleanup_command,
+            timeout=120,
+        )
+        _require_exact_network_marker(
+            initial_positive_cleanup,
+            positive_cleanup_marker,
+        )
+        initial_cleanup = _execute(
+            execute,
+            job,
+            control,
+            cleanup_command,
+            timeout=120,
+        )
+        _require_exact_network_marker(initial_cleanup, cleanup_marker)
+
+        _emit(emit, job, 'Qualifying required and forbidden cloud network paths.')
+        application = plan.host('application')
+        required_command, required_marker = _tcp_path_probe_command(
+            'application',
+            application.private_ip,
+            8080,
+            allowed=True,
+        )
+        required_output = _execute(
+            execute,
+            job,
+            load_generator,
+            required_command,
+            timeout=15,
+        )
+        _require_exact_network_marker(required_output, required_marker)
+        required_path = {
+            'source_role': 'load-generator',
+            'destination_role': 'application',
+            'protocol': 'TCP',
+            'port': 8080,
+            'outcome': 'connected',
+            'timeout_seconds': NETWORK_TCP_PROBE_TIMEOUT_SECONDS,
+        }
+
+        for destination_role, port in (
+            ('control', 6443),
+            ('database', 22),
+            ('cache', 22),
+        ):
+            destination = plan.host(destination_role)
+            command, marker = _tcp_path_probe_command(
+                destination_role,
+                destination.private_ip,
+                port,
+                allowed=False,
+            )
+            output = _execute(
+                execute,
+                job,
+                load_generator,
+                command,
+                timeout=15,
+            )
+            _require_exact_network_marker(output, marker)
+            forbidden_paths.append({
+                'source_role': 'load-generator',
+                'destination_role': destination_role,
+                'protocol': 'TCP',
+                'port': port,
+                'outcome': 'blocked',
+                'timeout_seconds': NETWORK_TCP_PROBE_TIMEOUT_SECONDS,
+            })
+
+        _emit(
+            emit,
+            job,
+            'Qualifying the pre-denial Kubernetes policy-path control.',
+        )
+        positive_control_paths.append(
+            run_positive_control('before_negative')
+        )
+        between_positive_cleanup = _execute(
+            execute,
+            job,
+            control,
+            positive_cleanup_command,
+            timeout=120,
+        )
+        _require_exact_network_marker(
+            between_positive_cleanup,
+            positive_cleanup_marker,
+        )
+        positive_control_paths[0]['cleanup_confirmed'] = True
+
+        _emit(emit, job, 'Qualifying the Kubernetes default-deny policy path.')
+        policy_command, policy_markers = _network_policy_probe_command(
+            manifest_sha256=probe_manifest_sha256,
+            cache_node_name=cache.node_name,
+            image_reference=image_reference,
+            image_digest=image_digest,
+        )
+        policy_failure: Exception | None = None
+        try:
+            policy_output = _execute(
+                execute,
+                job,
+                control,
+                policy_command,
+                timeout=90,
+                stdin_text=probe_manifest,
+            )
+            block_mode = _match_exact_network_marker(
+                policy_output,
+                policy_markers,
+            )
+            policy_path = {
+                'source_kind': 'Pod',
+                'source_name': NETWORK_POLICY_PROBE_POD,
+                'source_node': cache.node_name,
+                'source_node_role': 'cache',
+                'source_architecture': 'x86_64',
+                'probe_image_digest': image_digest,
+                'destination_service': NETWORK_POLICY_PROBE_SERVICE,
+                'protocol': 'TCP',
+                'port': 6379,
+                'outcome': 'blocked',
+                'block_mode': block_mode,
+                'settle_seconds': NETWORK_POLICY_PROBE_SETTLE_SECONDS,
+                'deadline_seconds': NETWORK_POLICY_PROBE_DEADLINE_SECONDS,
+            }
+        except Exception as exc:
+            # Still bracket a failed/invalid negative attempt with the same
+            # healthy path proof.  This distinguishes a policy result from a
+            # transient DNS, Service, Redis, or general-egress outage.
+            policy_failure = exc
+
+        _emit(
+            emit,
+            job,
+            'Qualifying the post-denial Kubernetes policy-path control.',
+        )
+        positive_control_paths.append(
+            run_positive_control('after_negative')
+        )
+        if policy_failure is not None:
+            raise policy_failure
+    finally:
+        try:
+            final_cleanup = _execute(
+                execute,
+                job,
+                control,
+                cleanup_command,
+                timeout=120,
+            )
+            _require_exact_network_marker(final_cleanup, cleanup_marker)
+            cleanup_confirmed = True
+        finally:
+            final_positive_cleanup = _execute(
+                execute,
+                job,
+                control,
+                positive_cleanup_command,
+                timeout=120,
+            )
+            _require_exact_network_marker(
+                final_positive_cleanup,
+                positive_cleanup_marker,
+            )
+            positive_cleanup_confirmed = True
+
+    if (
+        required_path is None
+        or len(forbidden_paths) != 3
+        or len(positive_control_paths) != 2
+        or policy_path is None
+    ):
+        raise DistributedRuntimeError(
+            'The distributed network qualification did not complete every probe.'
+        )
+    positive_control_paths[1]['cleanup_confirmed'] = (
+        positive_cleanup_confirmed
+    )
+    if not all(
+        control_path['cleanup_confirmed']
+        for control_path in positive_control_paths
+    ):
+        raise DistributedRuntimeError(
+            'The network positive-control cleanup proof is incomplete.'
+        )
+    policy_path['cleanup_confirmed'] = cleanup_confirmed
+    attestation = {
+        'schema_version': NETWORK_QUALIFICATION_SCHEMA_VERSION,
+        'provider': plan.provider,
+        'runtime_revision': DISTRIBUTED_RUNTIME_REVISION,
+        'topology_fingerprint': plan.topology_fingerprint,
+        'workload_revision': DISTRIBUTED_WORKLOAD_REVISION,
+        'image_set_revision': DISTRIBUTED_IMAGE_SET_REVISION,
+        'image_lock_fingerprint': bundle.image_lock_fingerprint,
+        'namespace': bundle.namespace,
+        'required_path': required_path,
+        'forbidden_paths': forbidden_paths,
+        'policy_positive_controls': positive_control_paths,
+        'default_deny_path': policy_path,
+    }
+    _emit(emit, job, 'Distributed network qualification completed without residue.')
+    return attestation

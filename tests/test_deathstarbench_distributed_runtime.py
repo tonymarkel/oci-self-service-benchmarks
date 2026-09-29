@@ -1,6 +1,9 @@
 import copy
 from dataclasses import replace
 import hashlib
+import json
+import re
+import subprocess
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -13,10 +16,24 @@ from app.deathstarbench_contract import (
     K3S_RUNTIME_ID,
 )
 from app.deathstarbench_distributed import (
+    DISTRIBUTED_NETWORK_QUALIFICATION_KEY,
+    NETWORK_POLICY_POSITIVE_ATTEMPT_LIMIT,
+    NETWORK_POLICY_POSITIVE_RETRY_INTERVAL_SECONDS,
+    NETWORK_POLICY_PROBE_DEADLINE_SECONDS,
+    NETWORK_POLICY_PROBE_POD,
+    NETWORK_POLICY_PROBE_SERVICE,
+    NETWORK_POLICY_PROBE_SETTLE_SECONDS,
+    NETWORK_POLICY_POSITIVE_CONTROL_POD,
+    NETWORK_QUALIFICATION_SCHEMA_VERSION,
+    NETWORK_TCP_PROBE_TIMEOUT_SECONDS,
     RUNTIME_JOURNAL_KEY,
     WORKLOAD_JOURNAL_KEY,
     AzureK3sCandidatePlan,
     DistributedRuntimeError,
+    _network_policy_positive_control_command,
+    _network_policy_probe_command,
+    _network_policy_probe_cleanup_command,
+    _network_policy_probe_manifest,
     azure_k3s_candidate_plan,
     distributed_k3s_candidate_plan,
     gcp_k3s_candidate_plan,
@@ -27,6 +44,7 @@ from app.deathstarbench_distributed import (
     prepare_azure_distributed_social_network_candidate,
     prepare_gcp_distributed_k3s_candidate,
     prepare_gcp_distributed_social_network_candidate,
+    qualify_distributed_network_paths,
 )
 from app.deathstarbench_k3s_workload import (
     IMAGE_LOCK_SCHEMA_VERSION,
@@ -330,6 +348,96 @@ class GcpFakeRemoteExecutor(FakeRemoteExecutor):
                 'filesystem=xfs\n'
             )
         return super().__call__(job, command, **kwargs)
+
+
+class NetworkQualificationExecutor:
+    """Model the deterministic probe lifecycle and return exact markers."""
+
+    MARKER_RE = re.compile(
+        r"'(DISTRIBUTED_DSB_(?:NETWORK_PATH|POSITIVE_CONTROL|"
+        r"DEFAULT_DENY(?:_CLEANUP)?) [^']+)'"
+    )
+
+    def __init__(
+        self,
+        *,
+        fail_on=None,
+        duplicate_on=None,
+        fail_final_cleanup=False,
+        initial_probe=None,
+        initial_positive_probe=None,
+        negative_mode='drop',
+        fail_positive_attempt=None,
+    ):
+        self.calls = []
+        self.fail_on = fail_on
+        self.duplicate_on = duplicate_on
+        self.fail_final_cleanup = fail_final_cleanup
+        self.cleanup_count = 0
+        self.delete_count = 0
+        self.probe_state = initial_probe
+        self.positive_probe_state = initial_positive_probe
+        self.negative_mode = negative_mode
+        self.fail_positive_attempt = fail_positive_attempt
+        self.positive_attempt_count = 0
+        self.negative_attempt_count = 0
+
+    def __call__(self, job, command, **kwargs):
+        self.calls.append((command, kwargs))
+        markers = self.MARKER_RE.findall(command)
+        if not markers:
+            raise AssertionError('network qualification sent an unknown command')
+        marker = markers[0]
+        if (
+            'DISTRIBUTED_DSB_DEFAULT_DENY ' in marker
+            and 'CLEANUP' not in marker
+        ):
+            self.negative_attempt_count += 1
+            if self.negative_mode == 'reject':
+                marker = next(
+                    value for value in markers if 'block_mode=reject' in value
+                )
+            elif self.negative_mode == 'success':
+                self.probe_state = 'exact'
+                raise RuntimeError('The default-deny probe reached Redis.')
+            elif self.negative_mode == 'invalid_exit':
+                self.probe_state = 'exact'
+                raise RuntimeError(
+                    'The default-deny probe exit status is invalid.'
+                )
+            elif self.negative_mode == 'invalid_reason':
+                self.probe_state = 'exact'
+                raise RuntimeError(
+                    'The default-deny probe termination reason is invalid.'
+                )
+            elif self.negative_mode != 'drop':
+                raise AssertionError('unsupported negative probe mode')
+        if 'DISTRIBUTED_DSB_DEFAULT_DENY_CLEANUP ' in marker:
+            self.cleanup_count += 1
+            if self.fail_final_cleanup and self.cleanup_count == 4:
+                raise RuntimeError('injected final cleanup failure')
+            positive = f'pod={NETWORK_POLICY_POSITIVE_CONTROL_POD} ' in marker
+            state_name = 'positive_probe_state' if positive else 'probe_state'
+            state = getattr(self, state_name)
+            if state == 'foreign':
+                raise RuntimeError(
+                    'Refusing to delete a foreign network qualification probe Pod.'
+                )
+            if state == 'exact':
+                self.delete_count += 1
+                setattr(self, state_name, None)
+        elif 'DISTRIBUTED_DSB_POSITIVE_CONTROL ' in marker:
+            self.positive_attempt_count += 1
+            self.positive_probe_state = 'exact'
+            if self.fail_positive_attempt == self.positive_attempt_count:
+                raise RuntimeError('injected positive control failure')
+        elif 'DISTRIBUTED_DSB_DEFAULT_DENY ' in marker:
+            self.probe_state = 'exact'
+        if self.fail_on is not None and self.fail_on in marker:
+            raise RuntimeError('injected network probe failure')
+        if self.duplicate_on is not None and self.duplicate_on in marker:
+            return f'{marker}\n{marker}\n'
+        return marker + '\n'
 
 
 def candidate_workload_attestation(job, lock):
@@ -1295,6 +1403,773 @@ class DistributedWorkloadOrchestrationTests(unittest.TestCase):
         self.assertIsNone(journal['workload_attestation'])
         self.assertEqual(persisted, [journal])
         self.assertEqual(job['results'], [])
+
+
+class DistributedNetworkQualificationTests(unittest.TestCase):
+    def ready_workload_job(self, *, provider='azure'):
+        lock = candidate_image_lock()
+        if provider == 'azure':
+            job = candidate_job()
+            runtime_execute = FakeRemoteExecutor()
+            prepare_runtime = prepare_azure_distributed_k3s_candidate
+            prepare_workload = prepare_azure_distributed_social_network_candidate
+        elif provider == 'gcp':
+            job = gcp_candidate_job()
+            runtime_execute = GcpFakeRemoteExecutor()
+            prepare_runtime = prepare_gcp_distributed_k3s_candidate
+            prepare_workload = prepare_gcp_distributed_social_network_candidate
+        else:
+            raise AssertionError(f'unsupported test provider {provider}')
+        prepare_runtime(job, execute=runtime_execute)
+        attestation = candidate_workload_attestation(job, lock)
+        with mock.patch(
+            'app.deathstarbench_distributed.parse_workload_attestation',
+            return_value=attestation,
+        ):
+            prepare_workload(
+                job,
+                lock,
+                execute=(
+                    GcpFakeRemoteExecutor()
+                    if provider == 'gcp'
+                    else FakeRemoteExecutor()
+                ),
+            )
+        return job, lock
+
+    def test_qualification_is_bounded_digest_pinned_and_residue_free(self):
+        job, lock = self.ready_workload_job()
+        prior_job = copy.deepcopy(job)
+        execute = NetworkQualificationExecutor()
+
+        attestation = qualify_distributed_network_paths(
+            job,
+            lock,
+            execute=execute,
+        )
+
+        self.assertEqual(job, prior_job)
+        self.assertEqual(
+            DISTRIBUTED_NETWORK_QUALIFICATION_KEY,
+            'deathstarbench_distributed_network_qualification',
+        )
+        self.assertNotIn(DISTRIBUTED_NETWORK_QUALIFICATION_KEY, job['resources'])
+        self.assertEqual(
+            set(attestation),
+            {
+                'schema_version',
+                'provider',
+                'runtime_revision',
+                'topology_fingerprint',
+                'workload_revision',
+                'image_set_revision',
+                'image_lock_fingerprint',
+                'namespace',
+                'required_path',
+                'forbidden_paths',
+                'policy_positive_controls',
+                'default_deny_path',
+            },
+        )
+        self.assertEqual(
+            attestation['schema_version'],
+            NETWORK_QUALIFICATION_SCHEMA_VERSION,
+        )
+        self.assertEqual(NETWORK_QUALIFICATION_SCHEMA_VERSION, 3)
+        self.assertEqual(attestation['provider'], 'azure')
+        self.assertEqual(attestation['required_path'], {
+            'source_role': 'load-generator',
+            'destination_role': 'application',
+            'protocol': 'TCP',
+            'port': 8080,
+            'outcome': 'connected',
+            'timeout_seconds': NETWORK_TCP_PROBE_TIMEOUT_SECONDS,
+        })
+        self.assertEqual(
+            [
+                (path['destination_role'], path['port'], path['outcome'])
+                for path in attestation['forbidden_paths']
+            ],
+            [
+                ('control', 6443, 'blocked'),
+                ('database', 22, 'blocked'),
+                ('cache', 22, 'blocked'),
+            ],
+        )
+        for path in attestation['forbidden_paths']:
+            self.assertEqual(path['source_role'], 'load-generator')
+            self.assertEqual(path['protocol'], 'TCP')
+            self.assertEqual(
+                path['timeout_seconds'],
+                NETWORK_TCP_PROBE_TIMEOUT_SECONDS,
+            )
+        image_reference = lock['platforms']['linux/amd64']['images']['redis']
+        image_digest = image_reference.rsplit('@', 1)[1]
+        positive_control = {
+            'source_kind': 'Pod',
+            'source_name': NETWORK_POLICY_POSITIVE_CONTROL_POD,
+            'source_node': 'dsb-cache',
+            'source_node_role': 'cache',
+            'source_architecture': 'x86_64',
+            'source_policy_component': 'home-timeline-service',
+            'probe_image_digest': image_digest,
+            'destination_service': NETWORK_POLICY_PROBE_SERVICE,
+            'protocol': 'TCP',
+            'port': 6379,
+            'outcome': 'connected',
+            'response': 'PONG',
+            'attempt_limit': NETWORK_POLICY_POSITIVE_ATTEMPT_LIMIT,
+            'retry_interval_seconds': (
+                NETWORK_POLICY_POSITIVE_RETRY_INTERVAL_SECONDS
+            ),
+            'deadline_seconds': NETWORK_POLICY_PROBE_DEADLINE_SECONDS,
+            'cleanup_confirmed': True,
+        }
+        self.assertEqual(attestation['policy_positive_controls'], [
+            {'position': 'before_negative', **positive_control},
+            {'position': 'after_negative', **positive_control},
+        ])
+        self.assertEqual(attestation['default_deny_path'], {
+            'source_kind': 'Pod',
+            'source_name': NETWORK_POLICY_PROBE_POD,
+            'source_node': 'dsb-cache',
+            'source_node_role': 'cache',
+            'source_architecture': 'x86_64',
+            'probe_image_digest': image_digest,
+            'destination_service': NETWORK_POLICY_PROBE_SERVICE,
+            'protocol': 'TCP',
+            'port': 6379,
+            'outcome': 'blocked',
+            'block_mode': 'drop',
+            'settle_seconds': NETWORK_POLICY_PROBE_SETTLE_SECONDS,
+            'deadline_seconds': NETWORK_POLICY_PROBE_DEADLINE_SECONDS,
+            'cleanup_confirmed': True,
+        })
+        serialized = json.dumps(attestation, sort_keys=True)
+        self.assertNotIn('registry.example', serialized)
+        for address in PRIVATE_ADDRESSES.values():
+            self.assertNotIn(address, serialized)
+
+        self.assertEqual(len(execute.calls), 12)
+        cleanup_calls = [
+            (command, kwargs)
+            for command, kwargs in execute.calls
+            if 'DISTRIBUTED_DSB_DEFAULT_DENY_CLEANUP' in command
+        ]
+        self.assertEqual(len(cleanup_calls), 5)
+        self.assertEqual(execute.calls[:2], cleanup_calls[:2])
+        self.assertEqual(execute.calls[-2:], cleanup_calls[-2:])
+        for command, kwargs in cleanup_calls:
+            self.assertIn('--ignore-not-found=true', command)
+            self.assertIn('--ignore-not-found=true -o name', command)
+            self.assertIn('EXPECTED_IDENTITY=', command)
+            self.assertIn('{.metadata.uid}', command)
+            self.assertIn('"kind":"DeleteOptions"', command)
+            self.assertIn('"preconditions":{"uid":"%s"}', command)
+            self.assertIn('UID-preconditioned', command)
+            self.assertIn('--request DELETE', command)
+            self.assertIn('--noproxy "*"', command)
+            self.assertIn(
+                '/var/lib/rancher/k3s/server/tls/client-admin.crt',
+                command,
+            )
+            self.assertNotIn(' delete pod ', command)
+            self.assertIn(
+                'deathstarbench\\.io/qualification-probe',
+                command,
+            )
+            self.assertIn(
+                'deathstarbench\\.io/image-lock-fingerprint',
+                command,
+            )
+            self.assertIn(
+                'deathstarbench\\.io/image-set-revision',
+                command,
+            )
+            self.assertIn(
+                'deathstarbench\\.io/workload-revision',
+                command,
+            )
+            self.assertIn('dsb-cache', command)
+            self.assertIn('redis-default-deny-probe', command)
+            self.assertIn(image_reference, command)
+            self.assertIn(
+                'Refusing to delete a foreign network qualification probe Pod.',
+                command,
+            )
+            self.assertLess(
+                command.index('test "$ACTUAL_IDENTITY" = "$EXPECTED_IDENTITY"'),
+                command.index('DELETE_STATUS=$(sudo curl'),
+            )
+            self.assertEqual(kwargs, {
+                'timeout': 120,
+                'host_key': 'azure_dsb_control_public_ip',
+            })
+
+        tcp_calls = [
+            (command, kwargs)
+            for command, kwargs in execute.calls
+            if 'DISTRIBUTED_DSB_NETWORK_PATH' in command
+        ]
+        self.assertEqual(len(tcp_calls), 4)
+        for command, kwargs in tcp_calls:
+            self.assertIn(
+                f'timeout --foreground --signal=TERM '
+                f'{NETWORK_TCP_PROBE_TIMEOUT_SECONDS}s',
+                command,
+            )
+            self.assertIn('/dev/tcp/10.240.1.', command)
+            self.assertEqual(kwargs, {
+                'timeout': 15,
+                'host_key': 'azure_dsb_load_generator_public_ip',
+            })
+            self.assertNotIn('secret_stdin', kwargs)
+        self.assertIn('destination=application', tcp_calls[0][0])
+        self.assertIn('expectation=allow', tcp_calls[0][0])
+        for command, _ in tcp_calls[1:]:
+            self.assertIn('expectation=deny', command)
+            self.assertIn('case "$STATUS" in 1|124)', command)
+
+        positive_calls = [
+            (command, kwargs)
+            for command, kwargs in execute.calls
+            if 'DISTRIBUTED_DSB_POSITIVE_CONTROL ' in command
+        ]
+        self.assertEqual(len(positive_calls), 2)
+        self.assertEqual(positive_calls[0], positive_calls[1])
+        positive_command, positive_kwargs = positive_calls[0]
+        self.assertEqual(positive_kwargs['host_key'], 'azure_dsb_control_public_ip')
+        self.assertEqual(positive_kwargs['timeout'], 90)
+        self.assertNotIn('secret_stdin', positive_kwargs)
+        self.assertIn('test "$PHASE" = Succeeded', positive_command)
+        self.assertIn('test "$POD_LOG" = PONG', positive_command)
+        self.assertIn('test "$EXIT_CODE" = 0', positive_command)
+        self.assertIn('test "$ACTUAL_IMAGE" = "$EXPECTED_IMAGE"', positive_command)
+        self.assertIn('test -n "$STARTED_AT"', positive_command)
+        self.assertIn('test -n "$FINISHED_AT"', positive_command)
+        self.assertIn('test "$RESTARTS" = 0', positive_command)
+        self.assertIn('exceeded its observation bound', positive_command)
+        self.assertIn('tail -c 2048', positive_command)
+        positive_manifest = json.loads(positive_kwargs['stdin_text'])
+        self.assertEqual(
+            positive_manifest['metadata']['name'],
+            NETWORK_POLICY_POSITIVE_CONTROL_POD,
+        )
+        self.assertEqual(
+            positive_manifest['metadata']['labels'],
+            {
+                'deathstarbench.io/qualification-probe': 'allowed-control',
+                'app.kubernetes.io/component': 'home-timeline-service',
+            },
+        )
+        self.assertNotIn(
+            'app.kubernetes.io/name',
+            positive_manifest['metadata']['labels'],
+        )
+        self.assertEqual(positive_manifest['spec']['nodeName'], 'dsb-cache')
+        self.assertEqual(
+            positive_manifest['spec']['readinessGates'],
+            [{'conditionType': 'deathstarbench.io/positive-control-ready'}],
+        )
+        self.assertEqual(
+            positive_manifest['spec']['containers'][0]['image'],
+            image_reference,
+        )
+        positive_probe_command = (
+            positive_manifest['spec']['containers'][0]['command']
+        )
+        self.assertEqual(positive_probe_command[:2], ['/bin/sh', '-c'])
+        self.assertEqual(len(positive_probe_command), 3)
+        positive_probe_script = positive_probe_command[2]
+        subprocess.run(
+            ['sh', '-n'],
+            input=positive_probe_script,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertIn(
+            f'while test "$ATTEMPT" -le '
+            f'{NETWORK_POLICY_POSITIVE_ATTEMPT_LIMIT}',
+            positive_probe_script,
+        )
+        self.assertIn(
+            f'sleep {NETWORK_POLICY_POSITIVE_RETRY_INTERVAL_SECONDS}',
+            positive_probe_script,
+        )
+        self.assertIn(
+            f'-h {NETWORK_POLICY_PROBE_SERVICE} -p 6379 PING',
+            positive_probe_script,
+        )
+        self.assertIn('test "$LAST_RESPONSE" = PONG', positive_probe_script)
+        self.assertIn('printf "PONG\\n"; exit 0', positive_probe_script)
+        self.assertIn(
+            'DISTRIBUTED_DSB_POSITIVE_CONTROL_FAILED',
+            positive_probe_script,
+        )
+
+        pod_calls = [
+            (command, kwargs)
+            for command, kwargs in execute.calls
+            if 'DISTRIBUTED_DSB_DEFAULT_DENY ' in command
+            and 'CLEANUP' not in command
+        ]
+        self.assertEqual(len(pod_calls), 1)
+        pod_command, pod_kwargs = pod_calls[0]
+        self.assertEqual(
+            pod_kwargs['host_key'],
+            'azure_dsb_control_public_ip',
+        )
+        self.assertEqual(pod_kwargs['timeout'], 90)
+        self.assertNotIn('secret_stdin', pod_kwargs)
+        self.assertIn(image_reference, pod_command)
+        self.assertIn('for ATTEMPT in $(seq 1 40)', pod_command)
+        self.assertIn('--request-timeout=2s', pod_command)
+        self.assertIn('DeadlineExceeded:*) BLOCK_MODE=drop', pod_command)
+        self.assertIn(':Error) test "$EXIT_CODE" = 1', pod_command)
+        self.assertIn('test "$ACTUAL_IMAGE" = "$EXPECTED_IMAGE"', pod_command)
+        self.assertIn('test -n "$STARTED_AT"', pod_command)
+        self.assertIn('test -n "$FINISHED_AT"', pod_command)
+        self.assertIn('test "$RESTARTS" = 0', pod_command)
+        self.assertIn('exit status is invalid', pod_command)
+        self.assertIn('termination reason is invalid', pod_command)
+        self.assertIn('exceeded its observation bound', pod_command)
+        self.assertIn('block_mode=drop', pod_command)
+        self.assertIn('block_mode=reject', pod_command)
+        manifest = json.loads(pod_kwargs['stdin_text'])
+        self.assertEqual(manifest['kind'], 'Pod')
+        self.assertEqual(manifest['metadata']['name'], NETWORK_POLICY_PROBE_POD)
+        self.assertEqual(
+            manifest['metadata']['namespace'],
+            'deathstarbench-social',
+        )
+        spec = manifest['spec']
+        self.assertEqual(spec['nodeName'], 'dsb-cache')
+        self.assertEqual(
+            spec['activeDeadlineSeconds'],
+            NETWORK_POLICY_PROBE_DEADLINE_SECONDS,
+        )
+        self.assertFalse(spec['automountServiceAccountToken'])
+        self.assertEqual(spec['restartPolicy'], 'Never')
+        self.assertEqual(len(spec['containers']), 1)
+        container = spec['containers'][0]
+        self.assertEqual(container['image'], image_reference)
+        self.assertRegex(container['image'], r'@sha256:[0-9a-f]{64}$')
+        self.assertEqual(container['command'], [
+            '/bin/sh',
+            '-c',
+            f'sleep {NETWORK_POLICY_PROBE_SETTLE_SECONDS}; exec redis-cli '
+            f'-h {NETWORK_POLICY_PROBE_SERVICE} -p 6379 PING',
+        ])
+        positive_indexes = [
+            index for index, (command, _) in enumerate(execute.calls)
+            if 'DISTRIBUTED_DSB_POSITIVE_CONTROL ' in command
+        ]
+        negative_index = next(
+            index for index, (command, _) in enumerate(execute.calls)
+            if 'DISTRIBUTED_DSB_DEFAULT_DENY ' in command
+            and 'CLEANUP' not in command
+        )
+        between_cleanup_index = next(
+            index for index in range(positive_indexes[0] + 1, negative_index)
+            if 'DISTRIBUTED_DSB_DEFAULT_DENY_CLEANUP' in execute.calls[index][0]
+        )
+        self.assertLess(positive_indexes[0], between_cleanup_index)
+        self.assertLess(between_cleanup_index, negative_index)
+        self.assertLess(negative_index, positive_indexes[1])
+        self.assertIsNone(execute.probe_state)
+        self.assertIsNone(execute.positive_probe_state)
+        self.assertEqual(execute.delete_count, 3)
+
+    def test_exact_interrupted_probe_is_adopted_for_cleanup(self):
+        job, lock = self.ready_workload_job()
+        execute = NetworkQualificationExecutor(initial_probe='exact')
+
+        attestation = qualify_distributed_network_paths(
+            job,
+            lock,
+            execute=execute,
+        )
+
+        self.assertTrue(attestation['default_deny_path']['cleanup_confirmed'])
+        self.assertTrue(all(
+            control['cleanup_confirmed']
+            for control in attestation['policy_positive_controls']
+        ))
+        self.assertEqual(execute.cleanup_count, 5)
+        self.assertEqual(execute.delete_count, 4)
+        self.assertIsNone(execute.probe_state)
+        self.assertIsNone(execute.positive_probe_state)
+
+    def test_first_positive_control_failure_prevents_negative_probe(self):
+        job, lock = self.ready_workload_job()
+        execute = NetworkQualificationExecutor(
+            fail_positive_attempt=1,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, 'positive control failure'):
+            qualify_distributed_network_paths(
+                job,
+                lock,
+                execute=execute,
+            )
+
+        self.assertFalse(any(
+            'DISTRIBUTED_DSB_DEFAULT_DENY pod=' in command
+            for command, _ in execute.calls
+        ))
+        self.assertEqual(execute.positive_attempt_count, 1)
+        self.assertEqual(execute.cleanup_count, 4)
+        self.assertIsNone(execute.probe_state)
+        self.assertIsNone(execute.positive_probe_state)
+
+    def test_second_positive_control_failure_rejects_negative_attestation(self):
+        job, lock = self.ready_workload_job()
+        execute = NetworkQualificationExecutor(fail_positive_attempt=2)
+
+        with self.assertRaisesRegex(RuntimeError, 'positive control failure'):
+            qualify_distributed_network_paths(
+                job,
+                lock,
+                execute=execute,
+            )
+
+        self.assertEqual(execute.negative_attempt_count, 1)
+        self.assertEqual(execute.positive_attempt_count, 2)
+        self.assertEqual(execute.cleanup_count, 5)
+        self.assertIsNone(execute.probe_state)
+        self.assertIsNone(execute.positive_probe_state)
+
+    def test_reject_is_an_accepted_default_deny_result(self):
+        job, lock = self.ready_workload_job()
+        execute = NetworkQualificationExecutor(negative_mode='reject')
+
+        attestation = qualify_distributed_network_paths(
+            job,
+            lock,
+            execute=execute,
+        )
+
+        self.assertEqual(attestation['default_deny_path']['block_mode'], 'reject')
+        self.assertEqual(
+            [control['position'] for control in attestation['policy_positive_controls']],
+            ['before_negative', 'after_negative'],
+        )
+
+    def test_negative_probe_success_is_bracketed_then_rejected(self):
+        job, lock = self.ready_workload_job()
+        execute = NetworkQualificationExecutor(negative_mode='success')
+
+        with self.assertRaisesRegex(RuntimeError, 'reached Redis'):
+            qualify_distributed_network_paths(
+                job,
+                lock,
+                execute=execute,
+            )
+
+        self.assertEqual(execute.negative_attempt_count, 1)
+        self.assertEqual(execute.positive_attempt_count, 2)
+        self.assertEqual(execute.cleanup_count, 5)
+        self.assertIsNone(execute.probe_state)
+        self.assertIsNone(execute.positive_probe_state)
+
+    def test_invalid_negative_exit_or_reason_is_bracketed_then_rejected(self):
+        job, lock = self.ready_workload_job()
+        for mode, message in (
+            ('invalid_exit', 'exit status is invalid'),
+            ('invalid_reason', 'termination reason is invalid'),
+        ):
+            with self.subTest(mode=mode):
+                execute = NetworkQualificationExecutor(negative_mode=mode)
+                with self.assertRaisesRegex(RuntimeError, message):
+                    qualify_distributed_network_paths(
+                        copy.deepcopy(job),
+                        lock,
+                        execute=execute,
+                    )
+                self.assertEqual(execute.negative_attempt_count, 1)
+                self.assertEqual(execute.positive_attempt_count, 2)
+                self.assertEqual(execute.cleanup_count, 5)
+                self.assertIsNone(execute.probe_state)
+                self.assertIsNone(execute.positive_probe_state)
+
+    def test_cleanup_delete_is_bound_to_the_validated_pod_uid(self):
+        command, marker = _network_policy_probe_cleanup_command(
+            cache_node_name='dsb-cache',
+            image_reference=(
+                'registry.example/deathstarbench/redis@sha256:' + 'b' * 64
+            ),
+            image_lock_fingerprint='sha256:' + 'a' * 64,
+        )
+
+        self.assertIn(NETWORK_POLICY_PROBE_POD, marker)
+        self.assertIn('{.metadata.uid}', command)
+        self.assertIn(
+            '"preconditions":{"uid":"%s"}',
+            command,
+        )
+        self.assertIn('--request DELETE', command)
+        self.assertIn(
+            'test "$CURRENT_UID" = "$POD_UID"',
+            command,
+        )
+        self.assertIn(
+            'A foreign Pod replaced the network probe during cleanup.',
+            command,
+        )
+        self.assertNotIn(' delete pod ', command)
+        self.assertLess(
+            command.index('ACTUAL_IDENTITY=${OBSERVED_IDENTITY#*|}'),
+            command.index('DELETE_STATUS=$(sudo curl'),
+        )
+
+    def test_generated_network_probe_commands_are_valid_bash(self):
+        image_reference = (
+            'registry.example/deathstarbench/redis@sha256:' + 'b' * 64
+        )
+        image_digest = image_reference.rsplit('@', 1)[1]
+        fingerprint = 'sha256:' + 'a' * 64
+        positive_manifest = _network_policy_probe_manifest(
+            cache_node_name='dsb-cache',
+            image_reference=image_reference,
+            image_lock_fingerprint=fingerprint,
+            allowed=True,
+        )
+        negative_manifest = _network_policy_probe_manifest(
+            cache_node_name='dsb-cache',
+            image_reference=image_reference,
+            image_lock_fingerprint=fingerprint,
+        )
+        positive_command, _ = _network_policy_positive_control_command(
+            manifest_sha256=hashlib.sha256(
+                positive_manifest.encode('utf-8')
+            ).hexdigest(),
+            cache_node_name='dsb-cache',
+            image_reference=image_reference,
+            image_digest=image_digest,
+        )
+        negative_command, _ = _network_policy_probe_command(
+            manifest_sha256=hashlib.sha256(
+                negative_manifest.encode('utf-8')
+            ).hexdigest(),
+            cache_node_name='dsb-cache',
+            image_reference=image_reference,
+            image_digest=image_digest,
+        )
+        negative_cleanup, _ = _network_policy_probe_cleanup_command(
+            cache_node_name='dsb-cache',
+            image_reference=image_reference,
+            image_lock_fingerprint=fingerprint,
+        )
+        positive_cleanup, _ = _network_policy_probe_cleanup_command(
+            cache_node_name='dsb-cache',
+            image_reference=image_reference,
+            image_lock_fingerprint=fingerprint,
+            allowed=True,
+        )
+
+        for command in (
+            positive_command,
+            negative_command,
+            negative_cleanup,
+            positive_cleanup,
+        ):
+            with self.subTest(command=command[:80]):
+                subprocess.run(
+                    ['bash', '-n', '-c', command],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+
+    def test_foreign_probe_name_collision_refuses_without_delete(self):
+        job, lock = self.ready_workload_job()
+        execute = NetworkQualificationExecutor(initial_probe='foreign')
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            'Refusing to delete a foreign network qualification probe Pod',
+        ):
+            qualify_distributed_network_paths(
+                job,
+                lock,
+                execute=execute,
+            )
+
+        self.assertEqual(execute.cleanup_count, 4)
+        self.assertEqual(execute.delete_count, 0)
+        self.assertEqual(execute.probe_state, 'foreign')
+        self.assertTrue(all(
+            'DISTRIBUTED_DSB_DEFAULT_DENY_CLEANUP' in command
+            for command, _ in execute.calls
+        ))
+
+    def test_identical_probe_contract_dispatches_through_gcp_plan(self):
+        job, lock = self.ready_workload_job(provider='gcp')
+        execute = NetworkQualificationExecutor()
+
+        attestation = qualify_distributed_network_paths(
+            job,
+            lock,
+            execute=execute,
+        )
+
+        self.assertEqual(attestation['provider'], 'gcp')
+        self.assertEqual(
+            [path['destination_role'] for path in attestation['forbidden_paths']],
+            ['control', 'database', 'cache'],
+        )
+        tcp_calls = [
+            kwargs
+            for command, kwargs in execute.calls
+            if 'DISTRIBUTED_DSB_NETWORK_PATH' in command
+        ]
+        self.assertEqual(tcp_calls, [
+            {'timeout': 15, 'host_key': 'gcp_dsb_load_generator_public_ip'},
+        ] * 4)
+        control_calls = [
+            kwargs
+            for command, kwargs in execute.calls
+            if 'DISTRIBUTED_DSB_DEFAULT_DENY' in command
+        ]
+        self.assertEqual(len(control_calls), 6)
+        self.assertTrue(all(
+            kwargs['host_key'] == 'gcp_dsb_control_public_ip'
+            for kwargs in control_calls
+        ))
+        positive_calls = [
+            kwargs
+            for command, kwargs in execute.calls
+            if 'DISTRIBUTED_DSB_POSITIVE_CONTROL' in command
+        ]
+        self.assertEqual(positive_calls, [{
+            'timeout': 90,
+            'stdin_text': mock.ANY,
+            'host_key': 'gcp_dsb_control_public_ip',
+        }] * 2)
+
+    def test_requires_exact_workload_ready_before_any_remote_probe(self):
+        job = candidate_job()
+        prepare_azure_distributed_k3s_candidate(
+            job,
+            execute=FakeRemoteExecutor(),
+        )
+        execute = NetworkQualificationExecutor()
+
+        with self.assertRaisesRegex(
+            DistributedRuntimeError,
+            'must be workload_ready',
+        ):
+            qualify_distributed_network_paths(
+                job,
+                candidate_image_lock(),
+                execute=execute,
+            )
+
+        self.assertEqual(execute.calls, [])
+
+    def test_changed_or_unpinned_lock_fails_before_any_remote_probe(self):
+        job, lock = self.ready_workload_job()
+        changed = copy.deepcopy(lock)
+        changed['platforms']['linux/amd64']['images']['redis'] = (
+            'registry.example/deathstarbench/redis:latest'
+        )
+        execute = NetworkQualificationExecutor()
+
+        with self.assertRaisesRegex(
+            DistributedRuntimeError,
+            'workload bundle is invalid',
+        ):
+            qualify_distributed_network_paths(
+                job,
+                changed,
+                execute=execute,
+            )
+
+        self.assertEqual(execute.calls, [])
+
+    def test_underlay_failure_still_confirms_probe_pod_absence_in_finally(self):
+        job, lock = self.ready_workload_job()
+        execute = NetworkQualificationExecutor(fail_on='destination=database')
+
+        with self.assertRaisesRegex(RuntimeError, 'network probe failure'):
+            qualify_distributed_network_paths(
+                job,
+                lock,
+                execute=execute,
+            )
+
+        cleanup_calls = [
+            call for call in execute.calls
+            if 'DISTRIBUTED_DSB_DEFAULT_DENY_CLEANUP' in call[0]
+        ]
+        self.assertEqual(len(cleanup_calls), 4)
+        self.assertEqual(execute.calls[-1], cleanup_calls[-1])
+        self.assertFalse(any(
+            'stdin_text' in kwargs for _, kwargs in execute.calls
+        ))
+
+    def test_pod_probe_failure_is_cleaned_and_confirmed_absent(self):
+        job, lock = self.ready_workload_job()
+        execute = NetworkQualificationExecutor(
+            fail_on='DISTRIBUTED_DSB_DEFAULT_DENY pod=',
+        )
+
+        with self.assertRaisesRegex(RuntimeError, 'network probe failure'):
+            qualify_distributed_network_paths(
+                job,
+                lock,
+                execute=execute,
+            )
+
+        self.assertEqual(sum(
+            'stdin_text' in kwargs for _, kwargs in execute.calls
+        ), 3)
+        self.assertIn(
+            'DISTRIBUTED_DSB_DEFAULT_DENY_CLEANUP',
+            execute.calls[-1][0],
+        )
+        self.assertEqual(execute.positive_attempt_count, 2)
+        self.assertEqual(execute.cleanup_count, 5)
+
+    def test_duplicate_probe_marker_is_rejected_then_cleanup_runs(self):
+        job, lock = self.ready_workload_job()
+        execute = NetworkQualificationExecutor(
+            duplicate_on='destination=control',
+        )
+
+        with self.assertRaisesRegex(
+            DistributedRuntimeError,
+            'one exact marker',
+        ):
+            qualify_distributed_network_paths(
+                job,
+                lock,
+                execute=execute,
+            )
+
+        self.assertEqual(execute.cleanup_count, 4)
+        self.assertIn(
+            'DISTRIBUTED_DSB_DEFAULT_DENY_CLEANUP',
+            execute.calls[-1][0],
+        )
+
+    def test_final_absence_proof_is_mandatory(self):
+        job, lock = self.ready_workload_job()
+        execute = NetworkQualificationExecutor(fail_final_cleanup=True)
+
+        with self.assertRaisesRegex(RuntimeError, 'final cleanup failure'):
+            qualify_distributed_network_paths(
+                job,
+                lock,
+                execute=execute,
+            )
+
+        self.assertEqual(execute.cleanup_count, 5)
+        self.assertIn(
+            'DISTRIBUTED_DSB_DEFAULT_DENY_CLEANUP',
+            execute.calls[-1][0],
+        )
 
 
 if __name__ == '__main__':

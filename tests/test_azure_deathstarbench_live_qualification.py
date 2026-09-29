@@ -141,6 +141,7 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
             measure=False,
             interrupt_at=None,
             interrupt_mode=None,
+            inject_initializer_response_loss=False,
             warmup_seconds=30,
             duration_seconds=60,
             threads=4,
@@ -201,6 +202,7 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
 
     def test_success_requires_both_journals_then_cleans_up(self):
         job = self.job()
+        network_attestation = {'schema_version': 1, 'provider': 'azure'}
 
         def ready_runtime(current, **_kwargs):
             current['resources'][K3S_RUNTIME_JOURNAL_KEY] = {
@@ -250,6 +252,11 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
                 'prepare_azure_distributed_social_network_candidate',
                 side_effect=ready_workload,
             ),
+            mock.patch.object(
+                qualification,
+                'qualify_distributed_network_paths',
+                return_value=network_attestation,
+            ) as network_gate,
             mock.patch.object(qualification, '_event'),
             mock.patch.object(
                 qualification.application,
@@ -265,9 +272,67 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         cleanup.assert_called_once_with(job)
+        network_gate.assert_called_once_with(
+            job,
+            {},
+            execute=qualification.application.ssh,
+            emit=mock.ANY,
+        )
+        self.assertEqual(
+            job['resources'][
+                qualification.DISTRIBUTED_NETWORK_QUALIFICATION_KEY
+            ],
+            network_attestation,
+        )
         measurement.assert_not_called()
         report.assert_not_called()
         self.assertNotIn('error', job)
+
+    def test_network_attestation_is_persisted_once_and_drift_is_refused(self):
+        job = self.job()
+        image_lock = {'lock': 'candidate'}
+        original = {'schema_version': 1, 'provider': 'azure'}
+        drifted = {'schema_version': 1, 'provider': 'gcp'}
+
+        with (
+            mock.patch.object(
+                qualification,
+                'qualify_distributed_network_paths',
+                side_effect=(original, dict(original), drifted),
+            ) as network_gate,
+            mock.patch.object(qualification, '_persist') as persist,
+        ):
+            self.assertEqual(
+                qualification._qualify_and_persist_network_paths(
+                    job,
+                    image_lock,
+                ),
+                original,
+            )
+            self.assertEqual(
+                qualification._qualify_and_persist_network_paths(
+                    job,
+                    image_lock,
+                ),
+                original,
+            )
+            with self.assertRaisesRegex(
+                qualification.QualificationError,
+                'evidence drifted',
+            ):
+                qualification._qualify_and_persist_network_paths(
+                    job,
+                    image_lock,
+                )
+
+        self.assertEqual(network_gate.call_count, 3)
+        persist.assert_called_once_with(job)
+        self.assertEqual(
+            job['resources'][
+                qualification.DISTRIBUTED_NETWORK_QUALIFICATION_KEY
+            ],
+            original,
+        )
 
     def test_workload_options_are_embedded_in_the_candidate_plan(self):
         args = self.args()
@@ -338,6 +403,7 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
     def test_measurement_runs_once_and_requires_complete_report_artifacts(self):
         args = self.args()
         args.measure = True
+        args.inject_initializer_response_loss = True
         job = self.job()
         image_lock = {'lock': 'candidate'}
         plan = SimpleNamespace(
@@ -359,10 +425,40 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
             }
 
         result = qualified_result()
+        operation_order = []
+        network_attestation = {'schema_version': 1, 'provider': 'azure'}
 
-        def measure(current, actual_plan, actual_lock):
+        def qualify_network(current, actual_lock, **_kwargs):
+            self.assertIs(current, job)
+            self.assertIs(actual_lock, image_lock)
+            self.assertEqual(
+                current['resources'][K3S_RUNTIME_JOURNAL_KEY]['state'],
+                'cluster_ready',
+            )
+            self.assertEqual(
+                current['resources'][DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY]['state'],
+                'workload_ready',
+            )
+            operation_order.append('network_gate')
+            return network_attestation
+
+        def measure(
+            current,
+            actual_plan,
+            actual_lock,
+            *,
+            qualification_inject_initializer_response_loss,
+        ):
             self.assertIs(actual_plan, plan)
             self.assertIs(actual_lock, image_lock)
+            self.assertTrue(qualification_inject_initializer_response_loss)
+            self.assertEqual(
+                current['resources'][
+                    qualification.DISTRIBUTED_NETWORK_QUALIFICATION_KEY
+                ],
+                network_attestation,
+            )
+            operation_order.append('measurement')
             current['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
                 'state': 'measurement_complete',
                 'warmup_metrics': qualified_result(
@@ -424,6 +520,11 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
                     side_effect=ready_workload,
                 ),
                 mock.patch.object(
+                    qualification,
+                    'qualify_distributed_network_paths',
+                    side_effect=qualify_network,
+                ),
+                mock.patch.object(
                     qualification.application,
                     'run_azure_distributed_deathstarbench_candidate_measurement',
                     side_effect=measure,
@@ -444,7 +545,13 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
                 outcome = qualification._qualify(args)
 
         self.assertEqual(outcome, 0)
-        runner.assert_called_once_with(job, plan, image_lock)
+        self.assertEqual(operation_order, ['network_gate', 'measurement'])
+        runner.assert_called_once_with(
+            job,
+            plan,
+            image_lock,
+            qualification_inject_initializer_response_loss=True,
+        )
         report.assert_called_once_with(job)
         cleanup.assert_called_once_with(job)
         self.assertTrue(job['_persist_results_artifact'])
@@ -1072,6 +1179,25 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
                 '--interrupt-at', 'warmup_started',
                 '--warmup-seconds', '0',
             ),
+            (
+                '--image-lock', 'lock.json',
+                '--inject-initializer-response-loss',
+            ),
+            (
+                '--image-lock', 'lock.json', '--measure',
+                '--inject-initializer-response-loss',
+                '--interrupt-at', 'initialization_started',
+                '--interrupt-mode', 'hard',
+            ),
+            (
+                '--image-lock', 'lock.json', '--measure',
+                '--inject-initializer-response-loss',
+                '--interrupt-at', 'initialization_started',
+            ),
+            (
+                '--cleanup-only', 'abc123def456', '--measure',
+                '--inject-initializer-response-loss',
+            ),
         )
         for argv in invalid:
             with self.subTest(argv=argv):
@@ -1102,6 +1228,13 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
                         qualification._effective_interrupt_mode(args),
                         mode,
                     )
+
+        response_loss = qualification._parser().parse_args((
+            '--image-lock', 'lock.json', '--measure',
+            '--inject-initializer-response-loss',
+        ))
+        qualification._validate_interruption_options(response_loss)
+        self.assertTrue(response_loss.inject_initializer_response_loss)
 
         with self.assertRaises(SystemExit):
             qualification._parser().parse_args((
@@ -1499,6 +1632,11 @@ raise AssertionError('hard exit unexpectedly returned')
                     side_effect=ready_workload,
                 ),
                 mock.patch.object(
+                    qualification,
+                    'qualify_distributed_network_paths',
+                    return_value={'schema_version': 1, 'provider': 'azure'},
+                ),
+                mock.patch.object(
                     qualification.application,
                     'run_azure_distributed_deathstarbench_candidate_measurement',
                     side_effect=measure,
@@ -1612,6 +1750,11 @@ raise AssertionError('hard exit unexpectedly returned')
                     side_effect=ready_workload,
                 ),
                 mock.patch.object(
+                    qualification,
+                    'qualify_distributed_network_paths',
+                    return_value={'schema_version': 1, 'provider': 'azure'},
+                ),
+                mock.patch.object(
                     qualification.application,
                     'run_azure_distributed_deathstarbench_candidate_measurement',
                     return_value={},
@@ -1684,6 +1827,104 @@ raise AssertionError('hard exit unexpectedly returned')
         self.assertEqual(outcome, 1)
         self.assertEqual(evidence['cleanup_outcome'], 'completed')
         self.assertEqual(evidence['recovery_outcome'], 'resume_refused')
+
+    def test_run_records_signal_delivered_during_final_evidence_update(self):
+        job = self.job()
+        job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
+            'state': 'load_generator_ready'
+        }
+        image_lock = {'lock': 'candidate'}
+
+        def ready_runtime(current, **_kwargs):
+            current['resources'][K3S_RUNTIME_JOURNAL_KEY] = {
+                'state': 'cluster_ready'
+            }
+
+        def ready_workload(current, _lock, **_kwargs):
+            current['resources'][DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY] = {
+                'state': 'workload_ready'
+            }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            runs = Path(temporary)
+            (runs / job['id']).mkdir()
+            with mock.patch.object(qualification.application, 'RUNS', runs):
+                qualification._record_checkpoint_interruption(
+                    job,
+                    'load_generator_ready',
+                    mode='hard',
+                )
+                origin = qualification._read_interruption_evidence(job['id'])
+                real_update = (
+                    qualification.shared._update_interruption_evidence
+                )
+                update_calls = 0
+
+                def signal_during_update(*args, **kwargs):
+                    nonlocal update_calls
+                    update_calls += 1
+                    if update_calls == 1:
+                        os.kill(os.getpid(), signal.SIGTERM)
+                    return real_update(*args, **kwargs)
+
+                with (
+                    mock.patch.object(
+                        qualification.azure,
+                        'provision_distributed_deathstarbench_candidate',
+                    ),
+                    mock.patch.object(
+                        qualification,
+                        'prepare_azure_distributed_k3s_candidate',
+                        side_effect=ready_runtime,
+                    ),
+                    mock.patch.object(
+                        qualification,
+                        'prepare_azure_distributed_social_network_candidate',
+                        side_effect=ready_workload,
+                    ),
+                    mock.patch.object(
+                        qualification,
+                        'qualify_distributed_network_paths',
+                        return_value={
+                            'schema_version': 1,
+                            'provider': 'azure',
+                        },
+                    ),
+                    mock.patch.object(qualification, '_cleanup', return_value=True),
+                    mock.patch.object(qualification, '_event'),
+                    mock.patch.object(qualification, '_set_status'),
+                    mock.patch.object(qualification, '_persist'),
+                    mock.patch.object(qualification.shared, '_persist'),
+                    mock.patch.object(
+                        qualification.shared,
+                        '_update_interruption_evidence',
+                        side_effect=signal_during_update,
+                    ),
+                ):
+                    outcome = qualification._run_qualification(
+                        job,
+                        lambda: (
+                            object(),
+                            {'public_key': 'public'},
+                            image_lock,
+                        ),
+                    )
+                evidence = qualification._read_interruption_evidence(job['id'])
+
+        self.assertEqual(outcome, 128 + signal.SIGTERM)
+        self.assertGreaterEqual(update_calls, 2)
+        for field in (
+            'source',
+            'mode',
+            'checkpoint',
+            'signal',
+            'execution_state',
+            'replay_decision',
+            'requested_at',
+        ):
+            self.assertEqual(evidence[field], origin[field])
+        self.assertEqual(evidence['subsequent_signal'], 'SIGTERM')
+        self.assertEqual(evidence['cleanup_outcome'], 'completed')
 
     def test_sigint_and_sigterm_interrupt_blocked_control_plane_waits(self):
         for signum in (signal.SIGINT, signal.SIGTERM):
@@ -1832,6 +2073,11 @@ raise AssertionError('hard exit unexpectedly returned')
                     qualification,
                     'prepare_azure_distributed_social_network_candidate',
                     side_effect=ready_workload,
+                ),
+                mock.patch.object(
+                    qualification,
+                    'qualify_distributed_network_paths',
+                    return_value={'schema_version': 1, 'provider': 'azure'},
                 ),
                 mock.patch.object(
                     qualification,
@@ -1985,6 +2231,10 @@ raise AssertionError('hard exit unexpectedly returned')
             'provider': 'azure',
             'region': 'eastus2',
             'architecture': 'arm64',
+            qualification.DISTRIBUTED_NETWORK_QUALIFICATION_KEY: {
+                'schema_version': 1,
+                'provider': 'azure',
+            },
         }
 
         def set_status(current, status):

@@ -5225,6 +5225,7 @@ def run_azure_distributed_deathstarbench_candidate_measurement(
     image_lock,
     *,
     qualification_checkpoint=None,
+    qualification_inject_initializer_response_loss=False,
 ):
     """Internal one-shot measurement hook for the unreleased candidate.
 
@@ -5248,6 +5249,9 @@ def run_azure_distributed_deathstarbench_candidate_measurement(
         emit=event,
         persist=persist_job_state,
         qualification_checkpoint=qualification_checkpoint,
+        qualification_inject_initializer_response_loss=(
+            qualification_inject_initializer_response_loss
+        ),
     )
 
 
@@ -5286,6 +5290,7 @@ def run_gcp_distributed_deathstarbench_candidate_measurement(
     image_lock,
     *,
     qualification_checkpoint=None,
+    qualification_inject_initializer_response_loss=False,
 ):
     """Internal GCP one-shot measurement hook for live qualification."""
 
@@ -5303,6 +5308,9 @@ def run_gcp_distributed_deathstarbench_candidate_measurement(
         emit=event,
         persist=persist_job_state,
         qualification_checkpoint=qualification_checkpoint,
+        qualification_inject_initializer_response_loss=(
+            qualification_inject_initializer_response_loss
+        ),
     )
 
 

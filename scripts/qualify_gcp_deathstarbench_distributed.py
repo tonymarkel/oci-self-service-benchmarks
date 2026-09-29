@@ -10,12 +10,11 @@ never dispatched by the public API/UI release path.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
 import os
 from pathlib import Path
 import signal
 import sys
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Mapping
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -31,8 +30,10 @@ from app.deathstarbench_contract import (
     K3S_RUNTIME_JOURNAL_KEY,
 )
 from app.deathstarbench_distributed import (
+    DISTRIBUTED_NETWORK_QUALIFICATION_KEY,
     prepare_distributed_k3s_candidate,
     prepare_distributed_social_network_candidate,
+    qualify_distributed_network_paths,
 )
 from app.deathstarbench_distributed_measurement import (
     run_distributed_social_network_measurement,
@@ -40,7 +41,7 @@ from app.deathstarbench_distributed_measurement import (
 from app.models import BenchmarkPlan
 from app.providers import gcp
 from app.resource_inventory import ROLE_NODE_INVENTORY_KEY
-from scripts import qualify_azure_deathstarbench_distributed as shared
+from scripts import qualify_deathstarbench_distributed_shared as shared
 
 
 QualificationError = shared.QualificationError
@@ -57,6 +58,11 @@ _CLEANUP_METADATA_KEYS = frozenset({
     K3S_RUNTIME_JOURNAL_KEY,
     DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
     DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+})
+# This is retained qualification evidence, not cloud ownership. Cleanup must
+# ignore it after GCP-owned resources have been proved absent.
+_RETAINED_NON_CLOUD_EVIDENCE_KEYS = frozenset({
+    DISTRIBUTED_NETWORK_QUALIFICATION_KEY,
 })
 
 
@@ -116,6 +122,15 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             'Use cooperative cleanup (graceful) or intentionally terminate '
             'the harness process (hard). Requires --measure and --interrupt-at.'
+        ),
+    )
+    parser.add_argument(
+        '--inject-initializer-response-loss',
+        action='store_true',
+        help=(
+            'Qualification-only simulation of a lost initializer response '
+            'after the durable remote dispatch is accepted; reconciliation '
+            'remains read-only. Requires --measure.'
         ),
     )
     parser.add_argument(
@@ -250,11 +265,7 @@ def _load_candidate_job(job_id: str) -> dict[str, Any]:
     return job
 
 
-@contextmanager
-def _exclusive_job_lock(job_id: str) -> Iterator[None]:
-    lease = shared._acquire_job_lease(job_id)
-    with lease:
-        yield
+_exclusive_job_lock = shared._exclusive_job_lock
 
 
 def _require_resumable(
@@ -262,35 +273,44 @@ def _require_resumable(
     *,
     measure: bool = False,
 ) -> None:
-    job_id = str(job['id'])
-    if job.get('status') in shared.RESUME_TEARDOWN_STATUSES:
+    shared._require_resumable(
+        job,
+        provider_name='GCP',
+        measure=measure,
+    )
+
+
+def _qualify_and_persist_network_paths(
+    job: dict[str, Any],
+    image_lock: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Run the live network gate and durably retain its immutable evidence."""
+
+    attestation = qualify_distributed_network_paths(
+        job,
+        image_lock,
+        execute=application.ssh,
+        emit=shared._event,
+    )
+    if not isinstance(attestation, dict):
         raise QualificationError(
-            f'Qualification job {job_id} is already in '
-            f'{job.get("status")!r}; use --cleanup-only {job_id} instead.'
-        )
-    if not job.get('resources'):
-        raise QualificationError(
-            f'Qualification job {job_id} has no recoverable GCP resources.'
+            'Distributed network qualification returned malformed evidence.'
         )
     resources = job.get('resources')
-    execution = (
-        resources.get(DEATHSTARBENCH_EXECUTION_JOURNAL_KEY)
-        if isinstance(resources, Mapping)
-        else None
-    )
-    if execution is None:
-        return
-    if not measure:
+    if not isinstance(resources, dict):
         raise QualificationError(
-            f'Qualification job {job_id} already has a one-shot measurement '
-            'journal; refusing to resume it as workload-only.'
+            'Distributed network qualification lost mutable resource state.'
         )
-    state = execution.get('state') if isinstance(execution, Mapping) else None
-    if state not in SAFE_MEASUREMENT_RESUME_STATES:
-        raise QualificationError(
-            f'Qualification job {job_id} measurement state {state!r} is not '
-            'safe to resume; use --cleanup-only instead.'
-        )
+    if DISTRIBUTED_NETWORK_QUALIFICATION_KEY in resources:
+        if resources[DISTRIBUTED_NETWORK_QUALIFICATION_KEY] != attestation:
+            raise QualificationError(
+                'Persisted distributed network qualification evidence drifted '
+                'from the live attestation.'
+            )
+        return attestation
+    resources[DISTRIBUTED_NETWORK_QUALIFICATION_KEY] = attestation
+    shared._persist(job)
+    return attestation
 
 
 def _cleanup(job: dict[str, Any]) -> bool:
@@ -306,7 +326,8 @@ def _cleanup(job: dict[str, Any]) -> bool:
         ownership_keys = sorted(
             key
             for key in resources
-            if key.startswith('gcp_') or key in _CLEANUP_METADATA_KEYS
+            if key not in _RETAINED_NON_CLOUD_EVIDENCE_KEYS
+            and (key.startswith('gcp_') or key in _CLEANUP_METADATA_KEYS)
         )
     else:
         ownership_keys = ['<malformed resources>']
@@ -331,42 +352,76 @@ def _cleanup_only(job_id: str) -> int:
     _load_candidate_job(job_id)
     with _exclusive_job_lock(job_id):
         job = _load_candidate_job(job_id)
-        evidence_error: Exception | None = None
-        try:
-            if shared._read_interruption_evidence(job_id) is not None:
-                shared._update_interruption_evidence(
-                    job,
-                    recovery_outcome='cleanup_only_started',
-                )
-        except Exception as exc:
-            evidence_error = exc
-            print(
-                f'Unable to update interruption recovery evidence: {exc}',
-                file=sys.stderr,
-                flush=True,
-            )
-        cleanup_complete = _cleanup(job)
-        try:
-            if shared._read_interruption_evidence(job_id) is not None:
-                shared._update_interruption_evidence(
-                    job,
-                    cleanup_outcome=(
-                        'completed' if cleanup_complete else 'failed'
-                    ),
-                    recovery_outcome=(
-                        'cleanup_completed'
-                        if cleanup_complete
-                        else 'cleanup_failed'
-                    ),
-                )
-        except Exception as exc:
-            evidence_error = evidence_error or exc
-            print(
-                f'Unable to finalize interruption recovery evidence: {exc}',
-                file=sys.stderr,
-                flush=True,
-            )
-        return 0 if cleanup_complete and evidence_error is None else 2
+        cleanup_complete = False
+        evidence_error: BaseException | None = None
+        with shared._cooperative_signal_handlers(job) as signal_state:
+            try:
+                try:
+                    if shared._read_interruption_evidence(job_id) is not None:
+                        shared._update_interruption_evidence(
+                            job,
+                            recovery_outcome='cleanup_only_started',
+                        )
+                except Exception as exc:
+                    evidence_error = exc
+                    print(
+                        'Unable to update interruption recovery evidence: '
+                        f'{exc}',
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                cleanup_complete = _cleanup(job)
+            except application.RunCancelled:
+                if not cleanup_complete:
+                    job['cleanup_error'] = (
+                        'GCP cleanup-only was interrupted by an '
+                        'operating-system signal; recoverable ownership was '
+                        'retained for another --cleanup-only attempt.'
+                    )
+                    shared._set_status(job, 'cleanup_failed')
+                    print(job['cleanup_error'], file=sys.stderr, flush=True)
+            finally:
+                signal_state['raise_cancel'] = False
+                signum = signal_state['number']
+                if signum is not None:
+                    shared._mark_interrupted_unless_benchmark_is_terminal(job)
+                    try:
+                        shared._record_signal_interruption(job, signum)
+                        signal_state['evidence_recorded'] = True
+                    except BaseException as exc:
+                        evidence_error = evidence_error or exc
+                        print(
+                            'Unable to retain signal interruption evidence: '
+                            f'{exc}',
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    shared._persist(job)
+                try:
+                    shared._finalize_interruption_evidence_signal_aware(
+                        job,
+                        signal_state,
+                        cleanup_outcome=(
+                            'completed' if cleanup_complete else 'failed'
+                        ),
+                        recovery_outcome=(
+                            'cleanup_completed'
+                            if cleanup_complete
+                            else 'cleanup_failed'
+                        ),
+                    )
+                except BaseException as exc:
+                    evidence_error = evidence_error or exc
+                    print(
+                        'Unable to finalize interruption recovery evidence: '
+                        f'{exc}',
+                        file=sys.stderr,
+                        flush=True,
+                    )
+        if not cleanup_complete or evidence_error is not None:
+            return 2
+        signum = signal_state['number']
+        return 128 + signum if signum is not None else 0
 
 
 def _run_qualification(
@@ -379,6 +434,7 @@ def _run_qualification(
     measure: bool = False,
     interrupt_at: str | None = None,
     interrupt_mode: str | None = None,
+    inject_initializer_response_loss: bool = False,
     recovery_attempt: bool = False,
 ) -> int:
     failure: BaseException | None = None
@@ -412,6 +468,7 @@ def _run_qualification(
             if measure:
                 job['_persist_results_artifact'] = True
             shared._set_status(job, 'provisioning')
+            application.raise_if_cancelled(job)
             gcp.provision_distributed_deathstarbench_candidate(
                 job,
                 plan,
@@ -446,6 +503,9 @@ def _run_qualification(
                 raise QualificationError(
                     'GCP candidate did not reach both exact readiness boundaries.'
                 )
+            application.raise_if_cancelled(job)
+            _qualify_and_persist_network_paths(job, image_lock)
+            application.raise_if_cancelled(job)
             if measure:
                 measurement_kwargs = {}
                 if interrupt_at is not None:
@@ -459,6 +519,11 @@ def _run_qualification(
                             interrupt_mode=interrupt_mode,
                         )
                     )
+                if inject_initializer_response_loss:
+                    measurement_kwargs[
+                        'qualification_inject_initializer_response_loss'
+                    ] = True
+                application.raise_if_cancelled(job)
                 result = run_distributed_social_network_measurement(
                     job,
                     image_lock,
@@ -470,6 +535,7 @@ def _run_qualification(
                 )
                 application.raise_if_cancelled(job)
                 shared._require_qualified_measurement_result(job, plan, result)
+                application.raise_if_cancelled(job)
                 shared._write_and_require_report(job)
                 application.raise_if_cancelled(job)
             qualified = True
@@ -513,6 +579,7 @@ def _run_qualification(
                     shared._persist(job)
                 try:
                     shared._record_signal_interruption(job, signum)
+                    signal_state['evidence_recorded'] = True
                 except BaseException as evidence_error:
                     if failure is None:
                         failure = evidence_error
@@ -536,6 +603,7 @@ def _run_qualification(
                 shared._set_status(job, 'cleanup_failed')
                 print(job['cleanup_error'], file=sys.stderr, flush=True)
 
+            signal_state['raise_cancel'] = False
             final_signum = signal_state['number']
             if final_signum is not None and signum is None:
                 shared._mark_interrupted_unless_benchmark_is_terminal(job)
@@ -546,6 +614,7 @@ def _run_qualification(
                     )
                 try:
                     shared._record_signal_interruption(job, final_signum)
+                    signal_state['evidence_recorded'] = True
                 except BaseException as evidence_error:
                     if failure is None:
                         failure = evidence_error
@@ -557,25 +626,22 @@ def _run_qualification(
                     )
                 shared._persist(job)
             try:
-                existing_evidence = shared._read_interruption_evidence(
-                    str(job['id'])
+                recovery_outcome = None
+                if recovery_attempt:
+                    if qualified:
+                        recovery_outcome = 'resume_completed'
+                    elif not setup_complete:
+                        recovery_outcome = 'resume_refused'
+                    else:
+                        recovery_outcome = 'resume_failed'
+                shared._finalize_interruption_evidence_signal_aware(
+                    job,
+                    signal_state,
+                    cleanup_outcome=(
+                        'completed' if cleanup_complete else 'failed'
+                    ),
+                    recovery_outcome=recovery_outcome,
                 )
-                if existing_evidence is not None:
-                    recovery_outcome = None
-                    if recovery_attempt:
-                        if qualified:
-                            recovery_outcome = 'resume_completed'
-                        elif not setup_complete:
-                            recovery_outcome = 'resume_refused'
-                        else:
-                            recovery_outcome = 'resume_failed'
-                    shared._update_interruption_evidence(
-                        job,
-                        cleanup_outcome=(
-                            'completed' if cleanup_complete else 'failed'
-                        ),
-                        recovery_outcome=recovery_outcome,
-                    )
             except BaseException as evidence_error:
                 if failure is None:
                     failure = evidence_error
@@ -608,6 +674,11 @@ def _run_qualification(
 def _qualify(args: argparse.Namespace) -> int:
     interrupt_at = getattr(args, 'interrupt_at', None)
     interrupt_mode = shared._effective_interrupt_mode(args)
+    inject_initializer_response_loss = getattr(
+        args,
+        'inject_initializer_response_loss',
+        False,
+    )
     if args.resume:
         preliminary = _load_candidate_job(args.resume)
         job_id = str(preliminary['id'])
@@ -630,6 +701,9 @@ def _qualify(args: argparse.Namespace) -> int:
                 measure=args.measure,
                 interrupt_at=interrupt_at,
                 interrupt_mode=interrupt_mode,
+                inject_initializer_response_loss=(
+                    inject_initializer_response_loss
+                ),
                 recovery_attempt=True,
             )
 
@@ -650,6 +724,7 @@ def _qualify(args: argparse.Namespace) -> int:
             measure=args.measure,
             interrupt_at=interrupt_at,
             interrupt_mode=interrupt_mode,
+            inject_initializer_response_loss=inject_initializer_response_loss,
         )
 
 

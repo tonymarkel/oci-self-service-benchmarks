@@ -65,6 +65,7 @@ INITIALIZER_POLL_TIMEOUT_SECONDS = 2_400
 INITIALIZER_POLL_INTERVAL_SECONDS = 5
 INITIALIZER_DISPATCH_GRACE_SECONDS = 60
 MAX_INITIALIZER_TRANSCRIPT_BYTES = 8 * 1024 * 1024
+MAX_INITIALIZER_FAILURE_EXCERPT_CHARS = 4_096
 INITIALIZER_STATE_ROOT = '/var/lib/oci-self-service-benchmarks/deathstarbench'
 INITIALIZER_UNIT_PREFIX = 'benchmark-deathstarbench-init-'
 
@@ -349,17 +350,28 @@ def social_network_initialization_command(target_private_ip: str) -> str:
     )
     return (
         'set -euo pipefail; '
+        'DSB_INITIALIZER_PHASE=verify_upstream_revision; '
+        "trap 'DSB_STATUS=$?; trap - ERR; printf \"DISTRIBUTED_DSB_"
+        "INITIALIZER_FAILED phase=%s status=%s\\n\" "
+        '"$DSB_INITIALIZER_PHASE" "$DSB_STATUS" >&2; '
+        "exit \"$DSB_STATUS\"' ERR; "
         f'test "$(git -C {root} rev-parse HEAD)" = '
         f'"{deathstarbench.REVISION}"; '
+        'DSB_INITIALIZER_PHASE=verify_initializer_source; '
         f'test "$(sha256sum {initializer} | awk \'{{print $1}}\')" = '
         f'"{INITIALIZER_SOURCE_SHA256}"; '
+        'DSB_INITIALIZER_PHASE=verify_nodes_dataset; '
         f'test "$(sha256sum {nodes} | awk \'{{print $1}}\')" = '
         f'"{REED98_NODES_SHA256}"; '
+        'DSB_INITIALIZER_PHASE=verify_edges_dataset; '
         f'test "$(sha256sum {edges} | awk \'{{print $1}}\')" = '
         f'"{REED98_EDGES_SHA256}"; '
+        'DSB_INITIALIZER_PHASE=initialize_dataset; '
         f'{bounded_initialize}; '
+        'DSB_INITIALIZER_PHASE=verify_patched_initializer; '
         f'test "$(sha256sum {initializer} | awk \'{{print $1}}\')" = '
         f'"{PATCHED_INITIALIZER_SHA256}"; '
+        'DSB_INITIALIZER_PHASE=parse_initializer_counts; '
         'mapfile -t DSB_COUNTS < <(awk \'\n'
         '/^Registering Users\\.\\.\\.$/ { phase=1; next }\n'
         '/^Adding follows\\.\\.\\.$/ { phase=2; next }\n'
@@ -368,13 +380,52 @@ def social_network_initialization_command(target_private_ip: str) -> str:
         'END { for (i=1; i<=3; i++) print count[i]+0 }\n'
         "' /tmp/deathstarbench-social-init.out); "
         'test "${#DSB_COUNTS[@]}" -eq 3; '
+        'DSB_INITIALIZER_PHASE=verify_user_count; '
         f'test "${{DSB_COUNTS[0]}}" -eq {DATASET_USER_COUNT}; '
+        'DSB_INITIALIZER_PHASE=verify_follow_count; '
         f'test "${{DSB_COUNTS[1]}}" -eq {DATASET_FOLLOW_COUNT}; '
+        'DSB_INITIALIZER_PHASE=verify_post_count; '
         f'test "${{DSB_COUNTS[2]}}" -eq {DATASET_POST_COUNT}; '
+        'DSB_INITIALIZER_PHASE=complete; '
         'echo "DISTRIBUTED_DSB_DATASET_READY '
         f'graph={DATASET_GRAPH} users={DATASET_USER_COUNT} '
         f'follows={DATASET_FOLLOW_COUNT} posts={DATASET_POST_COUNT} '
         f'revision={deathstarbench.REVISION}"'
+    )
+
+
+def _initializer_failure_excerpt(observation: Mapping[str, Any]) -> str:
+    """Return bounded, escaped evidence from an attested failed transcript."""
+
+    output = observation.get('output')
+    output_bytes = observation.get('output_bytes')
+    output_sha256 = observation.get('output_sha256')
+    invocation_id = observation.get('invocation_id')
+    if not isinstance(output, str):
+        output = ''
+    if not isinstance(output_bytes, int) or output_bytes < 0:
+        output_bytes = 0
+    if not isinstance(output_sha256, str) or not (
+        output_sha256 == 'none' or _SHA256_RE.fullmatch(output_sha256)
+    ):
+        output_sha256 = 'none'
+    if not isinstance(invocation_id, str) or not re.fullmatch(
+        r'[0-9a-f]{32}',
+        invocation_id,
+    ):
+        invocation_id = 'none'
+    if output:
+        tail = output[-MAX_INITIALIZER_FAILURE_EXCERPT_CHARS:]
+        omitted = len(output) - len(tail)
+        excerpt = json.dumps(tail, ensure_ascii=True)
+        if omitted:
+            excerpt = f'<{omitted} earlier characters omitted>{excerpt}'
+    else:
+        excerpt = '<empty>'
+    return (
+        f'invocation_id={invocation_id}, transcript_bytes={output_bytes}, '
+        f'transcript_sha256={output_sha256}, '
+        f'transcript_tail={excerpt}'
     )
 
 
@@ -1652,6 +1703,7 @@ def _run_durable_initializer(
     emit: Callable[[MutableMapping[str, Any], str, str], Any] | None,
     clock: Callable[[], float],
     sleep: Callable[[float], Any],
+    qualification_inject_response_loss: bool = False,
 ) -> tuple[str, dict[str, str]]:
     """Dispatch once, then reconcile exclusively through read-only polling."""
 
@@ -1671,6 +1723,20 @@ def _run_durable_initializer(
             timeout=180,
             transport_attempts=1,
         )
+        if qualification_inject_response_loss:
+            # Operator qualification needs to prove the exact response-loss
+            # boundary against a real durable unit.  Drop only the successful
+            # local response after the remote command has returned; the
+            # initializer itself is never submitted a second time.
+            _emit(
+                emit,
+                job,
+                'Qualification injected response loss after the durable '
+                'initializer dispatch returned.',
+            )
+            raise ConnectionError(
+                'Qualification injected initializer dispatch response loss.'
+            )
     except Exception:
         # A lost response cannot reveal whether systemd accepted the unit.  Do
         # not submit it again: the deterministic unit is reconciled below.
@@ -1750,7 +1816,8 @@ def _run_durable_initializer(
                 raise DistributedMeasurementError(
                     'The durable Social Network initializer failed '
                     f'(result={observation["result"]}, '
-                    f'exit_status={observation["exec_status"]}).'
+                    f'exit_status={observation["exec_status"]}, '
+                    f'{_initializer_failure_excerpt(observation)}).'
                 )
             if state == 'not_found' and (
                 dispatch_confirmed
@@ -1791,6 +1858,7 @@ def _run_distributed_social_network_measurement(
     qualification_checkpoint: (
         Callable[[MutableMapping[str, Any], str], Any] | None
     ) = None,
+    qualification_inject_initializer_response_loss: bool = False,
 ) -> dict[str, Any]:
     """Initialize and measure one strictly validated candidate exactly once."""
 
@@ -1807,6 +1875,10 @@ def _run_distributed_social_network_measurement(
         raise DistributedMeasurementError(
             'A qualification checkpoint requires a callable persistence '
             'hook so its journal boundary is durable.'
+        )
+    if type(qualification_inject_initializer_response_loss) is not bool:
+        raise DistributedMeasurementError(
+            'The initializer response-loss qualification flag must be boolean.'
         )
     resources = job.get('resources')
     if not isinstance(resources, MutableMapping):
@@ -1997,6 +2069,9 @@ def _run_distributed_social_network_measurement(
             emit=emit,
             clock=initializer_clock,
             sleep=initializer_sleep,
+            qualification_inject_response_loss=(
+                qualification_inject_initializer_response_loss
+            ),
         )
     )
     initializer_attestation = parse_dataset_attestation(initialization_output)
@@ -2267,6 +2342,7 @@ def run_distributed_social_network_measurement(
     qualification_checkpoint: (
         Callable[[MutableMapping[str, Any], str], Any] | None
     ) = None,
+    qualification_inject_initializer_response_loss: bool = False,
 ) -> dict[str, Any]:
     """Measure after dispatching the persisted provider contract."""
 
@@ -2283,6 +2359,9 @@ def run_distributed_social_network_measurement(
         initializer_clock=initializer_clock,
         initializer_sleep=initializer_sleep,
         qualification_checkpoint=qualification_checkpoint,
+        qualification_inject_initializer_response_loss=(
+            qualification_inject_initializer_response_loss
+        ),
     )
 
 
@@ -2301,6 +2380,7 @@ def run_azure_distributed_social_network_measurement(
     qualification_checkpoint: (
         Callable[[MutableMapping[str, Any], str], Any] | None
     ) = None,
+    qualification_inject_initializer_response_loss: bool = False,
 ) -> dict[str, Any]:
     """Compatibility wrapper retaining strict Azure-only validation."""
 
@@ -2317,6 +2397,9 @@ def run_azure_distributed_social_network_measurement(
         initializer_clock=initializer_clock,
         initializer_sleep=initializer_sleep,
         qualification_checkpoint=qualification_checkpoint,
+        qualification_inject_initializer_response_loss=(
+            qualification_inject_initializer_response_loss
+        ),
     )
 
 
@@ -2335,6 +2418,7 @@ def run_gcp_distributed_social_network_measurement(
     qualification_checkpoint: (
         Callable[[MutableMapping[str, Any], str], Any] | None
     ) = None,
+    qualification_inject_initializer_response_loss: bool = False,
 ) -> dict[str, Any]:
     """Measure after reloading the strict GCP candidate contract."""
 
@@ -2351,4 +2435,7 @@ def run_gcp_distributed_social_network_measurement(
         initializer_clock=initializer_clock,
         initializer_sleep=initializer_sleep,
         qualification_checkpoint=qualification_checkpoint,
+        qualification_inject_initializer_response_loss=(
+            qualification_inject_initializer_response_loss
+        ),
     )

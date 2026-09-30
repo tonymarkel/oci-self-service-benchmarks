@@ -4,6 +4,7 @@ import argparse
 import copy
 from contextlib import ExitStack, nullcontext
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -894,6 +895,9 @@ class AwsOciDistributedQualificationTests(unittest.TestCase):
         job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
             'state': 'load_generator_ready',
         }
+        plan = qualification._plan(args, self.ssh(), self.oci_pin())
+        image_lock = {'schema_version': 1}
+        clients = {'compute': object()}
 
         with (
             mock.patch.object(
@@ -907,6 +911,52 @@ class AwsOciDistributedQualificationTests(unittest.TestCase):
                 return_value=nullcontext(),
             ),
             mock.patch.object(
+                qualification.shared,
+                '_read_interruption_evidence',
+                return_value=None,
+            ),
+            mock.patch.object(
+                qualification.shared,
+                '_require_resume_workload_settings',
+            ) as workload_settings,
+            mock.patch.object(
+                qualification,
+                '_read_provider_pin',
+                return_value=self.oci_pin(),
+            ) as read_pin,
+            mock.patch.object(
+                qualification,
+                '_assert_resume_overrides',
+            ) as resume_overrides,
+            mock.patch.object(
+                qualification.shared,
+                '_ssh_material',
+                return_value=self.ssh(),
+            ) as ssh_material,
+            mock.patch.object(
+                qualification.shared,
+                '_resume_job',
+                return_value=(job, plan),
+            ) as resume_job,
+            mock.patch.object(
+                qualification,
+                '_validate_saved_plan',
+            ) as validate_plan,
+            mock.patch.object(
+                qualification.shared,
+                '_lock_for_run',
+                return_value=image_lock,
+            ) as lock_for_run,
+            mock.patch.object(
+                qualification.shared,
+                '_preflight_anonymous_ghcr_images',
+            ) as image_preflight,
+            mock.patch.object(
+                qualification,
+                '_oci_clients',
+                return_value=clients,
+            ) as oci_clients,
+            mock.patch.object(
                 qualification,
                 '_run_qualification',
                 return_value=0,
@@ -915,7 +965,7 @@ class AwsOciDistributedQualificationTests(unittest.TestCase):
             result = qualification._qualify(args)
 
         self.assertEqual(result, 0)
-        self.assertEqual(load.call_count, 2)
+        load.assert_called_once_with(job['id'], provider='oci')
         run.assert_called_once()
         self.assertIs(run.call_args.args[0], job)
         self.assertEqual(run.call_args.kwargs['provider'], 'oci')
@@ -927,6 +977,373 @@ class AwsOciDistributedQualificationTests(unittest.TestCase):
             True,
         )
         self.assertIs(run.call_args.kwargs['recovery_attempt'], True)
+        self.assertEqual(
+            run.call_args.args[1](),
+            (plan, self.ssh(), image_lock, self.oci_pin(), clients),
+        )
+        workload_settings.assert_called_once_with(job, args)
+        read_pin.assert_called_once_with(job)
+        resume_overrides.assert_called_once_with(args, self.oci_pin())
+        ssh_material.assert_called_once_with(args.ssh_env_file)
+        resume_job.assert_called_once_with(job, self.ssh())
+        validate_plan.assert_called_once_with(job, self.oci_pin())
+        lock_for_run.assert_called_once_with(args.image_lock, job)
+        image_preflight.assert_called_once_with(image_lock)
+        oci_clients.assert_called_once_with(args, self.oci_pin())
+
+    def test_workload_setting_mismatch_is_refused_before_runner_or_cleanup(self):
+        immutable_fields = (
+            'source',
+            'mode',
+            'checkpoint',
+            'signal',
+            'execution_state',
+            'replay_decision',
+            'requested_at',
+            'cleanup_outcome',
+        )
+        for provider in ('aws', 'oci'):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temporary:
+                runs = Path(temporary)
+                job = self.job(provider)
+                (runs / job['id']).mkdir()
+                job['resources'] = {
+                    'provider': provider,
+                    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY: {
+                        'state': 'load_generator_ready',
+                    },
+                }
+                with mock.patch.object(qualification.application, 'RUNS', runs):
+                    qualification.shared._record_checkpoint_interruption(
+                        job,
+                        'load_generator_ready',
+                        mode='hard',
+                    )
+                    origin = qualification.shared._read_interruption_evidence(
+                        job['id']
+                    )
+                    resources_before = copy.deepcopy(job['resources'])
+                    with (
+                        mock.patch.object(
+                            qualification,
+                            '_load_candidate_job',
+                            return_value=job,
+                        ) as load,
+                        mock.patch.object(
+                            qualification.shared,
+                            '_exclusive_job_lock',
+                            return_value=nullcontext(),
+                        ),
+                        mock.patch.object(
+                            qualification,
+                            '_run_qualification',
+                            side_effect=AssertionError(
+                                'mismatched resume entered cleanup-owning runner'
+                            ),
+                        ) as run,
+                        mock.patch.object(
+                            qualification,
+                            '_cleanup',
+                            side_effect=AssertionError(
+                                'mismatched resume attempted cleanup'
+                            ),
+                        ) as cleanup,
+                        mock.patch.object(
+                            qualification,
+                            '_read_provider_pin',
+                            side_effect=AssertionError(
+                                'workload mismatch advanced to provider preflight'
+                            ),
+                        ) as read_pin,
+                    ):
+                        outcome = qualification.main([
+                            '--provider',
+                            provider,
+                            '--resume',
+                            job['id'],
+                            '--measure',
+                            '--duration-seconds',
+                            '61',
+                        ])
+                    evidence = qualification.shared._read_interruption_evidence(
+                        job['id']
+                    )
+
+                load.assert_called_once_with(job['id'], provider=provider)
+                self.assertEqual(outcome, 2)
+                run.assert_not_called()
+                cleanup.assert_not_called()
+                read_pin.assert_not_called()
+                self.assertEqual(job['resources'], resources_before)
+                self.assertNotIn('error', job)
+                self.assertNotIn('cleanup_error', job)
+                for field in immutable_fields:
+                    self.assertEqual(evidence[field], origin[field])
+                self.assertEqual(evidence['recovery_outcome'], 'resume_refused')
+
+    def test_candidate_validation_refusal_is_leased_and_updates_evidence(self):
+        for provider in ('aws', 'oci'):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temporary:
+                runs = Path(temporary)
+                job = self.job(provider)
+                (runs / job['id']).mkdir()
+                job['resources'] = {
+                    'provider': provider,
+                    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY: {
+                        'state': 'load_generator_ready',
+                    },
+                }
+                order = []
+
+                class TrackingLease:
+                    def __enter__(self):
+                        order.append('lease-entered')
+
+                    def __exit__(self, *_args):
+                        order.append('lease-released')
+
+                def refuse_candidate(*_args, **_kwargs):
+                    order.append('candidate-load')
+                    raise qualification.QualificationError(
+                        'saved candidate validation failed'
+                    )
+
+                with mock.patch.object(qualification.application, 'RUNS', runs):
+                    qualification.shared._record_checkpoint_interruption(
+                        job,
+                        'load_generator_ready',
+                        mode='hard',
+                    )
+                    origin = qualification.shared._read_interruption_evidence(
+                        job['id']
+                    )
+                    with (
+                        mock.patch.object(
+                            qualification.shared,
+                            '_exclusive_job_lock',
+                            return_value=TrackingLease(),
+                        ) as lock,
+                        mock.patch.object(
+                            qualification,
+                            '_load_candidate_job',
+                            side_effect=refuse_candidate,
+                        ) as load,
+                        mock.patch.object(
+                            qualification,
+                            '_run_qualification',
+                            side_effect=AssertionError(
+                                'invalid candidate entered the runner'
+                            ),
+                        ) as run,
+                        mock.patch.object(
+                            qualification,
+                            '_cleanup',
+                            side_effect=AssertionError(
+                                'invalid candidate attempted cleanup'
+                            ),
+                        ) as cleanup,
+                    ):
+                        outcome = qualification.main([
+                            '--provider',
+                            provider,
+                            '--resume',
+                            job['id'],
+                            '--measure',
+                        ])
+                    evidence = qualification.shared._read_interruption_evidence(
+                        job['id']
+                    )
+
+                self.assertEqual(outcome, 2)
+                lock.assert_called_once_with(job['id'])
+                load.assert_called_once_with(job['id'], provider=provider)
+                self.assertEqual(
+                    order,
+                    ['lease-entered', 'candidate-load', 'lease-released'],
+                )
+                run.assert_not_called()
+                cleanup.assert_not_called()
+                for field in origin:
+                    if field != 'recovery_outcome':
+                        self.assertEqual(evidence[field], origin[field])
+                self.assertEqual(evidence['recovery_outcome'], 'resume_refused')
+
+    def test_retained_evidence_must_authorize_and_exactly_match_resume(self):
+        cases = (
+            (
+                'initialization_started',
+                'load_generator_ready',
+                'requires cleanup-only recovery',
+            ),
+            (
+                'load_generator_ready',
+                'preparing_load_generator',
+                'does not exactly match retained interruption evidence',
+            ),
+        )
+        for provider in ('aws', 'oci'):
+            for evidence_state, current_state, expected_error in cases:
+                with (
+                    self.subTest(
+                        provider=provider,
+                        evidence_state=evidence_state,
+                        current_state=current_state,
+                    ),
+                    tempfile.TemporaryDirectory() as temporary,
+                ):
+                    runs = Path(temporary)
+                    job = self.job(provider)
+                    (runs / job['id']).mkdir()
+                    job['resources'] = {
+                        'provider': provider,
+                        DEATHSTARBENCH_EXECUTION_JOURNAL_KEY: {
+                            'state': evidence_state,
+                        },
+                    }
+                    with mock.patch.object(qualification.application, 'RUNS', runs):
+                        qualification.shared._record_checkpoint_interruption(
+                            job,
+                            evidence_state,
+                            mode='hard',
+                        )
+                        job['resources'][
+                            DEATHSTARBENCH_EXECUTION_JOURNAL_KEY
+                        ]['state'] = current_state
+                        with self.assertRaisesRegex(
+                            qualification.QualificationError,
+                            expected_error,
+                        ):
+                            qualification._require_resumable(
+                                job,
+                                provider=provider,
+                                measure=True,
+                            )
+
+    def test_exact_safe_retained_evidence_allows_resume_preflight(self):
+        for provider in ('aws', 'oci'):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temporary:
+                runs = Path(temporary)
+                job = self.job(provider)
+                (runs / job['id']).mkdir()
+                job['resources'] = {
+                    'provider': provider,
+                    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY: {
+                        'state': 'load_generator_ready',
+                    },
+                }
+                with mock.patch.object(qualification.application, 'RUNS', runs):
+                    qualification.shared._record_checkpoint_interruption(
+                        job,
+                        'load_generator_ready',
+                        mode='hard',
+                    )
+                    qualification._require_resumable(
+                        job,
+                        provider=provider,
+                        measure=True,
+                    )
+
+    def test_retained_evidence_checkpoint_injection_is_preflight_refused(self):
+        for provider in ('aws', 'oci'):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temporary:
+                runs = Path(temporary)
+                job = self.job(provider)
+                (runs / job['id']).mkdir()
+                job['resources'] = {
+                    'provider': provider,
+                    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY: {
+                        'state': 'load_generator_ready',
+                    },
+                }
+                with mock.patch.object(qualification.application, 'RUNS', runs):
+                    qualification.shared._record_checkpoint_interruption(
+                        job,
+                        'load_generator_ready',
+                        mode='hard',
+                    )
+                    with (
+                        mock.patch.object(
+                            qualification,
+                            '_load_candidate_job',
+                            return_value=job,
+                        ),
+                        mock.patch.object(
+                            qualification.shared,
+                            '_exclusive_job_lock',
+                            return_value=nullcontext(),
+                        ),
+                        mock.patch.object(
+                            qualification,
+                            '_run_qualification',
+                            side_effect=AssertionError(
+                                'checkpoint replay entered cleanup-owning runner'
+                            ),
+                        ) as run,
+                        mock.patch.object(
+                            qualification,
+                            '_cleanup',
+                            side_effect=AssertionError(
+                                'checkpoint replay attempted cleanup'
+                            ),
+                        ) as cleanup,
+                    ):
+                        outcome = qualification.main([
+                            '--provider',
+                            provider,
+                            '--resume',
+                            job['id'],
+                            '--measure',
+                            '--interrupt-at',
+                            'load_generator_ready',
+                        ])
+                    evidence = qualification.shared._read_interruption_evidence(
+                        job['id']
+                    )
+
+                self.assertEqual(outcome, 2)
+                run.assert_not_called()
+                cleanup.assert_not_called()
+                self.assertEqual(evidence['recovery_outcome'], 'resume_refused')
+
+    def test_latest_retained_signal_evidence_is_authoritative(self):
+        for provider in ('aws', 'oci'):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temporary:
+                runs = Path(temporary)
+                job = self.job(provider)
+                (runs / job['id']).mkdir()
+                job['resources'] = {
+                    'provider': provider,
+                    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY: {
+                        'state': 'load_generator_ready',
+                    },
+                }
+                with mock.patch.object(qualification.application, 'RUNS', runs):
+                    qualification.shared._record_checkpoint_interruption(
+                        job,
+                        'load_generator_ready',
+                        mode='hard',
+                    )
+                    job['resources'][
+                        DEATHSTARBENCH_EXECUTION_JOURNAL_KEY
+                    ]['state'] = 'warmup_started'
+                    qualification.shared._record_signal_interruption(
+                        job,
+                        signal.SIGTERM,
+                    )
+                    # Regressing the current journal to the safe origin cannot
+                    # erase the later proof that the one-shot phase started.
+                    job['resources'][
+                        DEATHSTARBENCH_EXECUTION_JOURNAL_KEY
+                    ]['state'] = 'load_generator_ready'
+                    with self.assertRaisesRegex(
+                        qualification.QualificationError,
+                        'requires cleanup-only recovery',
+                    ):
+                        qualification._require_resumable(
+                            job,
+                            provider=provider,
+                            measure=True,
+                        )
 
     def test_unsafe_resume_is_refused_before_runner_or_cleanup(self):
         immutable_fields = (
@@ -1004,7 +1421,7 @@ class AwsOciDistributedQualificationTests(unittest.TestCase):
                         job['id']
                     )
 
-                self.assertEqual(load.call_count, 2)
+                load.assert_called_once_with(job['id'], provider=provider)
                 self.assertEqual(outcome, 2)
                 run.assert_not_called()
                 cleanup.assert_not_called()

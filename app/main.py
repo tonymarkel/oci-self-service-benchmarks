@@ -173,6 +173,27 @@ PRESERVED_RUN_STATUSES = frozenset({
 })
 DELETABLE_RUN_STATUSES = frozenset({'destroyed', 'reported', 'failed'})
 SAVED_RUN_ARTIFACTS = ('report.html', 'state.json', 'results.json')
+AWS_DISTRIBUTED_CANDIDATE_ALIAS_KEYS = frozenset({
+    'aws_distributed_candidate',
+    'aws_dsb_database_volume_id',
+    *(
+        f'aws_dsb_{role.replace("-", "_")}_{address}'
+        for role in aws_provider.AWS_DSB_ADDRESSES
+        for address in ('private_ip', 'public_ip')
+    ),
+})
+OCI_DISTRIBUTED_CANDIDATE_ALIAS_KEYS = frozenset({
+    'oci_distributed_candidate',
+    'oci_dsb_database_volume_id',
+    'oci_dsb_database_attachment_id',
+    'oci_dsb_database_device',
+    'oci_dsb_database_mount_point',
+    *(
+        f'oci_dsb_{role.replace("-", "_")}_{attribute}'
+        for role in oci_provider.PRIVATE_ADDRESSES
+        for attribute in ('instance_id', 'private_ip', 'public_ip')
+    ),
+})
 
 
 class RunCancelled(BaseException):
@@ -713,6 +734,54 @@ def require_complete_benchmark_results(job):
     )
 
 
+def _distributed_candidate_providers(job):
+    """Return providers signaled by immutable distributed run evidence.
+
+    Candidate classification cannot depend on a parseable provider contract:
+    the plan and exact provider-specific markers/aliases survive the failure
+    modes where that contract is missing or truncated. Presence is deliberate;
+    a marker with a corrupted value is still evidence that generic cleanup or
+    history deletion would be unsafe.
+    """
+
+    if not isinstance(job, dict):
+        return frozenset()
+    providers = set()
+    plan = job.get('plan')
+
+    def value(document, key):
+        if isinstance(document, dict):
+            return document.get(key)
+        return getattr(document, key, None)
+
+    plan_provider = value(plan, 'provider')
+    options = value(plan, 'deathstarbench')
+    if (
+        plan_provider in {'aws', 'oci'}
+        and (
+            value(options, 'topology_id') == DISTRIBUTED_TIERED_TOPOLOGY_ID
+            or value(options, 'runtime_id') == K3S_RUNTIME_ID
+        )
+    ):
+        providers.add(plan_provider)
+
+    resources = job.get('resources')
+    if not isinstance(resources, dict):
+        return frozenset(providers)
+    keys = set(resources)
+    if (
+        aws_provider.AWS_DSB_GRAPH_KEY in keys
+        or keys & AWS_DISTRIBUTED_CANDIDATE_ALIAS_KEYS
+    ):
+        providers.add('aws')
+    if (
+        oci_provider.CONTRACT_KEY in keys
+        or keys & OCI_DISTRIBUTED_CANDIDATE_ALIAS_KEYS
+    ):
+        providers.add('oci')
+    return frozenset(providers)
+
+
 def _distributed_candidate_local_terminal_state(job):
     """Return local terminal proof for a distributed AWS/OCI candidate.
 
@@ -727,14 +796,10 @@ def _distributed_candidate_local_terminal_state(job):
     resources = job.get('resources', {})
     if not isinstance(resources, dict):
         return False
-    has_aws_candidate = (
-        aws_provider.AWS_DSB_GRAPH_KEY in resources
-        or resources.get('aws_distributed_candidate') is True
-    )
-    has_oci_candidate = oci_provider.CONTRACT_KEY in resources
-    if not has_aws_candidate and not has_oci_candidate:
+    candidate_providers = _distributed_candidate_providers(job)
+    if not candidate_providers:
         return None
-    if has_aws_candidate and has_oci_candidate:
+    if len(candidate_providers) != 1:
         return False
     plan = job.get('plan')
     provider = (
@@ -742,10 +807,12 @@ def _distributed_candidate_local_terminal_state(job):
         if isinstance(plan, dict)
         else getattr(plan, 'provider', None)
     )
+    if job.get('status') != 'destroyed' or job.get('cleanup_error'):
+        return False
     try:
-        if provider == 'aws' and has_aws_candidate:
+        if provider == 'aws' and candidate_providers == {'aws'}:
             return aws_provider.distributed_deathstarbench_candidate_deleted(job)
-        if provider == 'oci' and has_oci_candidate:
+        if provider == 'oci' and candidate_providers == {'oci'}:
             return oci_provider.distributed_candidate_is_deleted(job)
     except Exception:
         # A projection must never turn damaged terminal evidence into a local
@@ -1443,19 +1510,34 @@ def saved_run_can_be_deleted(directory, *, lease_held=False):
     status = status.strip().lower()
     if status in ACTIVE_RUN_STATUSES or status in PRESERVED_RUN_STATUSES:
         return False
-    # Every provider assigns ``destroyed`` only after its cleanup routine has
-    # proved that the run-owned resources are absent. Some providers retain
-    # harmless ownership metadata (for example, the AWS account ID), so the
-    # generic recovery detector is intentionally bypassed for this definitive
-    # terminal state.
+    # Compact providers assign ``destroyed`` only after cleanup proves their
+    # resources absent. Distributed AWS/OCI candidates retain an auditable
+    # graph, so their outer status alone is not terminal proof: malformed or
+    # nonterminal graphs must remain available for operator recovery.
     if status == 'destroyed':
-        return True
+        return _distributed_candidate_local_terminal_state(job) is not False
     try:
         if has_recoverable_resources_for_any_provider(job):
             return False
     except Exception:
         return False
     return status in DELETABLE_RUN_STATUSES
+
+
+def require_destroyed_run_terminal_proof(job):
+    """Reject a forged distributed ``destroyed`` fast path without mutation."""
+
+    if (
+        job.get('status') == 'destroyed'
+        and _distributed_candidate_local_terminal_state(job) is False
+    ):
+        raise HTTPException(
+            409,
+            'This run claims to be destroyed, but its saved distributed '
+            'cleanup evidence is incomplete or inconsistent. No cloud '
+            'action was started; use the provider qualification recovery '
+            'workflow to reconcile it.',
+        )
 
 
 def forget_deleted_run(job_id):
@@ -2181,6 +2263,7 @@ async def destroy(job_id: str):
     job = jobs.get(job_id)
     live_job = job is not None
     if job is not None and job['status'] == 'destroyed':
+        require_destroyed_run_terminal_proof(job)
         return {'status': job['status']}
     supervisor = job_tasks.get(job_id)
     supervisor_active = bool(supervisor and not supervisor.done())
@@ -2226,6 +2309,7 @@ async def destroy(job_id: str):
         # interrupted merely because the task callback has not run yet.
         await asyncio.shield(supervisor)
         if job['status'] == 'destroyed':
+            require_destroyed_run_terminal_proof(job)
             return {'status': job['status']}
 
     # Every manual cleanup without an active in-memory supervisor is a
@@ -2244,6 +2328,7 @@ async def destroy(job_id: str):
     if not job:
         raise HTTPException(404, 'Job not found')
     if job['status'] == 'destroyed':
+        require_destroyed_run_terminal_proof(job)
         return {'status': job['status']}
     try:
         cleanup_lease = acquire_run_lease(
@@ -2271,8 +2356,42 @@ async def destroy(job_id: str):
         if not job:
             raise HTTPException(404, 'Job not found')
         if job['status'] == 'destroyed':
+            require_destroyed_run_terminal_proof(job)
             cleanup_lease.release()
             return {'status': job['status']}
+        candidate_providers = _distributed_candidate_providers(job)
+        if 'oci' in candidate_providers:
+            raise HTTPException(
+                409,
+                'OCI distributed DeathStarBench infrastructure is owned by '
+                'the qualification operator and cannot use the normal API '
+                'cleanup path. Run '
+                f'qualify_aws_oci_deathstarbench_distributed.py --provider '
+                f'oci --cleanup-only {job_id}.',
+            )
+        resources = job.get('resources')
+        plan = job.get('plan')
+        plan_provider = (
+            plan.get('provider')
+            if isinstance(plan, dict)
+            else getattr(plan, 'provider', None)
+        )
+        if (
+            'aws' in candidate_providers
+            and (
+                plan_provider != 'aws'
+                or not isinstance(resources, dict)
+                or aws_provider.AWS_DSB_GRAPH_KEY not in resources
+            )
+        ):
+            raise HTTPException(
+                409,
+                'AWS distributed DeathStarBench infrastructure has no '
+                'complete candidate graph and cannot use the legacy normal '
+                'API cleanup path. Run '
+                f'qualify_aws_oci_deathstarbench_distributed.py --provider '
+                f'aws --cleanup-only {job_id}.',
+            )
         jobs[job_id] = job
     except BaseException:
         if not cleanup_lease.released:

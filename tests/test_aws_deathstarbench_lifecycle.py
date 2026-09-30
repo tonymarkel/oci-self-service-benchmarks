@@ -10,6 +10,14 @@ from botocore.exceptions import ClientError
 from botocore.validate import validate_parameters
 
 from app import main
+from app.deathstarbench_contract import (
+    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+    DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
+    K3S_RUNTIME_JOURNAL_KEY,
+)
+from app.deathstarbench_distributed import (
+    DISTRIBUTED_NETWORK_QUALIFICATION_KEY,
+)
 from app.providers import aws
 from app.resource_inventory import ResourceInventoryError, load_role_node_inventory
 from tests.test_aws_provider import FakeSession
@@ -720,6 +728,57 @@ class AwsDistributedLifecycleTests(unittest.TestCase):
                     job['status'] = 'destroying'
                 self.assertFalse(aws.distributed_deathstarbench_candidate_deleted(job))
         self.assertFalse(aws.distributed_deathstarbench_candidate_deleted({'resources': None}))
+
+    def test_deleted_predicate_rejects_foreign_top_level_ownership(self):
+        self.provision()
+        aws.validate_distributed_deathstarbench_candidate(
+            self.job,
+            aws_session=self.session,
+        )
+        aws.destroy_distributed_deathstarbench_candidate(
+            self.job,
+            aws_session=self.session,
+        )
+        self.job['resources'].update({
+            K3S_RUNTIME_JOURNAL_KEY: {'state': 'cluster_ready'},
+            DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY: {
+                'state': 'workload_ready',
+            },
+            DEATHSTARBENCH_EXECUTION_JOURNAL_KEY: {
+                'state': 'measurement_complete',
+            },
+            DISTRIBUTED_NETWORK_QUALIFICATION_KEY: {
+                'schema_version': 3,
+            },
+        })
+        self.assertTrue(
+            aws.distributed_deathstarbench_candidate_deleted(self.job)
+        )
+
+        cases = {
+            'compact-aws': {'instance_id': 'i-foreign'},
+            'gcp': {
+                'gcp_project_id': 'foreign-project',
+                'gcp_resource_prefix': 'foreign-prefix',
+            },
+            'azure': {
+                'azure_subscription_id': 'foreign-subscription',
+                'azure_resource_group_name': 'foreign-group',
+                'azure_resource_group_tags': {'managed-by': 'foreign'},
+            },
+            'arbitrary': {'foreign_resource_id': 'foreign-id'},
+        }
+        for label, extra in cases.items():
+            with self.subTest(label=label):
+                job = copy.deepcopy(self.job)
+                job['resources'].update(extra)
+                self.assertFalse(
+                    aws.distributed_deathstarbench_candidate_deleted(job)
+                )
+                self.assertTrue(main.has_recoverable_resources(job))
+                self.assertTrue(
+                    main.has_recoverable_resources_for_any_provider(job)
+                )
 
     def test_unknown_ambiguous_create_retains_all_dependencies(self):
         def fail(kind, request):

@@ -184,6 +184,116 @@ class RoleNodeInventoryRecoveryTests(unittest.TestCase):
                     main.has_recoverable_resources_for_any_provider(job)
                 )
 
+    def test_distributed_candidate_signals_survive_missing_contracts(self):
+        cases = (
+            (
+                'aws',
+                {
+                    'provider': 'aws',
+                    'deathstarbench': {
+                        'topology_id': 'distributed_tiered_v1',
+                    },
+                },
+                {},
+                main.aws_provider,
+                'distributed_deathstarbench_candidate_deleted',
+            ),
+            (
+                'aws',
+                {'provider': 'aws'},
+                {'aws_distributed_candidate': False},
+                main.aws_provider,
+                'distributed_deathstarbench_candidate_deleted',
+            ),
+            (
+                'aws',
+                {'provider': 'aws'},
+                {'aws_dsb_control_public_ip': '198.51.100.10'},
+                main.aws_provider,
+                'distributed_deathstarbench_candidate_deleted',
+            ),
+            (
+                'oci',
+                {
+                    'provider': 'oci',
+                    'deathstarbench': {'runtime_id': 'k3s_v1'},
+                },
+                {},
+                main.oci_provider,
+                'distributed_candidate_is_deleted',
+            ),
+            (
+                'oci',
+                {'provider': 'oci'},
+                {'oci_distributed_candidate': False},
+                main.oci_provider,
+                'distributed_candidate_is_deleted',
+            ),
+            (
+                'oci',
+                {'provider': 'oci'},
+                {'oci_dsb_control_public_ip': '198.51.100.20'},
+                main.oci_provider,
+                'distributed_candidate_is_deleted',
+            ),
+        )
+        for provider, plan, resources, module, predicate in cases:
+            with self.subTest(provider=provider, resources=resources), patch.object(
+                module,
+                predicate,
+                return_value=False,
+            ) as terminal:
+                job = {
+                    'status': 'destroyed',
+                    'cleanup_error': None,
+                    'plan': plan,
+                    'resources': resources,
+                }
+
+                self.assertTrue(main.has_recoverable_resources(job))
+                self.assertTrue(
+                    main.has_recoverable_resources_for_any_provider(job)
+                )
+                self.assertGreaterEqual(terminal.call_count, 2)
+
+    def test_unknown_provider_prefixed_keys_are_not_candidate_aliases(self):
+        cases = (
+            ('aws', {'aws_dsb_unknown': 'retained'}),
+            ('oci', {'oci_dsb_unknown': 'retained'}),
+        )
+        for provider, resources in cases:
+            with self.subTest(provider=provider):
+                job = {
+                    'status': 'destroyed',
+                    'cleanup_error': None,
+                    'plan': {'provider': provider},
+                    'resources': resources,
+                }
+
+                self.assertFalse(main.has_recoverable_resources(job))
+                self.assertFalse(
+                    main.has_recoverable_resources_for_any_provider(job)
+                )
+
+    def test_compact_oci_identity_is_not_a_distributed_alias_signal(self):
+        job = {
+            'status': 'destroyed',
+            'cleanup_error': None,
+            'plan': {'provider': 'oci'},
+            'resources': {
+                'oci_compartment_id': 'ocid1.compartment.oc1..compact',
+                'oci_availability_domain': 'test:US-ASHBURN-AD-1',
+            },
+        }
+
+        self.assertEqual(
+            main._distributed_candidate_providers(job),
+            frozenset(),
+        )
+        self.assertIsNone(
+            main._distributed_candidate_local_terminal_state(job)
+        )
+
     def test_distributed_provider_mismatch_and_mixed_graph_fail_closed(self):
         mismatched = {
             'status': 'destroyed',

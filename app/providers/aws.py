@@ -27,11 +27,24 @@ from botocore.exceptions import ClientError, WaiterError
 from ..guests import amazon_linux
 from ..guests.amazon_linux import SSH_USER, ami_parameter_name
 from ..deathstarbench_contract import (
-    DISTRIBUTED_TIERED_TOPOLOGY_ID, K3S_RUNTIME_ID, require_released_runtime,
+    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+    DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
+    DISTRIBUTED_TIERED_TOPOLOGY_ID,
+    K3S_RUNTIME_ID,
+    K3S_RUNTIME_JOURNAL_KEY,
+    require_released_runtime,
+)
+from ..deathstarbench_distributed import (
+    DISTRIBUTED_NETWORK_QUALIFICATION_KEY,
+    TOPOLOGY_FINGERPRINT_KEY,
+    TOPOLOGY_MANIFEST_KEY,
 )
 from ..deathstarbench_topology import build_topology_manifest
 from ..resource_inventory import (
-    ResourceInventoryError, RoleNodeInventory, load_role_node_inventory,
+    ROLE_NODE_INVENTORY_KEY,
+    ResourceInventoryError,
+    RoleNodeInventory,
+    load_role_node_inventory,
     persist_role_node_inventory,
 )
 
@@ -3281,6 +3294,27 @@ AWS_DSB_SHAPES = {
     'control': 'm7i.large', 'database': 'm7i.xlarge',
     'cache': 'm7i.large', 'load-generator': 'm7i.large',
 }
+_AWS_DSB_TERMINAL_RESOURCE_KEYS = frozenset({
+    'provider',
+    'aws_distributed_candidate',
+    'aws_profile',
+    'region',
+    'aws_account_id',
+    'availability_zone',
+    AWS_DSB_GRAPH_KEY,
+    TOPOLOGY_MANIFEST_KEY,
+    TOPOLOGY_FINGERPRINT_KEY,
+    ROLE_NODE_INVENTORY_KEY,
+    'ssh_user',
+    'aws_dsb_database_volume_id',
+    K3S_RUNTIME_JOURNAL_KEY,
+    DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
+    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+    DISTRIBUTED_NETWORK_QUALIFICATION_KEY,
+    *(f'aws_dsb_{role.replace("-", "_")}_{address}'
+      for role in AWS_DSB_ADDRESSES
+      for address in ('private_ip', 'public_ip')),
+})
 AWS_ROCKY_OFFICIAL_OWNER_ID = '792107900819'
 _DSB_KINDS = {
     'vpc': ('describe_vpcs', 'Vpcs', 'VpcId', 'create_vpc', 'Vpc'),
@@ -3644,9 +3678,12 @@ def distributed_deathstarbench_candidate_deleted(job):
     never advertised as safe to discard.
     """
     try:
-        if (not isinstance(job, Mapping) or job.get('status') != 'destroyed'
+        resources = job.get('resources') if isinstance(job, Mapping) else None
+        if (not isinstance(resources, Mapping)
+                or job.get('status') != 'destroyed'
                 or job.get('cleanup_error')
-                or job.get('resources', {}).get('aws_distributed_candidate') is not True):
+                or resources.get('aws_distributed_candidate') is not True
+                or not set(resources) <= _AWS_DSB_TERMINAL_RESOURCE_KEYS):
             return False
         state = _dsb_load(job)
         for key, entry in state['graph'].items():

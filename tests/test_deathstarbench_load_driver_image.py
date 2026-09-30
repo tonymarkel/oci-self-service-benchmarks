@@ -244,6 +244,10 @@ class LoadDriverContextTests(unittest.TestCase):
             self.assertIn(" AS runtime", dockerfile)
             self.assertIn("USER 65532:65532", dockerfile)
             self.assertNotIn("microdnf install -y coreutils", dockerfile)
+            self.assertIn(
+                '      linux; \\\n    make -C "$source_dir"',
+                dockerfile,
+            )
             self.assertIn("rm -f /usr/bin/microdnf", dockerfile)
             runtime = dockerfile.split(" AS runtime", 1)[1]
             for forbidden in (" gcc ", " make ", " git ", " curl ", "luarocks"):

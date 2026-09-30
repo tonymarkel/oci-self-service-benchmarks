@@ -424,6 +424,9 @@ RUN set -eux; \\
     source_dir=${{source_make%/src/makefile}}; \\
     make -C "$source_dir" -j"$(nproc)" PLAT=linux LUAV=5.1 \\
       LUAINC_linux=/opt/deathstarbench-load-driver/luajit/include/luajit-2.1 \\
+      linux; \\
+    make -C "$source_dir" PLAT=linux LUAV=5.1 \\
+      LUAINC_linux=/opt/deathstarbench-load-driver/luajit/include/luajit-2.1 \\
       prefix=/ DESTDIR=/opt/deathstarbench-load-driver/luasocket install-unix; \\
     install -D -m 0755 /src/wrk2/wrk /opt/deathstarbench-load-driver/bin/wrk; \\
     install -D -m 0644 /src/mixed-workload.lua /opt/deathstarbench-load-driver/share/mixed-workload.lua; \\

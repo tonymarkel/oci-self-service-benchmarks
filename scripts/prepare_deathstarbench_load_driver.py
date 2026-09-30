@@ -353,7 +353,7 @@ run_driver() {
     fail "rate must be at least and divisible by threads"
 
   verify_artifact
-  local hard_nofile required_nofile run_dir
+  local hard_nofile required_nofile run_dir status
   required_nofile=$((connections + 128))
   hard_nofile=$(ulimit -Hn)
   if [[ "$hard_nofile" != unlimited ]]; then
@@ -374,9 +374,13 @@ run_driver() {
   configure_lua_environment
   printf 'wrk2 open-file soft limit: %s\n' "$(ulimit -Sn)"
   printf 'OCI_DSB_LOADGEN_LOGICAL_CPUS=%s\n' "$(nproc)"
+  status=0
   /usr/bin/time -v "$wrk_binary" -D exp -r -t "$threads" -c "$connections" \
     -d "${duration}s" -L -s "$run_dir/workload.lua" -R "$rate" \
-    "http://$target:$port/"
+    "http://$target:$port/" || status=$?
+  rm -rf "$run_dir"
+  trap - EXIT
+  return "$status"
 }
 
 case ${1-} in

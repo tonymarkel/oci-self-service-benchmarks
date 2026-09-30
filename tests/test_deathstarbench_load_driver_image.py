@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -441,6 +442,41 @@ class LoadDriverRuntimeAttestationTests(unittest.TestCase):
                 result.stderr,
                 "load-driver: connections must be at least and divisible by threads\n",
             )
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux"),
+        "the runtime image uses GNU sed and GNU time",
+    )
+    def test_successful_run_clears_exit_trap_before_local_scope_ends(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            entrypoint, environment = runtime_attestation_fixture(Path(temporary))
+            result = subprocess.run(
+                [
+                    str(entrypoint),
+                    "run",
+                    "--target",
+                    "10.240.1.13",
+                    "--port",
+                    "8080",
+                    "--threads",
+                    "4",
+                    "--connections",
+                    "4",
+                    "--rate",
+                    "100",
+                    "--duration",
+                    "5",
+                    "--max-user-index",
+                    "962",
+                ],
+                env={**environment, "FAKE_WRK_MODE": "success"},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("unbound variable", result.stderr)
+            self.assertIn("OCI_DSB_LOADGEN_LOGICAL_CPUS=", result.stdout)
 
 
 class LoadDriverLockTests(unittest.TestCase):

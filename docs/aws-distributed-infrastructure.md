@@ -134,8 +134,42 @@ result, comparison, `results.json`, and report gates passed. Exact cleanup
 deleted the full graph, and a post-restart cleanup-only audit also passed with
 final `destroyed` state and no error or cleanup error.
 
+The representative checkpoint failure matrix passed on 2026-09-30:
+
+- Safe pre-initialization job `3249984b8909` hard-exited with status 86 after
+  durably reaching `load_generator_ready`. Its interruption evidence recorded
+  `resume_allowed` and `not_attempted_process_exit`, and the run lease was
+  unheld. A fresh process resumed the same graph, produced the exact Reed98
+  dataset, and completed all 5,994 measured requests at 99.890920 requests per
+  second with p50/p95/p99 latency of 3.793/6.515/8.131 ms. All error and
+  timeout counters were zero, and all observed Pods retained their identities
+  with zero restarts. Cleanup deleted every resource. A subsequent
+  cleanup-only terminal audit left the final evidence as
+  `cleanup_completed`/`completed`.
+- Initializer-response-loss job `26c5d0701087` reconciled the durable systemd
+  initializer invocation `ba21b4c678834d5296d476eb5a95f5a5` without replay.
+  It proved the exact Reed98 dataset and completed all 5,994 requests at
+  99.894819 requests per second with p50/p95/p99 latency of
+  4.103/6.963/8.679 ms, zero errors, zero restarts, and unchanged Pod
+  identities. Its full 21-resource graph and all five role nodes were deleted.
+- Unsafe post-initialization job `4c2e0c6feafd` hard-exited with status 86 at
+  `warmup_started`. It retained the initialized Reed98 database, no result
+  artifact, an unheld lease, and the fail-closed `cleanup_only_required`
+  decision. A fresh `--resume` refused with status 2 and changed only the
+  recovery outcome to `resume_refused`; the contract, inventory, and execution
+  graph hash remained
+  `9962627111076e87934995bedc1da0e5a4e176a4483235fdaf5b2e676fb937da`.
+  Explicit `--cleanup-only` then deleted the 21-resource graph and all five
+  role nodes and finalized `cleanup_completed`/`completed` evidence.
+
+This is a representative checkpoint failure matrix, not exhaustive failure
+coverage. AWS does not yet claim live active-signal or cleanup-interruption
+qualification. Those paths remain synthetically covered but are outside this
+matrix.
+
 Operator execution must use
 `scripts/qualify_aws_oci_deathstarbench_distributed.py`; the provider helpers
-do not create or manage a process lease themselves. Keep the release gate
-closed until representative injected AWS failure/recovery paths and the
-remaining cross-provider gates pass.
+do not create or manage a process lease themselves. The candidate remains
+unreleased. The broader remaining release gates are representative Azure
+failure paths, publication or equivalent qualification of an immutable load
+driver, and final cross-provider cleanup review.

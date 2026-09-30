@@ -743,15 +743,15 @@ def _run_qualification(
         try:
             application.raise_if_cancelled(job)
             evidence = shared._read_interruption_evidence(str(job['id']))
-            if recovery_attempt and interrupt_at is not None and evidence is not None:
-                raise QualificationError(
-                    'A recovery with retained interruption evidence cannot inject another checkpoint.'
-                )
             if recovery_attempt and evidence is not None:
                 shared._update_interruption_evidence(job, recovery_outcome='resume_started')
             plan, ssh, image_lock, pin, clients = setup()
             setup_complete = True
-            if _public_key_digest(str(ssh['public_key'])) != pin['ssh_public_key_sha256']:
+            if (
+                not recovery_attempt
+                and _public_key_digest(str(ssh['public_key']))
+                != pin['ssh_public_key_sha256']
+            ):
                 raise QualificationError('SSH public key differs from the immutable candidate pin.')
             if measure:
                 job['_persist_results_artifact'] = True
@@ -899,31 +899,92 @@ def _run_qualification(
 
 
 def _require_resumable(job: Mapping[str, Any], *, provider: str, measure: bool) -> None:
+    evidence = shared._read_interruption_evidence(str(job['id']))
+    if evidence is not None:
+        if evidence['subsequent_signal'] is None:
+            evidence_state = evidence['execution_state']
+            replay_decision = evidence['replay_decision']
+        else:
+            evidence_state = evidence['subsequent_signal_execution_state']
+            replay_decision = evidence['subsequent_signal_replay_decision']
+        current_state = shared._execution_state(job)
+        if replay_decision != 'resume_allowed':
+            raise QualificationError(
+                f'Qualification job {job["id"]} retained interruption '
+                'evidence requires cleanup-only recovery.'
+            )
+        if current_state != evidence_state:
+            raise QualificationError(
+                f'Qualification job {job["id"]} current measurement state '
+                f'{current_state!r} does not exactly match retained '
+                f'interruption evidence state {evidence_state!r}; use '
+                '--cleanup-only instead.'
+            )
     shared._require_resumable(job, provider_name=provider.upper(), measure=measure)
 
 
 def _qualify(args: argparse.Namespace) -> int:
     interrupt_mode = shared._effective_interrupt_mode(args)
     if args.resume:
-        preliminary = _load_candidate_job(args.resume, provider=args.provider)
-        job_id = str(preliminary['id'])
+        job_id = str(args.resume)
+        if not application.RUN_ID_PATTERN.fullmatch(job_id):
+            raise QualificationError(
+                'Qualification job IDs must be 12 lowercase hex digits.'
+            )
         print(f'{args.provider.upper()} qualification job: {job_id}', flush=True)
         with shared._exclusive_job_lock(job_id):
-            job = _load_candidate_job(job_id, provider=args.provider)
+            try:
+                job = _load_candidate_job(job_id, provider=args.provider)
 
-            def resume_setup():
-                _require_resumable(job, provider=args.provider, measure=args.measure)
+                # Every resume check is a preflight.  Complete it before
+                # entering the orchestration runner, whose finally block is
+                # intentionally cleanup-owning after cloud work begins.  A
+                # refused resume must leave the graph untouched for the
+                # operator's explicit --cleanup-only decision.
+                _require_resumable(
+                    job,
+                    provider=args.provider,
+                    measure=args.measure,
+                )
+                if (
+                    args.interrupt_at is not None
+                    and shared._read_interruption_evidence(job_id) is not None
+                ):
+                    raise QualificationError(
+                        'A recovery with retained interruption evidence cannot '
+                        'inject another checkpoint.'
+                    )
                 shared._require_resume_workload_settings(job, args)
                 pin = _read_provider_pin(job)
                 _assert_resume_overrides(args, pin)
                 ssh = shared._ssh_material(args.ssh_env_file)
-                if _public_key_digest(str(ssh['public_key'])) != pin['ssh_public_key_sha256']:
-                    raise QualificationError('Resume SSH key differs from the saved provider pin.')
+                if (
+                    _public_key_digest(str(ssh['public_key']))
+                    != pin['ssh_public_key_sha256']
+                ):
+                    raise QualificationError(
+                        'Resume SSH key differs from the saved provider pin.'
+                    )
                 _job, plan = shared._resume_job(job, ssh)
                 _validate_saved_plan(job, pin)
                 image_lock = shared._lock_for_run(args.image_lock, job)
                 shared._preflight_anonymous_ghcr_images(image_lock)
-                clients = _oci_clients(args, pin) if args.provider == 'oci' else None
+                clients = (
+                    _oci_clients(args, pin)
+                    if args.provider == 'oci'
+                    else None
+                )
+            except QualificationError:
+                # The shared updater strictly reloads canonical evidence and is
+                # a no-op when no artifact exists.  Preserve every origin and
+                # cleanup field; only finalize this recovery attempt.
+                shared._update_interruption_evidence(
+                    {'id': job_id},
+                    recovery_outcome='resume_refused',
+                )
+                raise
+
+            def resume_setup():
                 return plan, ssh, image_lock, pin, clients
 
             return _run_qualification(

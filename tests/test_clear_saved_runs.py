@@ -208,6 +208,104 @@ class ClearSavedRunsTests(unittest.TestCase):
             self.assertIn('888888888888', main.job_tasks)
             self.assertIn(process, main.job_processes['999999999999'])
 
+    def test_distributed_destroyed_history_requires_strict_terminal_proof(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            aws_terminal, _ = saved_state(
+                root,
+                'aaaaaaaaaaaa',
+                'destroyed',
+                resources={
+                    main.aws_provider.AWS_DSB_GRAPH_KEY: {'audit': 'retained'},
+                    'aws_distributed_candidate': True,
+                },
+                plan={'provider': 'aws'},
+            )
+            aws_nonterminal, _ = saved_state(
+                root,
+                'bbbbbbbbbbbb',
+                'destroyed',
+                resources={
+                    main.aws_provider.AWS_DSB_GRAPH_KEY: {'status': 'running'},
+                    'aws_distributed_candidate': True,
+                },
+                plan={'provider': 'aws'},
+            )
+            oci_terminal, _ = saved_state(
+                root,
+                'cccccccccccc',
+                'destroyed',
+                resources={
+                    main.oci_provider.CONTRACT_KEY: {'audit': 'retained'},
+                },
+                plan={'provider': 'oci'},
+            )
+            oci_malformed, _ = saved_state(
+                root,
+                'dddddddddddd',
+                'destroyed',
+                resources={main.oci_provider.CONTRACT_KEY: {}},
+                plan={'provider': 'oci'},
+            )
+            aws_missing_contract, _ = saved_state(
+                root,
+                'eeeeeeeeeeee',
+                'destroyed',
+                plan={
+                    'provider': 'aws',
+                    'deathstarbench': {
+                        'topology_id': 'distributed_tiered_v1',
+                    },
+                },
+            )
+            oci_missing_contract, _ = saved_state(
+                root,
+                'ffffffffffff',
+                'destroyed',
+                plan={
+                    'provider': 'oci',
+                    'deathstarbench': {'runtime_id': 'k3s_v1'},
+                },
+            )
+
+            terminal_ids = {
+                aws_terminal.name,
+                oci_terminal.name,
+            }
+            with (
+                patch.object(main, 'RUNS', root),
+                patch.object(
+                    main.aws_provider,
+                    'distributed_deathstarbench_candidate_deleted',
+                    side_effect=lambda job: job['id'] in terminal_ids,
+                ),
+                patch.object(
+                    main.oci_provider,
+                    'distributed_candidate_is_deleted',
+                    side_effect=lambda job: job['id'] in terminal_ids,
+                ),
+            ):
+                payload = response_json(main.clear_saved_runs(
+                    ClearSavedRunsRequest(confirmed=True)
+                ))
+
+            self.assertEqual(payload, {
+                'deleted_count': 2,
+                'preserved_count': 4,
+                'preserved_run_ids': sorted((
+                    aws_nonterminal.name,
+                    oci_malformed.name,
+                    aws_missing_contract.name,
+                    oci_missing_contract.name,
+                )),
+            })
+            self.assertFalse(aws_terminal.exists())
+            self.assertFalse(oci_terminal.exists())
+            self.assertTrue(aws_nonterminal.exists())
+            self.assertTrue(oci_malformed.exists())
+            self.assertTrue(aws_missing_contract.exists())
+            self.assertTrue(oci_missing_contract.exists())
+
     def test_empty_archive_is_an_idempotent_no_op(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
             main,

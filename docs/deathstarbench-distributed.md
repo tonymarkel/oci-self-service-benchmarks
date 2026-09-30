@@ -12,14 +12,14 @@ warm-up, measurement, result/report, and terminal-cleanup path, followed by AWS
 job `98a16f2c3e8a` on the same shared contract. GCP additionally has the
 representative crash, response-loss, cleanup, and signal evidence described
 below, and Azure has one safe pre-initialization hard-exit, reacquisition,
-resume, and cleanup qualification.
+resume, and cleanup qualification. AWS and OCI have now completed the
+representative checkpoint failure matrix described below.
 
 `distributed_tiered_v1` is still unreleased for normal cloud provisioning. The
 UI does not offer it, and the normal API/provider path rejects it before
-creating a run or making a cloud write. The remaining release gates include an
+creating a run or making a cloud write. The remaining release gates are
 immutable load-driver publication or equivalent qualification, representative
-Azure failure paths, representative AWS and OCI failure/recovery qualification,
-and final cross-provider review of the cleanup evidence.
+Azure failure paths, and final cross-provider review of the cleanup evidence.
 
 ## Benchmark modes
 
@@ -725,8 +725,8 @@ The first complete measured OCI qualification then passed on 2026-09-29 as job
   attachments. Terminal validation was narrowed to their genuinely immutable
   identity and relationship projection; the rerun then proved complete absence
   and cleared the stale cleanup error. This validates that specific terminal
-  cleanup-only convergence, not the still-pending representative OCI
-  interruption and response-loss gates.
+  cleanup-only convergence; the later representative checkpoint evidence is
+  recorded below.
 
 The immediately preceding AWS attempt, job `d7b5e018e6b1`, exposed a specific
 EC2 eventual-consistency boundary. `CreateInternetGateway` returned the accepted
@@ -759,9 +759,68 @@ The first complete measured AWS qualification then passed on 2026-09-29 as job
 - Exact cleanup deleted the complete tagged AWS graph, and a fresh-process
   cleanup-only run subsequently reloaded the persisted graph and passed its
   terminal absence audit. Final state is `destroyed` with no error or cleanup
-  error. This positive measurement and post-restart cleanup proof do not replace
-  the still-pending representative injected AWS interruption, response-loss,
-  and resume qualifications.
+  error.
+
+### AWS and OCI representative checkpoint failure matrix
+
+The AWS representative checkpoint failure matrix passed on 2026-09-30:
+
+- Job `3249984b8909` hard-exited with status 86 at the safely resumable
+  `load_generator_ready` checkpoint. Its immutable evidence recorded
+  `resume_allowed` and `not_attempted_process_exit`, and the run lease was
+  unheld. A fresh process reacquired the job, resumed the same graph, proved
+  the exact Reed98 dataset, and completed all 5,994 measured requests at
+  99.890920 requests per second. p50/p95/p99 latency was
+  3.793/6.515/8.131 ms; error and timeout counters were zero; and all observed
+  Pod identities remained unchanged with zero restarts. Exact cleanup completed,
+  and a subsequent cleanup-only terminal audit left final evidence
+  `cleanup_completed`/`completed` with no recoverable ownership.
+- Job `26c5d0701087` injected response loss around the durable Social Network
+  initializer. The resumed controller reconciled the one systemd invocation,
+  ID `ba21b4c678834d5296d476eb5a95f5a5`, without replay. It proved the exact
+  Reed98 dataset and completed all 5,994 requests at 99.894819 requests per
+  second with p50/p95/p99 latency of 4.103/6.963/8.679 ms, zero errors, zero
+  restarts, and unchanged Pods. Cleanup deleted all 21 graph resources and all
+  five role nodes.
+- Job `4c2e0c6feafd` hard-exited with status 86 at unsafe
+  `warmup_started`. It retained the exact initialized Reed98 dataset, no result
+  artifact, an unheld lease, and `cleanup_only_required`. A fresh `--resume`
+  refused with status 2, changing only the evidence outcome to
+  `resume_refused`; the contract, inventory, and execution graph hash remained
+  `9962627111076e87934995bedc1da0e5a4e176a4483235fdaf5b2e676fb937da`.
+  Explicit `--cleanup-only` deleted the 21-resource graph and all five role
+  nodes and finalized `cleanup_completed`/`completed` evidence.
+
+OCI job `327749bd33cb` passed the safe pre-initialization and response-loss
+portion of the same matrix on 2026-09-30. It hard-exited with status 86 at
+`load_generator_ready`, retained `resume_allowed`/
+`not_attempted_process_exit` evidence with an unheld lease, and then resumed
+from a fresh process. The controller reconciled systemd initializer invocation
+`edbb209e98244812aec91af251fcef0c` after injected response loss without
+replay. The resumed run proved the exact Reed98 dataset and completed all 5,994
+requests at 99.894792 requests per second with p50/p95/p99 latency of
+3.089/4.831/5.991 ms, zero errors, zero restarts, and unchanged Pods. Exact
+cleanup deleted all 21 OCI graph entries and all five role nodes and finalized
+`resume_completed`/`completed` evidence with no recoverable ownership.
+
+OCI job `c69567748b43` completed the unsafe post-initialization portion of the
+matrix on 2026-09-30. It hard-exited with status 86 at `warmup_started` after
+proving the exact Reed98 dataset and capturing all 27 pre-measurement Pod
+identities. The run retained no result or report artifact, released its lease,
+and recorded `cleanup_only_required`/`not_attempted_process_exit`. A fresh
+`--resume` refused with status 2 and changed only `recovery_outcome` to
+`resume_refused`; the contract, inventory, and execution graph hash remained
+`312c480bc1006ebebfb03d461231d5d1d0276f4a20a602dd72a9f1765220ccd6`.
+Explicit `--cleanup-only` then deleted and audited all 21 graph entries and all
+five role nodes, finalized `cleanup_completed`/`completed`, released the lease,
+and projected no recoverable ownership.
+
+This is deliberately a representative checkpoint failure matrix. AWS and OCI
+do not claim live active-signal or cleanup-interruption coverage. Those paths
+remain synthetically covered, but they are not part of this live matrix. The
+broader remaining release gates are representative Azure failure paths,
+publication or equivalent qualification of an immutable load-driver artifact,
+and final cross-provider cleanup review.
 
 ## GCP operator qualification
 
@@ -1135,15 +1194,15 @@ independent SSH transport timeout during the measured wrk2 command, after
 initialization and warm-up. Both attempts failed closed, released their leases,
 completed cleanup, and had absent resource groups afterward.
 
-The release and UI gates remain closed. GCP now has representative forbidden
+The release and UI gates remain closed. GCP has representative forbidden
 paths, safe pre-initialization recovery, unsafe post-initialization cleanup-only,
 initializer response loss, cleanup interruption, and active-work signal
-evidence in addition to positive deployment and measurement. The corresponding
-representative Azure paths, publication or equivalent qualification of an
-immutable load-driver artifact, and representative AWS and OCI failure/recovery
-qualification remain release requirements. AWS and OCI now satisfy their
-positive deployment and measurement gates, but not their representative
-injected interruption, response-loss, and resume gates.
+evidence in addition to positive deployment and measurement. AWS and OCI have
+completed their representative checkpoint matrices. They do not claim live
+active-signal or cleanup-interruption coverage. The remaining release
+requirements are representative Azure paths, publication or equivalent
+qualification of an immutable load-driver artifact, and final cross-provider
+cleanup review.
 
 ## Network and access policy
 
@@ -1246,7 +1305,9 @@ absence, while any ambiguity leaves the durable graph available to
    response-loss, cleanup-interruption, and active-signal qualification passed.
    AWS and OCI now use the shared operator wrapper and have passed positive
    infrastructure, workload, network, measured-result, report, and
-   terminal-cleanup qualification.
+   terminal-cleanup qualification. AWS and OCI also passed their representative
+   safe recovery, initializer-response-loss, and unsafe cleanup-only checkpoint
+   matrices.
 4. **Implemented for all four provider candidates:** the provider-neutral K3s
    bootstrap, OS preparation, provider-specific exact database mount, secure
    node joining, and cluster-placement attestation are covered synthetically.
@@ -1275,19 +1336,23 @@ absence, while any ambiguity leaves the durable graph available to
    strict measurement, report, and cleanup path. The two post-run
    ownership/identity hardenings plus GCP safe recovery,
    post-initialization cleanup-only behavior, initializer response loss,
-   cleanup interruption, and active-work SIGTERM have live evidence. The
-   corresponding representative Azure, AWS, and OCI failure/recovery paths
-   still require live qualification.
+   cleanup interruption, and active-work SIGTERM have live evidence. AWS now
+   has representative safe recovery, response-loss reconciliation, rejected
+   unsafe resume, and explicit cleanup-only evidence. OCI now has the same
+   representative evidence; the representative Azure paths still require live
+   qualification.
    Initialization is not resumable after partial dataset mutation: an
    interrupted initialization fails closed and requires fresh infrastructure
    rather than continuing from an unknown database state. Those remaining
    representative paths remain release gates.
-7. **Positive provider qualification complete; failure gates in progress:**
+7. **Positive provider qualification complete; representative failure matrix
+   in progress:**
    GCP recovery and representative negative-path evidence are retained above.
    AWS and OCI now have positive live infrastructure, K3s, workload, network,
    measured-result, report, and cleanup evidence. Both also have post-restart
-   terminal cleanup-only proofs. Their broader injected interruption,
-   response-loss, and resume gates remain.
+   terminal cleanup-only proofs. Their representative checkpoint matrices are
+   complete. Neither provider claims live active-signal or cleanup-interruption
+   coverage from this matrix.
 8. **Planned:** per-role CPU, memory, network, disk, restart, and readiness
    telemetry.
 9. **Planned:** offered-load sweeps, repeated trials, and
@@ -1295,7 +1360,7 @@ absence, while any ambiguity leaves the durable graph available to
 10. **Planned:** advanced per-role shape selection and later topology
    revisions.
 
-The UI exposes only released profiles. Until the remaining representative
-Azure, AWS, and OCI failure/recovery qualifications, the immutable load-driver
-gate, and final provider cleanup release review pass, the existing compact mode
-remains the only runnable option.
+The UI exposes only released profiles. The remaining release gates are
+representative Azure paths, immutable load-driver publication or equivalent
+qualification, and final cross-provider cleanup review. Until those gates pass,
+the existing compact mode remains the only runnable option.

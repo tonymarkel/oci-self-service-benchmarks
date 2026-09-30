@@ -535,6 +535,331 @@ class MainRunLeaseIntegrationTests(unittest.TestCase):
         self.assertEqual(load_calls, 2)
         self.assertEqual(cleaned_revisions, ['fresh-under-lease'])
 
+    def test_distributed_destroyed_fast_path_requires_terminal_proof(self):
+        providers = (
+            (
+                'aws',
+                {
+                    main.aws_provider.AWS_DSB_GRAPH_KEY: {'audit': 'retained'},
+                    'aws_distributed_candidate': True,
+                },
+                main.aws_provider,
+                'distributed_deathstarbench_candidate_deleted',
+            ),
+            (
+                'oci',
+                {main.oci_provider.CONTRACT_KEY: {'audit': 'retained'}},
+                main.oci_provider,
+                'distributed_candidate_is_deleted',
+            ),
+        )
+        evidence_cases = (
+            (True, None, True),
+            (False, None, False),
+            (True, 'terminal audit failed', False),
+        )
+        for provider, resources, module, predicate in providers:
+            for live in (False, True):
+                for terminal, cleanup_error, accepted in evidence_cases:
+                    with self.subTest(
+                        provider=provider,
+                        live=live,
+                        terminal=terminal,
+                        cleanup_error=cleanup_error,
+                    ), tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        directory = write_saved_run(root, status='destroyed')
+                        state_path = directory / 'state.json'
+                        state = json.loads(state_path.read_text())
+                        state['plan']['provider'] = provider
+                        state['resources'] = resources
+                        state['cleanup_error'] = cleanup_error
+                        state_path.write_text(json.dumps(state, indent=2))
+                        before = state_path.read_bytes()
+                        if live:
+                            main.jobs[RUN_ID] = json.loads(json.dumps(state))
+
+                        with (
+                            patch.object(main, 'RUNS', root),
+                            patch.object(module, predicate, return_value=terminal),
+                            patch.object(main, 'destroy_with_status') as cleanup,
+                            patch.object(
+                                main,
+                                'acquire_run_lease',
+                                side_effect=AssertionError(
+                                    'destroyed fast path must not acquire ownership'
+                                ),
+                            ),
+                        ):
+                            if accepted:
+                                response = asyncio.run(main.destroy(RUN_ID))
+                                self.assertEqual(response, {'status': 'destroyed'})
+                            else:
+                                with self.assertRaises(HTTPException) as raised:
+                                    asyncio.run(main.destroy(RUN_ID))
+                                self.assertEqual(raised.exception.status_code, 409)
+
+                        cleanup.assert_not_called()
+                        self.assertEqual(state_path.read_bytes(), before)
+                        main.jobs.clear()
+
+    def test_destroyed_partial_distributed_plan_rejects_missing_contract(self):
+        cases = (
+            (
+                'aws',
+                {'topology_id': 'distributed_tiered_v1'},
+                main.aws_provider,
+                'distributed_deathstarbench_candidate_deleted',
+            ),
+            (
+                'oci',
+                {'runtime_id': 'k3s_v1'},
+                main.oci_provider,
+                'distributed_candidate_is_deleted',
+            ),
+        )
+        for provider, options, module, predicate in cases:
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                directory = write_saved_run(root, status='destroyed')
+                state_path = directory / 'state.json'
+                state = json.loads(state_path.read_text())
+                state['plan']['provider'] = provider
+                state['plan']['deathstarbench'] = options
+                state['resources'] = {}
+                state_path.write_text(json.dumps(state, indent=2))
+                before = state_path.read_bytes()
+
+                with (
+                    patch.object(main, 'RUNS', root),
+                    patch.object(module, predicate, return_value=False),
+                    patch.object(main, 'destroy_with_status') as cleanup,
+                    patch.object(
+                        main,
+                        'acquire_run_lease',
+                        side_effect=AssertionError(
+                            'invalid destroyed state must fail before ownership'
+                        ),
+                    ),
+                    self.assertRaises(HTTPException) as raised,
+                ):
+                    asyncio.run(main.destroy(RUN_ID))
+
+                self.assertEqual(raised.exception.status_code, 409)
+                cleanup.assert_not_called()
+                self.assertEqual(state_path.read_bytes(), before)
+
+    def test_destroy_revalidates_distributed_terminal_proof_under_lease(self):
+        for terminal in (False, True):
+            with (
+                self.subTest(terminal=terminal),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                directory = write_saved_run(root, status='complete')
+                state_path = directory / 'state.json'
+                state = json.loads(state_path.read_text())
+                state['plan']['provider'] = 'aws'
+                state['resources'] = {
+                    main.aws_provider.AWS_DSB_GRAPH_KEY: {'audit': 'retained'},
+                    'aws_distributed_candidate': True,
+                }
+                state_path.write_text(json.dumps(state, indent=2))
+                actual_load = main.load_persisted_job
+                load_calls = 0
+
+                def load(job_id):
+                    nonlocal load_calls
+                    loaded = actual_load(job_id)
+                    load_calls += 1
+                    if load_calls == 1:
+                        fresh = json.loads(state_path.read_text())
+                        fresh['status'] = 'destroyed'
+                        state_path.write_text(json.dumps(fresh, indent=2))
+                    return loaded
+
+                with (
+                    patch.object(main, 'RUNS', root),
+                    patch.object(main, 'load_persisted_job', side_effect=load),
+                    patch.object(
+                        main.aws_provider,
+                        'distributed_deathstarbench_candidate_deleted',
+                        return_value=terminal,
+                    ),
+                    patch.object(main, 'destroy_with_status') as cleanup,
+                ):
+                    if terminal:
+                        response = asyncio.run(main.destroy(RUN_ID))
+                        self.assertEqual(response, {'status': 'destroyed'})
+                    else:
+                        with self.assertRaises(HTTPException) as raised:
+                            asyncio.run(main.destroy(RUN_ID))
+                        self.assertEqual(raised.exception.status_code, 409)
+
+                self.assertEqual(load_calls, 2)
+                self.assertFalse(inspect_run_lease(root, RUN_ID).held)
+                cleanup.assert_not_called()
+                main.jobs.clear()
+
+    def test_nonterminal_oci_candidate_requires_operator_cleanup_under_lease(self):
+        cases = (
+            (
+                'partial-plan',
+                {'runtime_id': 'k3s_v1'},
+                {},
+            ),
+            (
+                'marker',
+                {},
+                {'oci_distributed_candidate': False},
+            ),
+            (
+                'corrupt-contract',
+                {},
+                {main.oci_provider.CONTRACT_KEY: None},
+            ),
+            (
+                'exact-alias',
+                {},
+                {'oci_dsb_control_public_ip': '198.51.100.20'},
+            ),
+        )
+        for label, options, resources in cases:
+            with self.subTest(signal=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                directory = write_saved_run(root, status='cleanup_failed')
+                state_path = directory / 'state.json'
+                state = json.loads(state_path.read_text())
+                state['plan']['provider'] = 'oci'
+                if options:
+                    state['plan']['deathstarbench'] = options
+                state['resources'] = resources
+                state_path.write_text(json.dumps(state, indent=2))
+                before = state_path.read_bytes()
+                observed_lease = []
+                actual_detection = main._distributed_candidate_providers
+
+                def detect(job):
+                    observed_lease.append(
+                        inspect_run_lease(root, RUN_ID).held
+                    )
+                    return actual_detection(job)
+
+                with (
+                    patch.object(main, 'RUNS', root),
+                    patch.object(
+                        main,
+                        '_distributed_candidate_providers',
+                        side_effect=detect,
+                    ),
+                    patch.object(main, 'destroy_with_status') as cleanup,
+                    patch.object(main, 'destroy_oci_resources') as legacy_cleanup,
+                    self.assertRaises(HTTPException) as raised,
+                ):
+                    asyncio.run(main.destroy(RUN_ID))
+
+                self.assertEqual(raised.exception.status_code, 409)
+                self.assertIn('--cleanup-only ' + RUN_ID, raised.exception.detail)
+                self.assertEqual(state_path.read_bytes(), before)
+                self.assertEqual(observed_lease, [True])
+                self.assertFalse(inspect_run_lease(root, RUN_ID).held)
+                self.assertNotIn(RUN_ID, main.jobs)
+                cleanup.assert_not_called()
+                legacy_cleanup.assert_not_called()
+
+    def test_nonterminal_aws_candidate_without_graph_requires_operator_cleanup(self):
+        cases = (
+            (
+                'partial-plan',
+                {'topology_id': 'distributed_tiered_v1'},
+                {},
+            ),
+            (
+                'marker',
+                {},
+                {'aws_distributed_candidate': False},
+            ),
+            (
+                'exact-alias',
+                {},
+                {'aws_dsb_control_public_ip': '198.51.100.10'},
+            ),
+        )
+        for label, options, resources in cases:
+            with self.subTest(signal=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                directory = write_saved_run(root, status='cleanup_failed')
+                state_path = directory / 'state.json'
+                state = json.loads(state_path.read_text())
+                state['plan']['provider'] = 'aws'
+                if options:
+                    state['plan']['deathstarbench'] = options
+                state['resources'] = resources
+                state_path.write_text(json.dumps(state, indent=2))
+                before = state_path.read_bytes()
+
+                with (
+                    patch.object(main, 'RUNS', root),
+                    patch.object(main, 'destroy_with_status') as cleanup,
+                    patch.object(
+                        main.aws_provider,
+                        'destroy_resources',
+                    ) as legacy_cleanup,
+                    self.assertRaises(HTTPException) as raised,
+                ):
+                    asyncio.run(main.destroy(RUN_ID))
+
+                self.assertEqual(raised.exception.status_code, 409)
+                self.assertIn('--cleanup-only ' + RUN_ID, raised.exception.detail)
+                self.assertEqual(state_path.read_bytes(), before)
+                self.assertFalse(inspect_run_lease(root, RUN_ID).held)
+                self.assertNotIn(RUN_ID, main.jobs)
+                cleanup.assert_not_called()
+                legacy_cleanup.assert_not_called()
+
+    def test_nonterminal_aws_candidate_with_graph_uses_provider_cleanup(self):
+        async def scenario(root):
+            directory = write_saved_run(root, status='cleanup_failed')
+            state_path = directory / 'state.json'
+            state = json.loads(state_path.read_text())
+            state['plan']['provider'] = 'aws'
+            state['resources'] = {
+                main.aws_provider.AWS_DSB_GRAPH_KEY: {'retained': 'graph'},
+                'aws_distributed_candidate': True,
+            }
+            state_path.write_text(json.dumps(state, indent=2))
+            observed = []
+
+            def dedicated_cleanup(job, **_kwargs):
+                observed.append(job['resources'])
+                job['status'] = 'destroyed'
+                job['cleanup_error'] = None
+
+            with (
+                patch.object(main, 'RUNS', root),
+                patch.object(
+                    main.aws_provider,
+                    'destroy_resources',
+                    side_effect=dedicated_cleanup,
+                ) as cleanup,
+                patch.object(main, 'destroy_oci_resources') as oci_cleanup,
+            ):
+                response = await main.destroy(RUN_ID)
+                task = main.job_tasks[RUN_ID]
+                await task
+                await asyncio.sleep(0)
+            return response, observed, cleanup.call_count, oci_cleanup.call_count
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            response, observed, calls, oci_calls = asyncio.run(scenario(root))
+
+        self.assertEqual(response, {'status': 'destroying'})
+        self.assertEqual(calls, 1)
+        self.assertEqual(oci_calls, 0)
+        self.assertEqual(len(observed), 1)
+        self.assertIn(main.aws_provider.AWS_DSB_GRAPH_KEY, observed[0])
+
     def test_saved_run_deletion_fails_closed_for_held_or_ambiguous_lease(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

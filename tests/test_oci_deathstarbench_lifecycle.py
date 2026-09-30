@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import oci as sdk
 
+from app import main
 from app.providers import oci
 
 
@@ -1169,6 +1170,19 @@ class OCIDistributedLifecycleTests(unittest.TestCase):
         self.assertTrue(oci.distributed_candidate_is_deleted(self.job))
         self.assertTrue(self.contract['entries']['control']['id'])
         self.assertTrue(self.job['resources']['oci_dsb_control_public_ip'])
+        self.job['plan'] = {'provider': 'oci'}
+        self.assertTrue(main.has_recoverable_resources(self.job))
+        self.assertTrue(main.has_recoverable_resources_for_any_provider(self.job))
+        self.job['status'] = 'destroyed'
+        self.job['cleanup_error'] = None
+        before = len(self.cloud.calls)
+        self.assertFalse(main.has_recoverable_resources(self.job))
+        self.assertFalse(main.has_recoverable_resources_for_any_provider(self.job))
+        self.assertEqual(len(self.cloud.calls), before)
+        self.job['cleanup_error'] = 'terminal audit failed'
+        self.assertTrue(main.has_recoverable_resources(self.job))
+        self.assertTrue(main.has_recoverable_resources_for_any_provider(self.job))
+        self.job['cleanup_error'] = None
         self.job['resources']['deathstarbench_distributed_network_qualification'] = {'retained': 'evidence'}
         self.assertTrue(oci.distributed_candidate_is_deleted(self.job))
         self.destroy()

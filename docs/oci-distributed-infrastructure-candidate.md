@@ -129,8 +129,40 @@ After process restart, cleanup-only initially refused its terminal audit because
 OCI had legitimately advanced boot-attachment `time_updated`. Terminal
 validation was corrected to retain only genuinely immutable boot-attachment
 identity and relationship fields. The rerun proved every resource absent,
-finalized `destroyed`, and cleared `cleanup_error`. Keep the release gate closed
-until representative OCI interruption/recovery paths and the remaining
-cross-provider gates pass.
+finalized `destroyed`, and cleared `cleanup_error`.
+
+Safe pre-initialization recovery and initializer response loss were then
+live-qualified together on 2026-09-30 as job `327749bd33cb`. The first process
+hard-exited with status 86 after durably reaching `load_generator_ready`; the
+evidence recorded `resume_allowed` and `not_attempted_process_exit`, and the
+lease was unheld. A fresh process resumed the same graph and reconciled durable
+initializer invocation `edbb209e98244812aec91af251fcef0c` after injected
+response loss without replay. It proved the exact Reed98 dataset, completed all
+5,994 measured requests at 99.894792 requests per second with p50/p95/p99
+latency of 3.089/4.831/5.991 ms, and recorded zero errors, zero restarts, and
+unchanged Pod identities. Exact cleanup deleted all 21 OCI graph entries and
+all five role nodes; evidence finalized as `resume_completed` and `completed`,
+with no remaining recoverable ownership.
+
+Unsafe post-initialization recovery was live-qualified on 2026-09-30 as job
+`c69567748b43`. The first process hard-exited with status 86 at
+`warmup_started` after proving the exact Reed98 dataset and capturing all 27
+pre-measurement Pod identities. It retained no result or report artifact,
+released its lease, and recorded
+`cleanup_only_required`/`not_attempted_process_exit`. A fresh `--resume`
+refused with status 2; only the evidence recovery outcome changed to
+`resume_refused`, while the contract, inventory, and execution graph hash
+remained
+`312c480bc1006ebebfb03d461231d5d1d0276f4a20a602dd72a9f1765220ccd6`.
+Explicit `--cleanup-only` deleted and audited all 21 graph entries and all five
+role nodes, finalized `cleanup_completed`/`completed`, released the lease, and
+projected no recoverable ownership.
+
+This completes OCI's representative checkpoint failure matrix. OCI does not
+claim live active-signal or cleanup-interruption qualification; those paths
+remain synthetically covered but are outside this matrix. The candidate remains
+unreleased. The broader remaining release gates are representative Azure
+failure paths, publication or equivalent qualification of an immutable load
+driver, and final cross-provider cleanup review.
 
 SDK reference: [OCI Core clients](https://docs.oracle.com/en-us/iaas/tools/python/latest/api/core.html).

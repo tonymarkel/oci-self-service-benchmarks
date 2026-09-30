@@ -240,6 +240,69 @@ class SavedResultReportingTests(unittest.TestCase):
         self.assertEqual(summary['benchmark_status'], 'complete')
         self.assertFalse(summary['recoverable'])
 
+    def test_distributed_history_requires_provider_local_terminal_evidence(self):
+        cases = (
+            (
+                'aws',
+                'aaaaaaaaaaaa',
+                {
+                    main.aws_provider.AWS_DSB_GRAPH_KEY: {'retained': 'audit'},
+                    'aws_distributed_candidate': True,
+                    'aws_account_id': '123456789012',
+                    'aws_dsb_control_public_ip': '198.51.100.10',
+                },
+                main.aws_provider,
+                'distributed_deathstarbench_candidate_deleted',
+            ),
+            (
+                'oci',
+                'bbbbbbbbbbbb',
+                {
+                    main.oci_provider.CONTRACT_KEY: {'retained': 'audit'},
+                    'oci_dsb_control_public_ip': '198.51.100.20',
+                    'oci_dsb_database_volume_id': 'ocid1.volume.example',
+                },
+                main.oci_provider,
+                'distributed_candidate_is_deleted',
+            ),
+        )
+        for provider, job_id, resources, module, predicate in cases:
+            for terminal in (True, False):
+                with self.subTest(provider=provider, terminal=terminal):
+                    plan = {
+                        'provider': provider,
+                        'region': 'test-region',
+                        'shape': 'test-shape',
+                        'benchmarks': [],
+                        'llm_benchmarks': [],
+                    }
+                    state = {
+                        'id': job_id,
+                        'status': 'destroyed',
+                        'benchmark_status': 'unknown',
+                        'error': None,
+                        'plan': plan,
+                        'events': [],
+                        'resources': resources,
+                        'results': [],
+                    }
+                    with tempfile.TemporaryDirectory() as directory:
+                        runs = Path(directory)
+                        run = runs / job_id
+                        run.mkdir()
+                        (run / 'state.json').write_text(json.dumps(state))
+                        (run / 'plan.json').write_text(json.dumps(plan))
+                        with (
+                            patch.object(main, 'RUNS', runs),
+                            patch.dict(main.jobs, {}, clear=True),
+                            patch.object(module, predicate, return_value=terminal),
+                        ):
+                            status = main.job_status(job_id)
+                            summary = main.run_summary(run)
+
+                    self.assertIs(status['recoverable'], not terminal)
+                    self.assertIs(summary['recoverable'], not terminal)
+
     def test_frontend_does_not_present_noncomplete_outcomes_as_success(self):
         root = Path(__file__).resolve().parents[1]
         app_javascript = (root / 'app/static/app.js').read_text()

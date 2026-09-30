@@ -911,8 +911,28 @@ def _qualify(args: argparse.Namespace) -> int:
         with shared._exclusive_job_lock(job_id):
             job = _load_candidate_job(job_id, provider=args.provider)
 
+            # Replay safety is a local persisted-state decision.  Refuse an
+            # unsafe one-shot journal before entering the orchestration runner,
+            # whose finally block is intentionally cleanup-owning after setup
+            # begins.  A refused resume must leave the cloud graph untouched so
+            # the operator can make the explicit --cleanup-only decision.
+            try:
+                _require_resumable(
+                    job,
+                    provider=args.provider,
+                    measure=args.measure,
+                )
+            except QualificationError:
+                # The shared updater strictly reloads canonical evidence and is
+                # a no-op when no artifact exists.  Preserve every origin and
+                # cleanup field; only finalize this recovery attempt.
+                shared._update_interruption_evidence(
+                    job,
+                    recovery_outcome='resume_refused',
+                )
+                raise
+
             def resume_setup():
-                _require_resumable(job, provider=args.provider, measure=args.measure)
                 shared._require_resume_workload_settings(job, args)
                 pin = _read_provider_pin(job)
                 _assert_resume_overrides(args, pin)

@@ -9,6 +9,7 @@ from botocore.session import Session
 from botocore.exceptions import ClientError
 from botocore.validate import validate_parameters
 
+from app import main
 from app.providers import aws
 from app.resource_inventory import ResourceInventoryError, load_role_node_inventory
 from tests.test_aws_provider import FakeSession
@@ -692,6 +693,8 @@ class AwsDistributedLifecycleTests(unittest.TestCase):
         self.assertTrue(all(entry.get('id') for entry in graph.values()))
         before = len(self.ec2.calls)
         self.assertTrue(aws.distributed_deathstarbench_candidate_deleted(self.job))
+        self.assertFalse(main.has_recoverable_resources(self.job))
+        self.assertFalse(main.has_recoverable_resources_for_any_provider(self.job))
         self.assertEqual(len(self.ec2.calls), before)
         self.assertNotIn('cleanup_error', self.job)
         with self.assertRaisesRegex(ResourceInventoryError, 'running state'):

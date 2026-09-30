@@ -99,6 +99,7 @@ from .iperf3 import parse_output as parse_iperf3_output
 from .providers import aws as aws_provider
 from .providers import azure as azure_provider
 from .providers import gcp as gcp_provider
+from .providers import oci as oci_provider
 from .providers.registry import (
     dispatch_provider_operation,
     provider_adapter,
@@ -712,11 +713,55 @@ def require_complete_benchmark_results(job):
     )
 
 
+def _distributed_candidate_local_terminal_state(job):
+    """Return local terminal proof for a distributed AWS/OCI candidate.
+
+    ``None`` means that the saved run is not one of these operator-only
+    candidates. ``False`` deliberately includes malformed, mixed-provider, and
+    nonterminal candidate state so generic recovery projections fail closed.
+    Both provider predicates are local-only and never make cloud calls.
+    """
+
+    if not isinstance(job, dict):
+        return False
+    resources = job.get('resources', {})
+    if not isinstance(resources, dict):
+        return False
+    has_aws_candidate = (
+        aws_provider.AWS_DSB_GRAPH_KEY in resources
+        or resources.get('aws_distributed_candidate') is True
+    )
+    has_oci_candidate = oci_provider.CONTRACT_KEY in resources
+    if not has_aws_candidate and not has_oci_candidate:
+        return None
+    if has_aws_candidate and has_oci_candidate:
+        return False
+    plan = job.get('plan')
+    provider = (
+        plan.get('provider')
+        if isinstance(plan, dict)
+        else getattr(plan, 'provider', None)
+    )
+    try:
+        if provider == 'aws' and has_aws_candidate:
+            return aws_provider.distributed_deathstarbench_candidate_deleted(job)
+        if provider == 'oci' and has_oci_candidate:
+            return oci_provider.distributed_candidate_is_deleted(job)
+    except Exception:
+        # A projection must never turn damaged terminal evidence into a local
+        # absence proof merely because its validator raised unexpectedly.
+        return False
+    return False
+
+
 def has_recoverable_resources(job):
     """Return whether a saved run has enough state for provider cleanup."""
     resources = job.get('resources', {})
     if not isinstance(resources, dict):
         return True
+    distributed_terminal = _distributed_candidate_local_terminal_state(job)
+    if distributed_terminal is not None:
+        return not distributed_terminal
     if ROLE_NODE_INVENTORY_KEY in resources:
         try:
             inventory = load_role_node_inventory(
@@ -801,6 +846,9 @@ def has_recoverable_resources(job):
 
 def has_recoverable_resources_for_any_provider(job):
     """Fail closed when saved provider metadata is missing or inconsistent."""
+    distributed_terminal = _distributed_candidate_local_terminal_state(job)
+    if distributed_terminal is not None:
+        return not distributed_terminal
     if has_recoverable_resources(job):
         return True
     resources = job.get('resources', {})
@@ -1270,16 +1318,22 @@ def run_summary(directory):
         max(path.stat().st_mtime for path in artifacts),
         tz=timezone.utc,
     ).isoformat()
-    # A provider assigns ``destroyed`` only after cleanup has proved that its
-    # run-owned resources are absent. OCI intentionally retains the deleted
-    # resource IDs in the audit trail, so those stale IDs must not make a
-    # successfully destroyed run look recoverable in history.
+    recovery_job = {**state, 'plan': plan}
+    distributed_terminal = _distributed_candidate_local_terminal_state(
+        recovery_job
+    )
+    # Legacy compact providers assign ``destroyed`` only after their cleanup
+    # proof and may retain harmless audit IDs. Distributed AWS/OCI candidates
+    # instead retain a much richer tombstone graph, so history must require the
+    # provider-specific local predicate and fail closed on malformed/nonterminal
+    # state even when the outer status says ``destroyed``.
     recoverable = (
-        status != 'destroyed'
-        and has_recoverable_resources_for_any_provider({
-            **state,
-            'plan': plan,
-        })
+        not distributed_terminal
+        if distributed_terminal is not None
+        else (
+            status != 'destroyed'
+            and has_recoverable_resources_for_any_provider(recovery_job)
+        )
     )
     provider = plan.get('provider', 'oci')
     return {

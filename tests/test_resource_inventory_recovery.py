@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from app import main
 from app.resource_inventory import (
@@ -108,6 +109,105 @@ class RoleNodeInventoryRecoveryTests(unittest.TestCase):
 
         self.assertTrue(main.has_recoverable_resources(job))
         self.assertTrue(main.has_recoverable_resources_for_any_provider(job))
+
+    def test_terminal_distributed_tombstones_override_retained_audit_identity(self):
+        cases = (
+            (
+                'aws',
+                {
+                    main.aws_provider.AWS_DSB_GRAPH_KEY: {'retained': 'audit'},
+                    'aws_distributed_candidate': True,
+                    'aws_account_id': '123456789012',
+                    'aws_dsb_control_public_ip': '198.51.100.10',
+                },
+                main.aws_provider,
+                'distributed_deathstarbench_candidate_deleted',
+            ),
+            (
+                'oci',
+                {
+                    main.oci_provider.CONTRACT_KEY: {'retained': 'audit'},
+                    'oci_dsb_control_public_ip': '198.51.100.20',
+                    'oci_dsb_database_volume_id': 'ocid1.volume.example',
+                },
+                main.oci_provider,
+                'distributed_candidate_is_deleted',
+            ),
+        )
+        for provider, resources, module, predicate in cases:
+            with self.subTest(provider=provider), patch.object(
+                module,
+                predicate,
+                return_value=True,
+            ) as terminal:
+                job = {
+                    'status': 'destroyed',
+                    'plan': {'provider': provider},
+                    'resources': resources,
+                }
+
+                self.assertFalse(main.has_recoverable_resources(job))
+                self.assertFalse(
+                    main.has_recoverable_resources_for_any_provider(job)
+                )
+                self.assertGreaterEqual(terminal.call_count, 2)
+
+    def test_nonterminal_or_malformed_distributed_graphs_fail_closed(self):
+        cases = (
+            (
+                'aws',
+                {main.aws_provider.AWS_DSB_GRAPH_KEY: {}},
+                main.aws_provider,
+                'distributed_deathstarbench_candidate_deleted',
+            ),
+            (
+                'oci',
+                {main.oci_provider.CONTRACT_KEY: {}},
+                main.oci_provider,
+                'distributed_candidate_is_deleted',
+            ),
+        )
+        for provider, resources, module, predicate in cases:
+            with self.subTest(provider=provider), patch.object(
+                module,
+                predicate,
+                return_value=False,
+            ):
+                job = {
+                    'status': 'destroyed',
+                    'plan': {'provider': provider},
+                    'resources': resources,
+                }
+
+                self.assertTrue(main.has_recoverable_resources(job))
+                self.assertTrue(
+                    main.has_recoverable_resources_for_any_provider(job)
+                )
+
+    def test_distributed_provider_mismatch_and_mixed_graph_fail_closed(self):
+        mismatched = {
+            'status': 'destroyed',
+            'plan': {'provider': 'oci'},
+            'resources': {
+                main.aws_provider.AWS_DSB_GRAPH_KEY: {},
+                'aws_distributed_candidate': True,
+            },
+        }
+        mixed = {
+            'status': 'destroyed',
+            'plan': {'provider': 'aws'},
+            'resources': {
+                main.aws_provider.AWS_DSB_GRAPH_KEY: {},
+                main.oci_provider.CONTRACT_KEY: {},
+            },
+        }
+
+        for job in (mismatched, mixed):
+            with self.subTest(resources=tuple(job['resources'])):
+                self.assertTrue(main.has_recoverable_resources(job))
+                self.assertTrue(
+                    main.has_recoverable_resources_for_any_provider(job)
+                )
 
 
 if __name__ == '__main__':

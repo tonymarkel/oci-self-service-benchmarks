@@ -399,7 +399,7 @@ ARG LOAD_DRIVER_CONTEXT_SHA256
 ARG WRK2_SOURCE_SHA256
 RUN set -eux; \\
     test "$(uname -m)" = x86_64; \\
-    microdnf install -y coreutils findutils gcc grep make openssl-devel zlib-devel unzip; \\
+    microdnf install -y findutils gcc grep make openssl-devel zlib-devel unzip; \\
     microdnf clean all
 COPY wrk2 /src/wrk2
 COPY {LUASOCKET_FILENAME} /src/{LUASOCKET_FILENAME}
@@ -448,7 +448,7 @@ ARG OCI_SOURCE_REPOSITORY
 ARG OCI_SOURCE_REVISION
 RUN set -eux; \\
     test "$(uname -m)" = x86_64; \\
-    microdnf install -y bash coreutils gawk glibc-common grep openssl-libs sed time zlib; \\
+    microdnf install -y bash gawk glibc-common grep openssl-libs sed time zlib; \\
     microdnf clean all; \\
     rm -rf /var/cache/dnf /var/cache/yum /var/log/dnf*; \\
     rm -f /usr/bin/microdnf /usr/bin/curl /usr/bin/wget /usr/bin/ftp \\

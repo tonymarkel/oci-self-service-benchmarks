@@ -39,12 +39,20 @@ from .deathstarbench_k3s_workload import (
 )
 from .deathstarbench_topology import DeathStarBenchTopologyManifest
 from .guests.rocky_linux import (
+    aws_deathstarbench_database_volume_attestation_command,
+    aws_deathstarbench_database_volume_mount_command,
+    aws_deathstarbench_database_workload_storage_command,
     azure_deathstarbench_database_volume_attestation_command,
     azure_deathstarbench_database_volume_mount_command,
     azure_deathstarbench_database_workload_storage_command,
     gcp_deathstarbench_database_volume_attestation_command,
     gcp_deathstarbench_database_volume_mount_command,
     gcp_deathstarbench_database_workload_storage_command,
+)
+from .guests.oracle_linux import (
+    oci_deathstarbench_database_volume_attestation_command,
+    oci_deathstarbench_database_volume_mount_command,
+    oci_deathstarbench_database_workload_storage_command,
 )
 from .k3s_runtime import (
     ExpectedK3sNode,
@@ -57,6 +65,7 @@ from .k3s_runtime import (
     control_tokens_initialize_command,
     host_preflight_command,
     normalized_architecture,
+    oracle_linux_host_prepare_command,
     rocky_host_prepare_command,
     secure_agent_token_ca_sha256,
     secure_agent_token_read_command,
@@ -71,6 +80,7 @@ from .resource_inventory import (
     ResourceInventoryError,
     load_role_node_inventory,
 )
+from .remote_execution import SSHCommandError
 
 
 TOPOLOGY_MANIFEST_KEY = 'deathstarbench_topology_manifest'
@@ -163,6 +173,12 @@ _DATABASE_DEVICE_LINKS = frozenset({
 })
 _GCP_DATABASE_DEVICE_LINK_PREFIX = '/dev/disk/by-id/google-'
 _GCP_RESOURCE_NAME_RE = re.compile(r'^[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?$')
+_AWS_VOLUME_ID_RE = re.compile(r'^vol-[0-9a-f]{8,17}$')
+_AWS_DATABASE_DEVICE_LINK_PREFIX = (
+    '/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_'
+)
+_OCI_VOLUME_ID_RE = re.compile(r'^ocid1\.volume\.[A-Za-z0-9._-]+$')
+_OCI_DATABASE_DEVICE_LINK = '/dev/oracleoci/oraclevdb'
 _DATABASE_WORKLOAD_ROOT = '/var/lib/deathstarbench/database/mongodb'
 _WORKLOAD_READY_STATE = 'workload_ready'
 NETWORK_QUALIFICATION_SCHEMA_VERSION = 3
@@ -237,6 +253,9 @@ class DistributedK3sCandidatePlan:
     # the original behavior without a source-breaking new argument.
     provider: str = 'azure'
     database_device_name: str | None = None
+    database_volume_id: str | None = None
+    guest_os: str = 'rocky_linux_9'
+    region: str | None = None
 
     def host(self, key: str) -> RuntimeHost:
         try:
@@ -947,6 +966,167 @@ def gcp_k3s_candidate_plan(
     )
 
 
+def _projected_k3s_candidate_plan(
+    resources: Mapping[str, Any],
+    *,
+    provider: str,
+) -> DistributedK3sCandidatePlan:
+    """Build a runtime plan from a provider's cloud-validated projection.
+
+    AWS and OCI publish their SSH aliases only after a read-only recovery and
+    whole-graph cloud audit.  This boundary intentionally performs no cloud
+    calls: every later SSH operation rechecks those aliases against the
+    authoritative persisted inventory and fails closed on drift.
+    """
+
+    if not isinstance(resources, Mapping) or resources.get('provider') != provider:
+        raise DistributedRuntimeError(
+            f'The distributed K3s candidate requires {provider.upper()} resource state.'
+        )
+    try:
+        if provider == 'aws':
+            from .providers import aws as provider_adapter
+        elif provider == 'oci':
+            from .providers import oci as provider_adapter
+        else:  # pragma: no cover - private helper guard
+            raise DistributedRuntimeError(
+                f'Unsupported projected runtime provider: {provider!r}.'
+            )
+        projection = (
+            provider_adapter.distributed_deathstarbench_candidate_projection(
+                resources
+            )
+        )
+    except DistributedRuntimeError:
+        raise
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        RuntimeError,
+        ResourceInventoryError,
+    ) as exc:
+        raise DistributedRuntimeError(
+            f'The {provider.upper()} distributed runtime projection is invalid: {exc}'
+        ) from exc
+
+    if not isinstance(projection, Mapping) or projection.get('provider') != provider:
+        raise DistributedRuntimeError(
+            f'The {provider.upper()} distributed runtime projection is invalid.'
+        )
+    topology_fingerprint = _required_text(
+        projection.get('topology_fingerprint'),
+        f'{provider.upper()} topology fingerprint',
+    )
+    nodes = projection.get('nodes')
+    if not isinstance(nodes, Mapping) or set(nodes) != set(_EXPECTED_ROLES):
+        raise DistributedRuntimeError(
+            f'The {provider.upper()} runtime projection must contain five exact roles.'
+        )
+    hosts: list[RuntimeHost] = []
+    load_generator: RuntimeHost | None = None
+    load_generator_private_ip: str | None = None
+    for node_key in (*_CLUSTER_KEYS, 'load-generator'):
+        node = nodes.get(node_key)
+        if not isinstance(node, Mapping) or node.get('key') != node_key:
+            raise DistributedRuntimeError(
+                f'The {provider.upper()} {node_key} runtime node is invalid.'
+            )
+        role = _required_text(node.get('role'), f'{node_key} role')
+        if role != _EXPECTED_ROLES[node_key]:
+            raise DistributedRuntimeError(
+                f'The {provider.upper()} {node_key} runtime role conflicts.'
+            )
+        node_name = _required_text(node.get('node_name'), f'{node_key} node name')
+        private_ip = _required_text(node.get('private_ip'), f'{node_key} private IP')
+        try:
+            ipaddress.ip_address(private_ip)
+        except ValueError as exc:
+            raise DistributedRuntimeError(
+                f'The {provider.upper()} {node_key} private IP is invalid.'
+            ) from exc
+        architecture = normalized_architecture(
+            _required_text(node.get('architecture'), f'{node_key} architecture')
+        )
+        host_key = _required_text(node.get('host_key'), f'{node_key} SSH host key')
+        if resources.get(host_key) not in {private_ip, node.get('public_ip')}:
+            raise DistributedRuntimeError(
+                f'The {provider.upper()} {node_key} SSH target conflicts with its node.'
+            )
+        jump_host_key = node.get('jump_host_key')
+        if jump_host_key is not None:
+            jump_host_key = _required_text(
+                jump_host_key,
+                f'{node_key} SSH jump-host key',
+            )
+            _required_text(
+                resources.get(jump_host_key),
+                f'{node_key} SSH jump-host address',
+            )
+        runtime_host = RuntimeHost(
+            key=node_key,
+            role=role,
+            node_name=node_name,
+            private_ip=private_ip,
+            architecture=architecture,
+            host_key=host_key,
+            jump_host_key=jump_host_key,
+        )
+        if node_key in _CLUSTER_KEYS:
+            try:
+                ExpectedK3sNode(node_name, role, private_ip, architecture)
+            except ValueError as exc:
+                raise DistributedRuntimeError(
+                    f'The {provider.upper()} {node_key} K3s identity is invalid: {exc}'
+                ) from exc
+            hosts.append(runtime_host)
+        else:
+            load_generator = runtime_host
+            load_generator_private_ip = private_ip
+    if load_generator is None or load_generator_private_ip is None:
+        raise DistributedRuntimeError(
+            f'The {provider.upper()} load-generator projection is missing.'
+        )
+    database_volume_id = _required_text(
+        projection.get('database_volume_id'),
+        f'{provider.upper()} database volume ID',
+    )
+    database_device_name = projection.get('database_device')
+    if provider == 'oci' and database_device_name != '/dev/oracleoci/oraclevdb':
+        raise DistributedRuntimeError(
+            'The OCI database projection must use /dev/oracleoci/oraclevdb.'
+        )
+    return DistributedK3sCandidatePlan(
+        provider=provider,
+        topology_fingerprint=topology_fingerprint,
+        hosts=tuple(hosts),
+        load_generator=load_generator,
+        load_generator_private_ip=load_generator_private_ip,
+        database_device_name=(
+            str(database_device_name) if database_device_name is not None else None
+        ),
+        database_volume_id=database_volume_id,
+        guest_os='rocky_linux_9' if provider == 'aws' else 'oracle_linux_9',
+        region=_required_text(projection.get('region'), f'{provider.upper()} region'),
+    )
+
+
+def aws_k3s_candidate_plan(
+    resources: Mapping[str, Any],
+) -> DistributedK3sCandidatePlan:
+    """Reload the cloud-validated AWS projection before every SSH phase."""
+
+    return _projected_k3s_candidate_plan(resources, provider='aws')
+
+
+def oci_k3s_candidate_plan(
+    resources: Mapping[str, Any],
+) -> DistributedK3sCandidatePlan:
+    """Reload the cloud-validated OCI projection before every SSH phase."""
+
+    return _projected_k3s_candidate_plan(resources, provider='oci')
+
+
 def distributed_k3s_candidate_plan(
     resources: Mapping[str, Any],
 ) -> DistributedK3sCandidatePlan:
@@ -957,8 +1137,12 @@ def distributed_k3s_candidate_plan(
         return azure_k3s_candidate_plan(resources)
     if provider == 'gcp':
         return gcp_k3s_candidate_plan(resources)
+    if provider == 'aws':
+        return aws_k3s_candidate_plan(resources)
+    if provider == 'oci':
+        return oci_k3s_candidate_plan(resources)
     raise DistributedRuntimeError(
-        'Distributed K3s candidate state must belong to Azure or GCP.'
+        'Distributed K3s candidate state must belong to Azure, GCP, AWS, or OCI.'
     )
 
 
@@ -1034,21 +1218,40 @@ def _validate_existing_journal(
             'mount_point',
             'filesystem',
         }
-        provider_fields = {'lun'} if plan.provider == 'azure' else {'device_name'}
-        valid_provider_identity = isinstance(database_volume, Mapping) and (
-            (
-                database_volume.get('lun') == 0
-                and database_volume.get('device_link') in _DATABASE_DEVICE_LINKS
-            )
-            if plan.provider == 'azure'
-            else (
-                plan.provider == 'gcp'
-                and database_volume.get('device_name')
-                == plan.database_device_name
-                and database_volume.get('device_link')
-                == f'{_GCP_DATABASE_DEVICE_LINK_PREFIX}{plan.database_device_name}'
-            )
-        )
+        provider_fields = {
+            'azure': {'lun'},
+            'gcp': {'device_name'},
+            'aws': {'volume_id'},
+            'oci': {'volume_id'},
+        }.get(plan.provider, set())
+        valid_provider_identity = False
+        if isinstance(database_volume, Mapping):
+            if plan.provider == 'azure':
+                valid_provider_identity = (
+                    database_volume.get('lun') == 0
+                    and database_volume.get('device_link')
+                    in _DATABASE_DEVICE_LINKS
+                )
+            elif plan.provider == 'gcp':
+                valid_provider_identity = (
+                    database_volume.get('device_name')
+                    == plan.database_device_name
+                    and database_volume.get('device_link')
+                    == f'{_GCP_DATABASE_DEVICE_LINK_PREFIX}{plan.database_device_name}'
+                )
+            elif plan.provider == 'aws':
+                expected_volume_id = str(plan.database_volume_id or '')
+                valid_provider_identity = (
+                    database_volume.get('volume_id') == expected_volume_id
+                    and database_volume.get('device_link')
+                    == f'{_AWS_DATABASE_DEVICE_LINK_PREFIX}{expected_volume_id.replace("-", "")}'
+                )
+            elif plan.provider == 'oci':
+                valid_provider_identity = (
+                    database_volume.get('volume_id') == plan.database_volume_id
+                    and database_volume.get('device_link')
+                    == _OCI_DATABASE_DEVICE_LINK
+                )
         if (
             not isinstance(database_volume, Mapping)
             or set(database_volume) != common_fields | provider_fields
@@ -1186,6 +1389,86 @@ def parse_gcp_database_volume_attestation(
     }
 
 
+def parse_aws_database_volume_attestation(
+    output: str,
+    *,
+    expected_volume_id: str,
+) -> dict[str, Any]:
+    """Parse a Nitro device attestation bound to one persisted EBS volume."""
+
+    volume_id = _required_text(expected_volume_id, 'AWS database volume ID')
+    if not _AWS_VOLUME_ID_RE.fullmatch(volume_id):
+        raise DistributedRuntimeError('The expected AWS database volume ID is invalid.')
+    expected_link = (
+        f'{_AWS_DATABASE_DEVICE_LINK_PREFIX}{volume_id.replace("-", "")}'
+    )
+    matches = re.findall(
+        r'^AWS_DSB_DATABASE_VOLUME volume_id=(\S+) device_link=(\S+) '
+        r'uuid=(\S+) mount_point=/var/lib/deathstarbench/database '
+        r'filesystem=xfs$',
+        str(output),
+        flags=re.MULTILINE,
+    )
+    if len(matches) != 1:
+        raise DistributedRuntimeError(
+            'The AWS database mount did not return one exact attestation marker.'
+        )
+    observed_volume_id, device_link, filesystem_uuid = matches[0]
+    if (
+        observed_volume_id != volume_id
+        or device_link != expected_link
+        or not _VOLUME_UUID_RE.fullmatch(filesystem_uuid)
+    ):
+        raise DistributedRuntimeError(
+            'The AWS database mount returned a conflicting EBS identity.'
+        )
+    return {
+        'volume_id': volume_id,
+        'device_link': expected_link,
+        'filesystem_uuid': filesystem_uuid.lower(),
+        'mount_point': '/var/lib/deathstarbench/database',
+        'filesystem': 'xfs',
+    }
+
+
+def parse_oci_database_volume_attestation(
+    output: str,
+    *,
+    expected_volume_id: str,
+) -> dict[str, Any]:
+    """Parse the fixed Oracle device attestation bound to one OCI volume."""
+
+    volume_id = _required_text(expected_volume_id, 'OCI database volume ID')
+    if not _OCI_VOLUME_ID_RE.fullmatch(volume_id):
+        raise DistributedRuntimeError('The expected OCI database volume ID is invalid.')
+    matches = re.findall(
+        r'^OCI_DSB_DATABASE_VOLUME volume_id=(\S+) '
+        r'device_link=/dev/oracleoci/oraclevdb uuid=(\S+) '
+        r'mount_point=/var/lib/deathstarbench/database filesystem=xfs$',
+        str(output),
+        flags=re.MULTILINE,
+    )
+    if len(matches) != 1:
+        raise DistributedRuntimeError(
+            'The OCI database mount did not return one exact attestation marker.'
+        )
+    observed_volume_id, filesystem_uuid = matches[0]
+    if (
+        observed_volume_id != volume_id
+        or not _VOLUME_UUID_RE.fullmatch(filesystem_uuid)
+    ):
+        raise DistributedRuntimeError(
+            'The OCI database mount returned a conflicting block-volume identity.'
+        )
+    return {
+        'volume_id': volume_id,
+        'device_link': _OCI_DATABASE_DEVICE_LINK,
+        'filesystem_uuid': filesystem_uuid.lower(),
+        'mount_point': '/var/lib/deathstarbench/database',
+        'filesystem': 'xfs',
+    }
+
+
 def _parse_plan_database_volume_attestation(
     output: str,
     plan: DistributedK3sCandidatePlan,
@@ -1196,6 +1479,16 @@ def _parse_plan_database_volume_attestation(
         return parse_gcp_database_volume_attestation(
             output,
             expected_device_name=plan.database_device_name,
+        )
+    if plan.provider == 'aws' and plan.database_volume_id is not None:
+        return parse_aws_database_volume_attestation(
+            output,
+            expected_volume_id=plan.database_volume_id,
+        )
+    if plan.provider == 'oci' and plan.database_volume_id is not None:
+        return parse_oci_database_volume_attestation(
+            output,
+            expected_volume_id=plan.database_volume_id,
         )
     raise DistributedRuntimeError(
         'The candidate database volume parser is not configured.'
@@ -1218,6 +1511,8 @@ def parse_database_workload_storage_attestation(
     marker = {
         'azure': 'AZURE_DSB_WORKLOAD_STORAGE',
         'gcp': 'GCP_DSB_WORKLOAD_STORAGE',
+        'aws': 'AWS_DSB_WORKLOAD_STORAGE',
+        'oci': 'OCI_DSB_WORKLOAD_STORAGE',
     }.get(provider)
     if marker is None:
         raise DistributedRuntimeError(
@@ -1266,8 +1561,14 @@ def _same_database_volume_identity(
         and left.get('device_name') == right.get('device_name')
         and left.get('device_link') == right.get('device_link')
     )
+    provider_volume_identity = (
+        set(left) == set(right)
+        and 'volume_id' in left
+        and left.get('volume_id') == right.get('volume_id')
+        and left.get('device_link') == right.get('device_link')
+    )
     return (
-        (azure_identity or gcp_identity)
+        (azure_identity or gcp_identity or provider_volume_identity)
         and str(left.get('filesystem_uuid') or '').casefold()
         == str(right.get('filesystem_uuid') or '').casefold()
         and left.get('mount_point') == right.get('mount_point')
@@ -1283,6 +1584,18 @@ def _database_volume_mount_command(
     if plan.provider == 'gcp' and plan.database_device_name is not None:
         return gcp_deathstarbench_database_volume_mount_command(
             plan.database_device_name
+        )
+    if plan.provider == 'aws' and plan.database_volume_id is not None:
+        return aws_deathstarbench_database_volume_mount_command(
+            plan.database_volume_id
+        )
+    if (
+        plan.provider == 'oci'
+        and plan.database_volume_id is not None
+        and plan.database_device_name == _OCI_DATABASE_DEVICE_LINK
+    ):
+        return oci_deathstarbench_database_volume_mount_command(
+            plan.database_volume_id
         )
     raise DistributedRuntimeError(
         'The candidate database mount command is not configured.'
@@ -1302,6 +1615,16 @@ def _database_volume_attestation_command(
             plan.database_device_name,
             filesystem_uuid,
         )
+    if plan.provider == 'aws' and plan.database_volume_id is not None:
+        return aws_deathstarbench_database_volume_attestation_command(
+            plan.database_volume_id,
+            filesystem_uuid,
+        )
+    if plan.provider == 'oci' and plan.database_volume_id is not None:
+        return oci_deathstarbench_database_volume_attestation_command(
+            plan.database_volume_id,
+            filesystem_uuid,
+        )
     raise DistributedRuntimeError(
         'The candidate database attestation command is not configured.'
     )
@@ -1317,6 +1640,14 @@ def _database_workload_storage_command(
         )
     if plan.provider == 'gcp':
         return gcp_deathstarbench_database_workload_storage_command(
+            filesystem_uuid
+        )
+    if plan.provider == 'aws':
+        return aws_deathstarbench_database_workload_storage_command(
+            filesystem_uuid
+        )
+    if plan.provider == 'oci':
+        return oci_deathstarbench_database_workload_storage_command(
             filesystem_uuid
         )
     raise DistributedRuntimeError(
@@ -1443,13 +1774,41 @@ def _prepare_distributed_k3s_candidate(
 
     for host in plan.hosts:
         _emit(emit, job, f'Preparing the {host.role} host ({host.node_name}).')
-        _execute(
-            execute,
-            job,
-            host,
-            rocky_host_prepare_command(host.role),
-            timeout=1800,
-        )
+        if plan.guest_os == 'rocky_linux_9':
+            host_prepare = rocky_host_prepare_command(host.role)
+        elif plan.guest_os == 'oracle_linux_9':
+            host_prepare = oracle_linux_host_prepare_command(
+                host.role,
+                region=plan.region,
+            )
+        else:
+            raise DistributedRuntimeError(
+                f'The candidate guest OS is unsupported: {plan.guest_os!r}.'
+            )
+        try:
+            _execute(
+                execute,
+                job,
+                host,
+                host_prepare,
+                timeout=1800,
+            )
+        except SSHCommandError:
+            if plan.guest_os != 'oracle_linux_9':
+                raise
+            _emit(
+                emit,
+                job,
+                'Oracle Linux host preparation did not converge on the first '
+                f'attempt for {host.node_name}; retrying once.',
+            )
+            _execute(
+                execute,
+                job,
+                host,
+                host_prepare,
+                timeout=1800,
+            )
         _execute(
             execute,
             job,

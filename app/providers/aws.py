@@ -21,6 +21,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError, WaiterError
 
 from ..guests import amazon_linux
@@ -46,6 +47,9 @@ DEFAULT_GP3_IOPS = 3000
 DEFAULT_GP3_THROUGHPUT_MIBPS = 125
 AMBIGUOUS_TAG_LOOKUP_ATTEMPTS = 6
 AMBIGUOUS_TAG_LOOKUP_DELAY_SECONDS = 2
+_DSB_NO_RETRY_CONFIG = Config(
+    retries={'mode': 'standard', 'total_max_attempts': 1},
+)
 VPC_CONTRACT_KEYS = (
     'aws_vpc_create_ambiguous',
     'aws_vpc_reconciliation_error',
@@ -3277,6 +3281,7 @@ AWS_DSB_SHAPES = {
     'control': 'm7i.large', 'database': 'm7i.xlarge',
     'cache': 'm7i.large', 'load-generator': 'm7i.large',
 }
+AWS_ROCKY_OFFICIAL_OWNER_ID = '792107900819'
 _DSB_KINDS = {
     'vpc': ('describe_vpcs', 'Vpcs', 'VpcId', 'create_vpc', 'Vpc'),
     'igw': ('describe_internet_gateways', 'InternetGateways', 'InternetGatewayId',
@@ -3298,6 +3303,20 @@ _DSB_KINDS = {
 
 def _dsb_fail(message):
     raise ResourceInventoryError(f'AWS distributed candidate: {message}')
+
+
+def _dsb_ec2_client(session, region):
+    """Use one-attempt EC2 calls for the replay-safe candidate controller.
+
+    Several EC2 create APIs in this graph do not accept an idempotency token.
+    The lifecycle controller, rather than botocore, must observe an uncertain
+    response and reconcile the durable intent before any operator retry.
+    """
+    return session.client(
+        'ec2',
+        region_name=region,
+        config=_DSB_NO_RETRY_CONFIG,
+    )
 
 
 def _dsb_tags(job_id, key):
@@ -3370,32 +3389,56 @@ def _dsb_public_key_identity(value):
 
 
 def _dsb_pin_image(ec2, pin, architecture):
-    """No latest-image lookup, subscription acceptance, or implicit publisher."""
+    """Pin either Rocky's public AMI or its Marketplace copy exactly.
+
+    The Rocky project-owned channel avoids a Marketplace entitlement mutation;
+    the Marketplace channel remains supported when the account already has an
+    agreement.  Neither path discovers a "latest" image or accepts terms.
+    """
     required = {'image_id', 'owner_id', 'name', 'creation_date', 'product_code',
                 'architecture', 'root_device_name'}
     if not isinstance(pin, dict) or set(pin) != required:
-        raise ValueError('Supply an exact Rocky Linux 9 Marketplace AMI pin: '
+        raise ValueError('Supply an exact Rocky Linux 9 AMI pin: '
                          + ', '.join(sorted(required)))
+    official_public = (
+        pin.get('owner_id') == AWS_ROCKY_OFFICIAL_OWNER_ID
+        and pin.get('product_code') is None
+    )
+    marketplace = (
+        isinstance(pin.get('product_code'), str)
+        and bool(pin['product_code'])
+    )
     if (not re.fullmatch(r'ami-[0-9a-f]{8,17}', pin['image_id'])
             or not re.fullmatch(r'[0-9]{12}', pin['owner_id'])
             or pin['architecture'] != architecture
+            or not (official_public or marketplace)
             or not re.search(r'rocky[-_ ]?9|rocky[-_ ]?linux[-_ ]?9', pin['name'], re.I)):
         raise ValueError('The explicit Rocky Linux 9 AMI pin is invalid.')
     images = ec2.describe_images(ImageIds=[pin['image_id']], Owners=[pin['owner_id']]).get('Images', [])
     if len(images) != 1:
-        raise ValueError('The pinned Rocky Linux 9 Marketplace AMI is unavailable.')
+        raise ValueError('The pinned Rocky Linux 9 AMI is unavailable.')
     image = images[0]
     fields = {'image_id': 'ImageId', 'owner_id': 'OwnerId', 'name': 'Name',
               'creation_date': 'CreationDate', 'architecture': 'Architecture',
               'root_device_name': 'RootDeviceName'}
+    expected_product_codes = (
+        []
+        if official_public
+        else [{
+            'ProductCodeId': pin['product_code'],
+            'ProductCodeType': 'marketplace',
+        }]
+    )
     if (any(image.get(api) != pin[key] for key, api in fields.items())
             or image.get('State') != 'available'
             or image.get('RootDeviceType') != 'ebs'
             or image.get('VirtualizationType') != 'hvm'
             or image.get('EnaSupport') is not True
-            or image.get('ProductCodes') != [
-                {'ProductCodeId': pin['product_code'], 'ProductCodeType': 'marketplace'}]):
-        raise ValueError('The Marketplace AMI does not match its complete approved pin.')
+            or (official_public and image.get('Public') is not True)
+            or (image.get('ProductCodes') or []) != expected_product_codes):
+        raise ValueError(
+            'The Rocky Linux AMI does not match its complete approved pin.'
+        )
     return copy.deepcopy(pin)
 
 
@@ -3468,7 +3511,153 @@ def _dsb_load(job):
                *('instance-' + k for k in AWS_DSB_ADDRESSES)}
     if set(state['graph']) != allowed:
         _dsb_fail('graph resource allowlist differs.')
+    _dsb_validate_published_aliases(resources, contract, state['graph'])
     return state
+
+
+def _dsb_runtime_aliases(contract, graph):
+    """Derive convenience addresses only from authoritative role inventory."""
+    inventory = _dsb_inventory(contract, graph)
+    aliases = {'ssh_user': 'rocky',
+               'aws_dsb_database_volume_id': graph['database-data'].get('id')}
+    for node in inventory.nodes:
+        if len(node.private_addresses) != 1 or len(node.public_addresses) > 1:
+            _dsb_fail(f'{node.key} has ambiguous runtime addresses.')
+        prefix = 'aws_dsb_' + node.key.replace('-', '_')
+        aliases[prefix + '_private_ip'] = node.private_addresses[0]
+        aliases[prefix + '_public_ip'] = node.public_addresses[0] if node.public_addresses else None
+    return aliases
+
+
+def _dsb_validate_published_aliases(resources, contract, graph, *, required=False):
+    expected = _dsb_runtime_aliases(contract, graph)
+    published = set(expected).intersection(resources)
+    if published and (published != set(expected) or any(resources[key] != value for key, value in expected.items())):
+        _dsb_fail('published runtime SSH/storage aliases differ from the authoritative graph.')
+    if required and published != set(expected):
+        _dsb_fail('runtime SSH/storage aliases have not been cloud-validated and published.')
+    return expected
+
+
+def _dsb_candidate_projection(resources, *, require_aliases):
+    if not isinstance(resources, Mapping) or resources.get('aws_distributed_candidate') is not True:
+        _dsb_fail('runtime projection requires exact AWS candidate resource state.')
+    graph_state = resources.get(AWS_DSB_GRAPH_KEY)
+    if not isinstance(graph_state, dict) or not isinstance(graph_state.get('contract'), dict):
+        _dsb_fail('runtime projection requires the complete candidate contract.')
+    state = _dsb_load({'id': graph_state['contract'].get('job_id'), 'resources': resources})
+    contract, graph = state['contract'], state['graph']
+    if any(not isinstance(entry, dict) or entry.get('status') != 'running'
+           or not isinstance(entry.get('id'), str) or not entry['id'] for entry in graph.values()):
+        _dsb_fail('runtime projection requires all candidate resources in running state.')
+    aliases = _dsb_validate_published_aliases(resources, contract, graph, required=require_aliases)
+    inventory = load_role_node_inventory(resources)
+    nodes = {}
+    for node in inventory.nodes:
+        public_required = node.key not in ('database', 'cache')
+        if bool(node.public_addresses) != public_required:
+            _dsb_fail(f'{node.key} runtime public-address policy differs.')
+        prefix = 'aws_dsb_' + node.key.replace('-', '_')
+        direct = node.key in ('control', 'load-generator')
+        nodes[node.key] = {
+            'key': node.key, 'role': node.role,
+            'node_name': node.provider_resource_name,
+            'instance_id': node.provider_resource_id,
+            'shape': node.shape, 'architecture': node.architecture,
+            'private_ip': node.private_addresses[0],
+            'public_ip': node.public_addresses[0] if node.public_addresses else None,
+            'host_key': prefix + ('_public_ip' if direct else '_private_ip'),
+            'jump_host_key': None if direct else 'aws_dsb_control_public_ip',
+        }
+    if len({node['instance_id'] for node in nodes.values()}) != len(nodes):
+        _dsb_fail('runtime projection has duplicate role instance identities.')
+    return {
+        'provider': 'aws', 'job_id': contract['job_id'], 'account_id': contract['account_id'],
+        'region': contract['region'], 'zone': contract['zone'], 'ssh_user': 'rocky',
+        'topology_fingerprint': inventory.topology_fingerprint,
+        'database_volume_id': graph['database-data']['id'],
+        'aliases': aliases, 'nodes': nodes,
+        'support_image': copy.deepcopy(contract['support_image']),
+        'application_image': copy.deepcopy(contract['application_image']),
+    }
+
+
+def distributed_deathstarbench_candidate_projection(resources):
+    """Read-only local projection; require previously cloud-validated aliases.
+
+    This performs no cloud calls and cannot itself prove live cloud ownership.
+    The operator must call ``validate_distributed_deathstarbench_candidate``
+    before initial or resumed SSH work. Changes to any published alias fail
+    closed instead of silently redirecting a connection or disk operation.
+    """
+    return _dsb_candidate_projection(resources, require_aliases=True)
+
+
+def validate_distributed_deathstarbench_candidate(job, *, persist=None, aws_session=None):
+    """Reconcile/audit AWS read-only, then publish exact nonsecret SSH aliases."""
+    objects = recover_distributed_deathstarbench_candidate(job, persist=persist, aws_session=aws_session)
+    state = _dsb_load(job)
+    contract, graph = state['contract'], state['graph']
+    if set(objects) != set(graph):
+        _dsb_fail('runtime validation requires the complete live cloud graph.')
+    for role in AWS_DSB_ADDRESSES:
+        if objects['instance-' + role].get('State', {}).get('Name') != 'running':
+            _dsb_fail(f'{role} instance is not running for runtime validation.')
+        expected = _dsb_rule_set(_dsb_permissions(contract, graph, role))
+        if _dsb_rule_set(objects['sg-' + role].get('IpPermissions', [])) != expected:
+            _dsb_fail(f'{role} required runtime ingress paths are incomplete.')
+    if (objects['nat'].get('State') != 'available'
+            or len(objects['nat'].get('NatGatewayAddresses', [])) != 1
+            or len(objects['igw'].get('Attachments', [])) != 1):
+        _dsb_fail('runtime egress gateway attachments are incomplete.')
+    for key, names in (('public-route', ('management', 'loadgen')), ('private-route', ('data',))):
+        table = objects[key]
+        expected_subnets = {graph['subnet-' + name]['id'] for name in names}
+        if ({a.get('SubnetId') for a in table.get('Associations', [])} != expected_subnets
+                or len(table.get('Associations', [])) != len(expected_subnets)
+                or len(table.get('Routes', [])) != 2):
+            _dsb_fail(f'{key} runtime routes or associations are incomplete.')
+    attachments = objects['database-data'].get('Attachments', [])
+    if (len(attachments) != 1 or attachments[0].get('InstanceId') != graph['instance-database']['id']
+            or attachments[0].get('Device') != DATA_VOLUME_DEVICE
+            or attachments[0].get('State') != 'attached'):
+        _dsb_fail('runtime database EBS attachment is missing or not ready.')
+    database_disks = objects['instance-database'].get('BlockDeviceMappings', [])
+    if not any(d.get('DeviceName') == DATA_VOLUME_DEVICE
+               and d.get('Ebs', {}).get('VolumeId') == graph['database-data']['id']
+               and d.get('Ebs', {}).get('DeleteOnTermination') is False for d in database_disks):
+        _dsb_fail('runtime database EBS attachment is missing from the instance.')
+    projection = _dsb_candidate_projection(job['resources'], require_aliases=False)
+    # Publication is one local state write, only after the whole cloud graph
+    # and its reconstructed inventory passed validation. Never repair drift.
+    job['resources'].update(projection['aliases'])
+    _persist(job, persist)
+    return copy.deepcopy(projection)
+
+
+def distributed_deathstarbench_candidate_deleted(job):
+    """Strict local terminal predicate; retained IDs are deletion tombstones.
+
+    This is not an independent cloud absence proof. An operator cleanup gate
+    must first run read-only recovery/graph verification against the original
+    AWS account, then require this predicate. Malformed or partial state is
+    never advertised as safe to discard.
+    """
+    try:
+        if (not isinstance(job, Mapping) or job.get('status') != 'destroyed'
+                or job.get('cleanup_error')
+                or job.get('resources', {}).get('aws_distributed_candidate') is not True):
+            return False
+        state = _dsb_load(job)
+        for key, entry in state['graph'].items():
+            allowed = {'status', 'id', 'public_addresses'} if key.startswith('instance-') else {'status', 'id'}
+            if (not isinstance(entry, dict) or not set(entry) <= allowed
+                    or entry.get('status') != 'deleted'
+                    or ('id' in entry and (not isinstance(entry['id'], str) or not entry['id']))):
+                return False
+        return True
+    except (ResourceInventoryError, ValueError, KeyError, TypeError, AttributeError):
+        return False
 
 
 def _dsb_specs(contract, graph):
@@ -3557,10 +3746,12 @@ def _dsb_verify_item(contract, graph, key, item, *, allow_attaching=False):
     if kind == 'instance':
         role = key.removeprefix('instance-')
         nic = request['NetworkInterfaces'][0]
+        pin = contract['application_image'] if role == 'application' else contract['support_image']
         if (item.get('VpcId') != graph['vpc'].get('id')
                 or item.get('SubnetId') != nic['SubnetId']
                 or item.get('PrivateIpAddress') != nic['PrivateIpAddress']
                 or item.get('Placement', {}).get('AvailabilityZone') != contract['zone']
+                or item.get('RootDeviceName') != pin['root_device_name']
                 or {s.get('GroupId') for s in item.get('SecurityGroups', [])} != set(nic['Groups'])
                 or len(item.get('NetworkInterfaces', [])) != 1
                 or item.get('MetadataOptions', {}).get('HttpTokens') != 'required'):
@@ -3582,9 +3773,16 @@ def _dsb_verify_item(contract, graph, key, item, *, allow_attaching=False):
                 or attachment.get('DeleteOnTermination') is not True):
             _dsb_fail(f'{key} primary ENI attachment/deletion contract differs.')
         devices = item.get('BlockDeviceMappings', [])
-        pin = contract['application_image'] if role == 'application' else contract['support_image']
         root = [d for d in devices if d.get('DeviceName') == pin['root_device_name']]
-        if len(root) != 1 or root[0].get('Ebs', {}).get('DeleteOnTermination') is not True:
+        # EC2 can expose an accepted instance before its block-device mapping
+        # is populated (the RunInstances response itself commonly does this).
+        # Only the completely absent, still-converging view is tolerated, and
+        # only on a path that will wait and then perform strict verification.
+        boot_mapping_pending = allow_attaching and not devices
+        if not boot_mapping_pending and (
+                len(root) != 1
+                or root[0].get('Ebs', {}).get('DeleteOnTermination') is not True
+                or not root[0].get('Ebs', {}).get('VolumeId')):
             _dsb_fail(f'{key} boot disk deletion contract differs.')
         for device in devices:
             if device in root:
@@ -3613,14 +3811,60 @@ def _dsb_discover(ec2, contract, graph, key, *, allow_attaching=False):
     return found[0]
 
 
+def _dsb_exact_tags(item, expected):
+    """Require one exact, duplicate-free tag set from an atomic create."""
+    tags = item.get('Tags')
+    if not isinstance(tags, list) or any(
+            not isinstance(tag, Mapping)
+            or set(tag) != {'Key', 'Value'}
+            or not isinstance(tag['Key'], str)
+            or not isinstance(tag['Value'], str)
+            for tag in tags):
+        return False
+    pairs = [(tag['Key'], tag['Value']) for tag in tags]
+    expected_pairs = [(tag['Key'], tag['Value']) for tag in expected]
+    return len({key for key, _ in pairs}) == len(pairs) and sorted(pairs) == sorted(expected_pairs)
+
+
+def _dsb_accept_igw_create_response(contract, graph, response):
+    """Validate the complete atomic CreateInternetGateway result.
+
+    Persisting this accepted identity before any follow-up Describe call avoids
+    depending on EC2's eventually-consistent tag-filter index. A malformed or
+    incomplete response remains ambiguous and is reconciled read-only.
+    """
+    if not isinstance(response, Mapping) or set(response) - {
+            'InternetGateway', 'ResponseMetadata'}:
+        return None
+    gateway = response.get('InternetGateway')
+    if (not isinstance(gateway, Mapping)
+            or not isinstance(gateway.get('InternetGatewayId'), str)
+            or not re.fullmatch(r'igw-[0-9a-f]+', gateway['InternetGatewayId'])
+            or gateway.get('OwnerId') != contract['account_id']
+            or gateway.get('Attachments') != []
+            or not _dsb_exact_tags(gateway, _dsb_tags(contract['job_id'], 'igw'))):
+        return None
+    _dsb_verify_item(contract, graph, 'igw', gateway)
+    return gateway
+
+
 def _dsb_wait_for_primary_attachment(ec2, job, key, found, persist):
     """Re-observe an accepted instance; never re-dispatch RunInstances."""
     state = job['resources'][AWS_DSB_GRAPH_KEY]
     contract, graph = state['contract'], state['graph']
     entry = graph[key]
+    role = key.removeprefix('instance-')
+    pin = contract['application_image'] if role == 'application' else contract['support_image']
+    def boot_mapping_ready(item):
+        root = [d for d in item.get('BlockDeviceMappings', [])
+                if d.get('DeviceName') == pin['root_device_name']]
+        return (len(root) == 1
+                and root[0].get('Ebs', {}).get('DeleteOnTermination') is True
+                and bool(root[0].get('Ebs', {}).get('VolumeId')))
     if (found.get('State', {}).get('Name') == 'pending'
             or found['NetworkInterfaces'][0]['Attachment']['Status'] == 'attaching'
-            or not _dsb_public_address_ready(key, found)):
+            or not _dsb_public_address_ready(key, found)
+            or not boot_mapping_ready(found)):
         # Retain the accepted identity before a waiter can time out or the
         # operator process can be interrupted. Only attachment/address readiness is lax;
         # all ownership, placement, device-index and deletion checks ran first.
@@ -3632,12 +3876,13 @@ def _dsb_wait_for_primary_attachment(ec2, job, key, found, persist):
             observed = _dsb_discover(ec2, contract, graph, key, allow_attaching=True)
             if (observed is not None and observed.get('State', {}).get('Name') == 'running'
                     and observed['NetworkInterfaces'][0]['Attachment']['Status'] == 'attached'
-                    and _dsb_public_address_ready(key, observed)):
+                    and _dsb_public_address_ready(key, observed)
+                    and boot_mapping_ready(observed)):
                 found = observed
                 break
             time.sleep(AMBIGUOUS_TAG_LOOKUP_DELAY_SECONDS)
         else:
-            _dsb_fail(f'{key} primary ENI is not yet attached with required public addressing; retain identity and retry reconciliation.')
+            _dsb_fail(f'{key} primary ENI is not yet attached, or required public addressing/boot mapping is not yet ready; retain identity and retry reconciliation.')
     _dsb_verify_item(contract, graph, key, found)
     return found
 
@@ -3666,7 +3911,15 @@ def _dsb_ensure(ec2, job, key, persist):
         entry['status'] = 'creating'
         _dsb_save(job, persist)
         try:
-            getattr(ec2, _DSB_KINDS[kind][3])(**request)
+            response = getattr(ec2, _DSB_KINDS[kind][3])(**request)
+            if kind == 'igw':
+                found = _dsb_accept_igw_create_response(contract, graph, response)
+                if found is not None:
+                    # The service response is the first authoritative identity.
+                    # Retain it before any eventually-consistent read can fail.
+                    entry['id'] = found['InternetGatewayId']
+                    entry['status'] = 'creating'
+                    _dsb_save(job, persist)
         except Exception as exc:
             # These explicit service rejections guarantee no resource was
             # accepted (not timeouts/5xx). Do not strand an empty create intent.
@@ -3811,7 +4064,7 @@ def provision_distributed_deathstarbench_candidate(
     if resources and AWS_DSB_GRAPH_KEY not in resources:
         _dsb_fail('refusing pre-existing compact or unrelated resource state.')
     session = _session(_profile(plan), _region(plan), aws_session)
-    ec2 = session.client('ec2', region_name=_region(plan))
+    ec2 = _dsb_ec2_client(session, _region(plan))
     account = session.client('sts', region_name=_region(plan)).get_caller_identity()['Account']
     shapes = {**AWS_DSB_SHAPES, 'application': _instance_type(plan)}
     details = {shape: _instance_type_details(ec2, shape) for shape in set(shapes.values())}
@@ -3825,6 +4078,13 @@ def provision_distributed_deathstarbench_candidate(
         expected_cpu, expected_memory = (4, 16) if role == 'database' else (2, 8)
         if details[shape]['vcpu'] != expected_cpu or details[shape]['memory_gb'] != expected_memory:
             raise ValueError(f'The fixed {role} AWS role capacity differs from its contract.')
+    application_capacity = details[shapes['application']]
+    if (_value(plan, 'ocpus') != application_capacity['vcpu']
+            or _value(plan, 'memory_gb') != application_capacity['memory_gb']):
+        raise ValueError(
+            'AWS application vCPU/memory metadata must exactly match the '
+            'selected instance type.'
+        )
     contract = {
         'job_id': job_id, 'account_id': account, 'profile': _profile(plan),
         'region': _region(plan), 'zone': zone, 'shapes': shapes, 'public_key': public_key,
@@ -4087,7 +4347,7 @@ def recover_distributed_deathstarbench_candidate(
     session = _session(contract['profile'], contract['region'], aws_session)
     if session.client('sts', region_name=contract['region']).get_caller_identity()['Account'] != contract['account_id']:
         _dsb_fail('current AWS account differs from the launch account.')
-    ec2 = session.client('ec2', region_name=contract['region'])
+    ec2 = _dsb_ec2_client(session, contract['region'])
     objects = {}
     for key in _dsb_specs(contract, graph):
         entry = graph[key]
@@ -4129,7 +4389,7 @@ def destroy_distributed_deathstarbench_candidate(
     state = _dsb_load(job)
     c, g = state['contract'], state['graph']
     session = _session(c['profile'], c['region'], aws_session)
-    ec2 = session.client('ec2', region_name=c['region'])
+    ec2 = _dsb_ec2_client(session, c['region'])
     objects = recover_distributed_deathstarbench_candidate(
         job, persist=persist, aws_session=session, wait_for_attachments=False,
     )
@@ -4202,5 +4462,6 @@ def destroy_distributed_deathstarbench_candidate(
         _emit(job, emit, 'Cleanup', f'Deleted AWS distributed {key}.')
     if not preserve_status:
         job['status'] = 'destroyed'
+    job.pop('cleanup_error', None)
     _dsb_save(job, persist)
     return job['resources']

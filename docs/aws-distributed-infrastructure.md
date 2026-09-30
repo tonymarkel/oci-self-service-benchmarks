@@ -1,9 +1,13 @@
 # AWS distributed DeathStarBench infrastructure candidate
 
-This is an **operator-only infrastructure slice**, not a released benchmark.
-The normal provider entrypoint rejects the unreleased
-`distributed_tiered_v1/k3s_v1` profile. There is no new UI, public API, K3s
-bootstrap, workload, or measurement support in this slice.
+This is an **operator-only infrastructure candidate**, not a released
+benchmark. The normal provider entrypoint still rejects the unreleased
+`distributed_tiered_v1/k3s_v1` profile, and there is no new UI or public API.
+The separate operator wrapper now connects this infrastructure adapter to the
+shared K3s bootstrap, Social Network workload, network qualification, optional
+measurement path, resume, and cleanup-only machinery. See
+`docs/deathstarbench-distributed.md` for the complete current contract and live
+qualification evidence.
 
 `app.providers.aws.provision_distributed_deathstarbench_candidate` accepts the
 normal AWS plan (DeathStarBench Social Network only), an SSH public key, and two
@@ -16,17 +20,20 @@ Each pin has exactly these fields:
     "owner_id": "<approved 12-digit publisher account>",
     "name": "<exact Rocky Linux 9 image name>",
     "creation_date": "<exact AWS CreationDate>",
-    "product_code": "<approved Marketplace product code>",
+    "product_code": "<approved Marketplace product code or null>",
     "architecture": "x86_64",  # or arm64 for the selected application
     "root_device_name": "<exact AMI root device name>",
 }
 ```
 
-The caller must approve the publisher/product and accept Marketplace terms
-before running the candidate. The adapter verifies the complete supplied pin,
-HVM/EBS/ENA support, and available state. It never discovers a moving "latest"
-image, subscribes to a product, or accepts an agreement. DescribeImages does
-not prove subscription entitlement; a launch can still be rejected by AWS.
+For Marketplace images, the caller must approve the publisher/product and
+accept terms before running the candidate. The approved Rocky project public
+publisher is also supported with a null product code and requires no
+Marketplace mutation. The adapter verifies the complete supplied pin,
+HVM/EBS/ENA support, public status where required, and available state. It
+never discovers a moving "latest" image, subscribes to a product, or accepts an
+agreement. DescribeImages does not prove Marketplace subscription entitlement;
+a launch can still be rejected by AWS.
 
 ## Infrastructure contract
 
@@ -41,6 +48,10 @@ mutation:
 | Database | m7i.xlarge | 10.240.3.11 | No |
 | Cache | m7i.large | 10.240.3.12 | No |
 
+Before any mutation, live instance-type metadata must exactly match every fixed
+support-role capacity and the application's explicitly supplied vCPU and memory
+values. A stale or contradictory shape selection fails before a cloud write.
+
 The VPC is `10.240.0.0/16`. Management, load-generator, and data subnets use
 the corresponding `/24` prefixes. A zonal NAT gateway provides private data
 egress; public subnets use an internet gateway. Separate security groups
@@ -48,11 +59,12 @@ implement the versioned topology's role paths. Public SSH remains
 `0.0.0.0/0`, consistent with the existing product policy.
 
 The database uses an independently created, encrypted 100-GiB gp3 volume with
-3,000 IOPS and 125 MiB/s, attached with `DeleteOnTermination=false`. It is not
-formatted or mounted. `/dev/sdf` is an EC2 attachment name only, never a guest
-device identity. The subsequent runtime slice must resolve Nitro EBS by its
-volume ID/serial before formatting. Boot disks are encrypted 50-GiB gp3 and
-deleted with their instances.
+3,000 IOPS and 125 MiB/s, attached with `DeleteOnTermination=false`.
+`/dev/sdf` is an EC2 attachment name only, never a guest device identity. The
+runtime resolves Nitro EBS by the exact volume ID/serial, rejects the boot
+ancestry and any nonblank foreign content, and mounts only the resulting XFS
+filesystem at `/var/lib/deathstarbench/database`. Boot disks are encrypted
+50-GiB gp3 and deleted with their instances.
 
 ## Recovery and cleanup
 
@@ -64,6 +76,14 @@ response loss is reconciled without another create. An unresolved create
 blocks deletion of its dependencies. Retry read-only recovery after EC2
 eventual consistency settles; an ambiguous absence is never treated as proof
 that no resource exists.
+
+All candidate EC2 clients use `total_max_attempts=1`, so botocore cannot replay
+an uncertain non-idempotent create behind the lifecycle controller. A complete
+atomic create response is strictly checked before its identity is accepted. In
+particular, an Internet Gateway response must contain the exact owner, empty
+attachment state, and duplicate-free ownership tags; its ID is persisted before
+any eventually consistent tag-filter lookup, and subsequent reads use that
+exact ID.
 
 An accepted instance with a temporarily `attaching` primary ENI or pending
 public address assignment retains its identity before waiting and re-observing
@@ -88,9 +108,34 @@ No force detach is used. AWS permissions must include the read-only network
 inventory APIs used by the audit, including VPC peering, VPN, and transit
 gateway attachment discovery.
 
-This candidate is covered by stateful API-schema-validated unit tests. **It
-has not yet been live-qualified on AWS.** Operator execution must use the
-existing run lease/persistence orchestration; these provider helpers do not
-create or manage a process lease themselves. Keep the release gate closed
-until live create/recovery/cleanup qualification and the separate runtime
-integration are complete.
+This candidate is covered by stateful API-schema-validated tests. Operator
+wrapper job `675d8b6ba5ae` passed live AWS provisioning, Rocky Linux guest
+preparation, exact database mounting, K3s readiness, Social Network workload
+readiness, required and forbidden network probes, and terminal cleanup on
+2026-09-29. It did not use `--measure` and is not a benchmark result.
+
+The immediately preceding `--measure` invocation, job `d7b5e018e6b1`, exposed
+an EC2 IGW tag-index consistency window before runtime work began: the create
+response contained the accepted identity, but the old path discarded it and an
+immediate tag-filter lookup could not yet see the resource. The run failed
+closed. After adding the strict response acceptance and exact-ID persistence
+described above, its partial VPC/IGW graph was reconciled and fully destroyed
+without a cleanup error.
+
+Measured job `98a16f2c3e8a` then passed the complete live path in
+`us-east-1`/`us-east-1a` with a 4-vCPU/16-GiB `m7i.xlarge` Rocky Linux 9
+application, the exact four-node K3s cluster, and a separate x86_64
+`m7i.large` load generator. It proved 962 Reed98 users, 37,624 follow edges,
+and 9,424 posts; completed a 30-second warm-up and all 5,994 measured requests
+at the target 100 requests/second (99.893931 observed); recorded p50/p95/p99
+latency of 3.711/6.555/8.527 ms with zero errors, timeouts, or uncompleted
+requests; and proved all 27 Pod identities unchanged with zero restarts. Strict
+result, comparison, `results.json`, and report gates passed. Exact cleanup
+deleted the full graph, and a post-restart cleanup-only audit also passed with
+final `destroyed` state and no error or cleanup error.
+
+Operator execution must use
+`scripts/qualify_aws_oci_deathstarbench_distributed.py`; the provider helpers
+do not create or manage a process lease themselves. Keep the release gate
+closed until representative injected AWS failure/recovery paths and the
+remaining cross-provider gates pass.

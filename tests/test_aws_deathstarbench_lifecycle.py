@@ -24,6 +24,7 @@ PUBLIC_KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFB
 def candidate_plan():
     return {'provider': 'aws', 'region': 'us-east-2', 'aws_profile': 'default',
             'shape': 'm7i.2xlarge', 'availability_zone': 'us-east-2a',
+            'ocpus': 2, 'memory_gb': 8,
             'benchmarks': ['deathstarbench'], 'deathstarbench': {
                 'topology_id': 'distributed_tiered_v1', 'runtime_id': 'k3s_v1',
                 'workload': 'social_network'}}
@@ -43,6 +44,10 @@ class StatefulEC2:
         self.pending_instances = False
         self.attach_after_wait = True
         self.delay_public_address = False
+        self.delay_boot_mapping = False
+        self.delayed_boot_mappings = {}
+        self.hidden_igw_tag_filter_reads = 0
+        self.create_response_override = None
         self.on_wait = None
         self.wait_calls = []
         self.service = Session().get_service_model('ec2')
@@ -58,6 +63,8 @@ class StatefulEC2:
                     instance['State']['Name'] = 'running'
                     if self.attach_after_wait:
                         instance['NetworkInterfaces'][0]['Attachment']['Status'] = 'attached'
+                    if rid in self.delayed_boot_mappings:
+                        instance['BlockDeviceMappings'] = self.delayed_boot_mappings.pop(rid)
                     role = next(t['Value'] for t in instance['Tags'] if t['Key'] == 'benchmark-role')
                     if self.delay_public_address and role not in ('instance-database', 'instance-cache'):
                         instance['PublicIpAddress'] = '192.0.2.' + rid.rsplit('-', 1)[-1]
@@ -131,6 +138,11 @@ class StatefulEC2:
                 if name == describe:
                     items = [copy.deepcopy(i) for i in self.data[kind].values()
                              if self._matches(i, request.get('Filters', request.get('Filter', [])))]
+                    if (kind == 'igw' and self.hidden_igw_tag_filter_reads > 0
+                            and any(f.get('Name', '').startswith('tag:')
+                                    for f in request.get('Filters', []))):
+                        self.hidden_igw_tag_filter_reads -= 1
+                        items = []
                     if kind == 'sg' and self.default_sg and self._matches(self.default_sg, request.get('Filters', [])):
                         items.append(copy.deepcopy(self.default_sg))
                     return {result: [{'Instances': items}] if kind == 'instance' else items}
@@ -165,7 +177,7 @@ class StatefulEC2:
                 if kind == 'route':
                     item.update(Routes=[{'DestinationCidrBlock': '10.240.0.0/16', 'GatewayId': 'local'}], Associations=[])
                 if kind == 'igw':
-                    item['Attachments'] = []
+                    item.update(Attachments=[], OwnerId='123456789012')
                 if kind == 'nat':
                     subnet = self.data['subnet'][request['SubnetId']]
                     item.update(VpcId=subnet['VpcId'], State='available', NatGatewayAddresses=[{
@@ -195,11 +207,21 @@ class StatefulEC2:
                         'Attachments': [{'InstanceId': rid}]}
                     item['BlockDeviceMappings'] = [{'DeviceName': PIN['root_device_name'],
                         'Ebs': {'VolumeId': boot, 'DeleteOnTermination': True}}]
+                    item['RootDeviceName'] = PIN['root_device_name']
+                    if self.delay_boot_mapping:
+                        item['State']['Name'] = 'pending'
+                        item['NetworkInterfaces'][0]['Attachment']['Status'] = 'attaching'
+                        self.delayed_boot_mappings[rid] = item['BlockDeviceMappings']
+                        item['BlockDeviceMappings'] = []
                 self.data[kind][rid] = item
                 if self.lose_response == role:
                     self.lose_response = None
                     raise ConnectionError('accepted response was lost')
-                return {create_result: [copy.deepcopy(item)] if kind == 'instance' else copy.deepcopy(item)} if create_result else copy.deepcopy(item)
+                response = ({create_result: [copy.deepcopy(item)] if kind == 'instance'
+                             else copy.deepcopy(item)} if create_result else copy.deepcopy(item))
+                if self.create_response_override:
+                    response = self.create_response_override(kind, copy.deepcopy(response))
+                return response
             if name == 'attach_internet_gateway':
                 self.data['igw'][request['InternetGatewayId']]['Attachments'] = [{'VpcId': request['VpcId']}]
             elif name == 'detach_internet_gateway':
@@ -219,7 +241,7 @@ class StatefulEC2:
                 self.data['sg'][request['GroupId']]['IpPermissions'] = []
             elif name == 'attach_volume':
                 self.data['volume'][request['VolumeId']]['Attachments'] = [{
-                    'InstanceId': request['InstanceId'], 'Device': request['Device']}]
+                    'InstanceId': request['InstanceId'], 'Device': request['Device'], 'State': 'attached'}]
                 self.data['instance'][request['InstanceId']]['BlockDeviceMappings'].append({
                     'DeviceName': request['Device'], 'Ebs': {'VolumeId': request['VolumeId'], 'DeleteOnTermination': False}})
             elif name == 'terminate_instances':
@@ -283,12 +305,89 @@ class AwsDistributedLifecycleTests(unittest.TestCase):
         self.assertEqual(inventory.node('cache').public_addresses, ())
         self.assertIsNone(inventory.node('database').storage[0].device)
 
+    def test_candidate_ec2_clients_disable_sdk_retries(self):
+        self.provision()
+        aws.validate_distributed_deathstarbench_candidate(
+            self.job,
+            aws_session=self.session,
+        )
+        aws.destroy_distributed_deathstarbench_candidate(
+            self.job,
+            aws_session=self.session,
+        )
+        configs = [
+            config
+            for service, _region, config in self.session.client_configs
+            if service == 'ec2'
+        ]
+        self.assertTrue(configs)
+        self.assertTrue(all(config.retries['total_max_attempts'] == 1
+                            for config in configs))
+
+    def test_application_capacity_must_match_selected_shape_before_writes(self):
+        for field, value in (('ocpus', 99), ('memory_gb', 999)):
+            with self.subTest(field=field):
+                self.setUp()
+                plan = candidate_plan()
+                plan[field] = value
+                with self.assertRaisesRegex(ValueError, 'must exactly match'):
+                    aws.provision_distributed_deathstarbench_candidate(
+                        self.job,
+                        plan,
+                        public_key=PUBLIC_KEY,
+                        support_image=copy.deepcopy(PIN),
+                        application_image=copy.deepcopy(PIN),
+                        aws_session=self.session,
+                    )
+                self.assertFalse(any(
+                    name.startswith(('create_', 'run_', 'import_', 'allocate_'))
+                    for name, _request in self.ec2.calls
+                ))
+
     def test_image_pin_drift_fails_before_writes(self):
         pin = {**PIN, 'creation_date': 'unexpected'}
         with self.assertRaisesRegex(ValueError, 'approved pin'):
             aws.provision_distributed_deathstarbench_candidate(self.job, candidate_plan(),
                 support_image=pin, application_image=PIN, public_key=PUBLIC_KEY, aws_session=self.session)
         self.assertFalse(any(name.startswith(('create_', 'run_', 'import_', 'allocate_')) for name, _ in self.ec2.calls))
+
+    def test_official_rocky_public_image_pin_requires_exact_owner_and_publicity(self):
+        pin = {
+            **PIN,
+            'owner_id': aws.AWS_ROCKY_OFFICIAL_OWNER_ID,
+            'product_code': None,
+        }
+
+        class ImageClient:
+            public = True
+
+            def describe_images(self, **_request):
+                return {'Images': [{
+                    'ImageId': pin['image_id'],
+                    'OwnerId': pin['owner_id'],
+                    'Name': pin['name'],
+                    'CreationDate': pin['creation_date'],
+                    'Architecture': pin['architecture'],
+                    'RootDeviceName': pin['root_device_name'],
+                    'State': 'available',
+                    'RootDeviceType': 'ebs',
+                    'VirtualizationType': 'hvm',
+                    'EnaSupport': True,
+                    'Public': self.public,
+                    'ProductCodes': [],
+                }]}
+
+        client = ImageClient()
+        self.assertEqual(aws._dsb_pin_image(client, pin, 'x86_64'), pin)
+        client.public = False
+        with self.assertRaisesRegex(ValueError, 'approved pin'):
+            aws._dsb_pin_image(client, pin, 'x86_64')
+        with self.assertRaisesRegex(ValueError, 'invalid'):
+            aws._dsb_pin_image(
+                client,
+                {**pin, 'owner_id': '123456789012'},
+                'x86_64',
+            )
 
     def test_normal_provider_entrypoint_keeps_release_gate_closed(self):
         with self.assertRaisesRegex(ValueError, 'not released'):
@@ -301,6 +400,50 @@ class AwsDistributedLifecycleTests(unittest.TestCase):
         self.assertEqual(sum(n == 'run_instances' for n, _ in self.ec2.calls), 5)
         self.provision()
         self.assertEqual(sum(n == 'run_instances' for n, _ in self.ec2.calls), 5)
+
+    def test_igw_create_response_persists_id_before_tag_index_visibility(self):
+        self.ec2.hidden_igw_tag_filter_reads = 100
+        self.provision()
+        graph = self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']
+        self.assertEqual(graph['igw']['id'], 'igw-1')
+        self.assertEqual(graph['igw']['status'], 'running')
+        self.assertEqual(sum(name == 'create_internet_gateway'
+                             for name, _ in self.ec2.calls), 1)
+        # Once the response is accepted, every subsequent lookup uses the
+        # persisted exact ID rather than the eventually-consistent tag index.
+        igw_reads = [request for name, request in self.ec2.calls
+                     if name == 'describe_internet_gateways']
+        accepted = next(i for i, request in enumerate(igw_reads)
+                        if request.get('Filters') == aws._dsb_filters(self.job['id'], 'igw'))
+        self.assertTrue(any(request.get('Filters') == [{
+            'Name': 'internet-gateway-id', 'Values': ['igw-1'],
+        }] for request in igw_reads[accepted + 1:]))
+
+    def test_malformed_igw_create_response_is_not_persisted_as_identity(self):
+        self.ec2.hidden_igw_tag_filter_reads = 100
+        def corrupt(kind, response):
+            if kind == 'igw':
+                response['InternetGateway']['Tags'].append({
+                    'Key': 'foreign', 'Value': 'tag',
+                })
+            return response
+        self.ec2.create_response_override = corrupt
+        with patch.object(aws.time, 'sleep'), self.assertRaisesRegex(
+                ResourceInventoryError, 'igw create cannot yet be reconciled'):
+            self.provision()
+        entry = self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']['igw']
+        self.assertEqual(entry, {'status': 'create_ambiguous'})
+
+    def test_missing_igw_create_response_stays_ambiguous_without_id(self):
+        self.ec2.hidden_igw_tag_filter_reads = 100
+        self.ec2.create_response_override = lambda kind, response: (
+            {} if kind == 'igw' else response
+        )
+        with patch.object(aws.time, 'sleep'), self.assertRaisesRegex(
+                ResourceInventoryError, 'igw create cannot yet be reconciled'):
+            self.provision()
+        entry = self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']['igw']
+        self.assertEqual(entry, {'status': 'create_ambiguous'})
 
     def test_pending_eni_waits_then_attaches_without_replaying_accepted_launch(self):
         self.ec2.pending_instances = True
@@ -315,6 +458,55 @@ class AwsDistributedLifecycleTests(unittest.TestCase):
         self.assertTrue(any(g['instance-database'].get('id') and g['instance-database']['status'] == 'creating'
                             for g in observed_waits))
         self.assertTrue(all(n.lifecycle_status == 'running' for n in load_role_node_inventory(self.job['resources']).nodes))
+
+    def test_delayed_ec2_boot_mapping_waits_then_verifies_without_replaying_launch(self):
+        self.ec2.delay_boot_mapping = True
+        self.ec2.lose_response = 'instance-control'
+        self.provision()
+        self.assertEqual(sum(n == 'run_instances' for n, _ in self.ec2.calls), 5)
+        # One readiness wait observes each delayed root mapping, followed by
+        # the provider's existing final running-state waiter for each node.
+        self.assertEqual(sum(name == 'instance_running' for name, _ in self.ec2.wait_calls), 10)
+        graph = self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']
+        for role in aws.AWS_DSB_ADDRESSES:
+            instance = self.ec2.data['instance'][graph['instance-' + role]['id']]
+            self.assertEqual(instance['BlockDeviceMappings'][0]['DeviceName'], PIN['root_device_name'])
+            self.assertTrue(instance['BlockDeviceMappings'][0]['Ebs']['DeleteOnTermination'])
+
+    def test_empty_boot_mapping_is_only_allowed_on_waiting_reconciliation_path(self):
+        self.provision()
+        graph = self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']
+        instance = self.ec2.data['instance'][graph['instance-control']['id']]
+        instance['BlockDeviceMappings'] = []
+        self.assert_cleanup_read_only_failure('boot disk deletion contract')
+
+    def test_contradictory_boot_mapping_is_rejected_before_readiness_wait(self):
+        self.provision()
+        graph = self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']
+        instance = self.ec2.data['instance'][graph['instance-control']['id']]
+        original = copy.deepcopy(instance['BlockDeviceMappings'])
+        original_waits = len(self.ec2.wait_calls)
+        for mode in ('wrong-device', 'delete-false', 'missing-volume-id', 'unexpected-disk'):
+            with self.subTest(mode=mode):
+                instance['BlockDeviceMappings'] = copy.deepcopy(original)
+                root = instance['BlockDeviceMappings'][0]
+                if mode == 'wrong-device':
+                    root['DeviceName'] = '/dev/foreign'
+                elif mode == 'delete-false':
+                    root['Ebs']['DeleteOnTermination'] = False
+                elif mode == 'missing-volume-id':
+                    root['Ebs'].pop('VolumeId')
+                else:
+                    instance['BlockDeviceMappings'].append({
+                        'DeviceName': '/dev/foreign',
+                        'Ebs': {'VolumeId': 'vol-foreign', 'DeleteOnTermination': False},
+                    })
+                with self.assertRaisesRegex(ResourceInventoryError,
+                                            'boot disk deletion contract|unexpected attached disk'):
+                    aws.recover_distributed_deathstarbench_candidate(
+                        self.job, aws_session=self.session, wait_for_attachments=True)
+                self.assertEqual(len(self.ec2.wait_calls), original_waits)
+        instance['BlockDeviceMappings'] = original
 
     def test_read_only_recovery_waits_for_ambiguous_pending_instance(self):
         self.provision()
@@ -419,6 +611,112 @@ class AwsDistributedLifecycleTests(unittest.TestCase):
                 boot[field] = altered
                 self.assert_cleanup_read_only_failure('boot volume configuration/attachment differs')
                 boot[field] = original
+
+    def test_runtime_projection_publishes_exact_ssh_routes_after_cloud_audit(self):
+        self.provision()
+        with self.assertRaisesRegex(ResourceInventoryError, 'have not been cloud-validated'):
+            aws.distributed_deathstarbench_candidate_projection(self.job['resources'])
+        before = len(self.ec2.calls)
+        projection = aws.validate_distributed_deathstarbench_candidate(self.job, aws_session=self.session)
+        self.assertFalse(any(n.startswith(('create_', 'run_', 'import_', 'authorize_', 'attach_'))
+                             for n, _ in self.ec2.calls[before:]))
+        self.assertEqual(projection['ssh_user'], 'rocky')
+        self.assertEqual(projection['provider'], 'aws')
+        self.assertEqual(projection['nodes']['database']['private_ip'], '10.240.3.11')
+        self.assertEqual(projection['nodes']['cache']['private_ip'], '10.240.3.12')
+        self.assertEqual(projection['nodes']['database']['host_key'], 'aws_dsb_database_private_ip')
+        self.assertEqual(projection['nodes']['application']['jump_host_key'], 'aws_dsb_control_public_ip')
+        self.assertIsNone(projection['nodes']['control']['jump_host_key'])
+        self.assertEqual(projection['nodes']['load-generator']['host_key'], 'aws_dsb_load_generator_public_ip')
+        self.assertEqual(projection['database_volume_id'],
+            self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']['database-data']['id'])
+        self.assertIsNone(self.job['resources']['aws_dsb_database_public_ip'])
+        self.assertEqual(projection, aws.distributed_deathstarbench_candidate_projection(self.job['resources']))
+        before = len(self.ec2.calls)
+        projection['nodes']['database']['private_ip'] = '192.0.2.99'
+        fresh = aws.distributed_deathstarbench_candidate_projection(self.job['resources'])
+        self.assertEqual(fresh['nodes']['database']['private_ip'], '10.240.3.11')
+        self.assertEqual(len(self.ec2.calls), before)
+
+    def test_runtime_projection_does_not_publish_before_failed_cloud_audit(self):
+        self.provision()
+        self.ec2.extra_nics.append({'NetworkInterfaceId': 'eni-foreign'})
+        with self.assertRaisesRegex(ResourceInventoryError, 'foreign network interface'):
+            aws.validate_distributed_deathstarbench_candidate(self.job, aws_session=self.session)
+        self.assertNotIn('ssh_user', self.job['resources'])
+        self.assertNotIn('aws_dsb_database_volume_id', self.job['resources'])
+
+    def test_published_runtime_alias_drift_is_not_repaired(self):
+        self.provision()
+        aws.validate_distributed_deathstarbench_candidate(self.job, aws_session=self.session)
+        original = copy.deepcopy(self.job['resources'])
+        for field in ('ssh_user', 'aws_dsb_control_public_ip', 'aws_dsb_database_private_ip',
+                      'aws_dsb_database_volume_id'):
+            with self.subTest(field=field):
+                self.job['resources'] = copy.deepcopy(original)
+                self.job['resources'][field] = 'foreign-value'
+                before = len(self.ec2.calls)
+                with self.assertRaisesRegex(ResourceInventoryError, 'published runtime SSH/storage aliases differ'):
+                    aws.validate_distributed_deathstarbench_candidate(self.job, aws_session=self.session)
+                self.assertEqual(len(self.ec2.calls), before)
+                self.assertEqual(self.job['resources'][field], 'foreign-value')
+
+    def test_runtime_validation_requires_complete_database_attachment(self):
+        self.provision()
+        graph = self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']
+        self.ec2.data['volume'][graph['database-data']['id']]['Attachments'] = []
+        instance = self.ec2.data['instance'][graph['instance-database']['id']]
+        instance['BlockDeviceMappings'] = [d for d in instance['BlockDeviceMappings']
+                                          if d['DeviceName'] != aws.DATA_VOLUME_DEVICE]
+        with self.assertRaisesRegex(ResourceInventoryError, 'database EBS attachment is missing'):
+            aws.validate_distributed_deathstarbench_candidate(self.job, aws_session=self.session)
+        self.assertNotIn('ssh_user', self.job['resources'])
+
+    def test_runtime_validation_requires_complete_ingress_not_only_safe_subset(self):
+        self.provision()
+        group = next(iter(self.ec2.data['sg'].values()))
+        group['IpPermissions'] = []
+        with self.assertRaisesRegex(ResourceInventoryError, 'runtime ingress paths are incomplete'):
+            aws.validate_distributed_deathstarbench_candidate(self.job, aws_session=self.session)
+        self.assertNotIn('ssh_user', self.job['resources'])
+
+    def test_deleted_predicate_accepts_verified_retained_tombstones_without_cloud_calls(self):
+        self.provision()
+        aws.validate_distributed_deathstarbench_candidate(self.job, aws_session=self.session)
+        self.assertFalse(aws.distributed_deathstarbench_candidate_deleted(self.job))
+        self.job['cleanup_error'] = 'a previous attempt failed'
+        aws.destroy_distributed_deathstarbench_candidate(self.job, aws_session=self.session)
+        aws.recover_distributed_deathstarbench_candidate(self.job, aws_session=self.session,
+                                                        wait_for_attachments=False)
+        graph = self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']
+        self.assertTrue(all(entry.get('id') for entry in graph.values()))
+        before = len(self.ec2.calls)
+        self.assertTrue(aws.distributed_deathstarbench_candidate_deleted(self.job))
+        self.assertEqual(len(self.ec2.calls), before)
+        self.assertNotIn('cleanup_error', self.job)
+        with self.assertRaisesRegex(ResourceInventoryError, 'running state'):
+            aws.distributed_deathstarbench_candidate_projection(self.job['resources'])
+
+    def test_deleted_predicate_rejects_partial_malformed_or_failed_terminal_state(self):
+        self.provision()
+        aws.destroy_distributed_deathstarbench_candidate(self.job, aws_session=self.session)
+        original = copy.deepcopy(self.job)
+        for mode in ('mixed-status', 'missing-entry', 'unknown-entry-field', 'cleanup-error', 'wrong-status'):
+            with self.subTest(mode=mode):
+                job = copy.deepcopy(original)
+                graph = job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']
+                if mode == 'mixed-status':
+                    graph['vpc']['status'] = 'delete_ambiguous'
+                elif mode == 'missing-entry':
+                    graph.pop('vpc')
+                elif mode == 'unknown-entry-field':
+                    graph['vpc']['foreign_resource_id'] = 'vpc-foreign'
+                elif mode == 'cleanup-error':
+                    job['cleanup_error'] = 'not confirmed'
+                else:
+                    job['status'] = 'destroying'
+                self.assertFalse(aws.distributed_deathstarbench_candidate_deleted(job))
+        self.assertFalse(aws.distributed_deathstarbench_candidate_deleted({'resources': None}))
 
     def test_unknown_ambiguous_create_retains_all_dependencies(self):
         def fail(kind, request):

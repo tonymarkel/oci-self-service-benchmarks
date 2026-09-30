@@ -27,6 +27,7 @@ from .deathstarbench_contract import (
     DISTRIBUTED_RUNTIME_REVISION,
     K3S_VERSION,
 )
+from .guests.oracle_linux import oci_dns_prepare_command
 
 
 K3S_BINARY = '/usr/local/bin/k3s'
@@ -283,18 +284,25 @@ def _required_command_check(commands: Iterable[str]) -> str:
     )
 
 
-def rocky_host_prepare_command(role: str) -> str:
-    """Prepare one Rocky Linux 9 guest for the pinned K3s runtime.
-
-    Azure NSGs enforce the exact underlay matrix for this candidate.  K3s's
-    documented RHEL-family recommendation is followed by disabling firewalld
-    on these ephemeral cluster nodes; pod isolation remains the responsibility
-    of the separately checked-in Kubernetes NetworkPolicies.
-    """
+def _enterprise_linux_host_prepare_command(
+    role: str,
+    *,
+    os_id: str,
+    os_label: str,
+    dnf_options: tuple[str, ...] = (),
+) -> str:
+    """Build the guarded EL9 preparation command used by qualified guests."""
 
     role = str(role).strip().lower()
     if role not in _CLUSTER_ROLES:
         raise ValueError(f'Unsupported K3s host role: {role!r}.')
+    if os_id not in {'rocky', 'ol'}:
+        raise ValueError(f'Unsupported K3s Enterprise Linux guest: {os_id!r}.')
+    if os_label not in {'Rocky Linux', 'Oracle Linux'}:
+        raise ValueError(f'Unsupported K3s Enterprise Linux label: {os_label!r}.')
+    for option in dnf_options:
+        if not re.fullmatch(r'--[a-z0-9-]+=[A-Za-z0-9_.-]+', option):
+            raise ValueError(f'Unsafe K3s DNF option: {option!r}.')
     modules_payload = base64.b64encode(b'overlay\nbr_netfilter\n').decode('ascii')
     sysctl_payload = base64.b64encode(
         b'net.ipv4.ip_forward=1\n'
@@ -326,6 +334,8 @@ def rocky_host_prepare_command(role: str) -> str:
         'journalctl',
         'matchpathcon',
         'stat',
+        'swapoff',
+        'swapon',
         'systemctl',
         'tail',
         'timeout',
@@ -334,19 +344,24 @@ def rocky_host_prepare_command(role: str) -> str:
         'modprobe',
     ))
     expected_rpm_identity = f'{K3S_SELINUX_VERSION_RELEASE}.noarch'
+    dnf_option_text = ''.join(
+        f'{shlex.quote(option)} ' for option in dnf_options
+    )
     return (
         'set -euo pipefail; '
         f'PATH={shlex.quote(_SYSTEM_COMMAND_PATH)}; export PATH; '
         'test -r /etc/os-release; source /etc/os-release; '
-        'test "$ID" = rocky; case "$VERSION_ID" in 9|9.*) ;; *) '
-        'echo "The distributed K3s candidate requires Rocky Linux 9." >&2; '
+        f'if [ "$ID" != {shlex.quote(os_id)} ]; then '
+        f'echo "The distributed K3s candidate requires {os_label} 9." >&2; '
+        'exit 1; fi; case "$VERSION_ID" in 9|9.*) ;; *) '
+        f'echo "The distributed K3s candidate requires {os_label} 9." >&2; '
         'exit 1;; esac; '
         f'EXPECTED_ROLE={shlex.quote(role)}; '
         'case "$EXPECTED_ROLE" in control|application|cache|database) ;; '
         '*) exit 1;; esac; '
         'DNF_READY=false; for attempt in $(seq 1 3); do '
         'if sudo timeout 480 dnf -y --setopt=retries=10 '
-        f'--setopt=timeout=30 install {packages}; then '
+        f'--setopt=timeout=30 {dnf_option_text}install {packages}; then '
         'DNF_READY=true; break; fi; '
         'echo "K3s prerequisite installation failed; refreshing metadata '
         'before retry ($attempt/3)." >&2; '
@@ -368,7 +383,8 @@ def rocky_host_prepare_command(role: str) -> str:
         f'{shlex.quote(K3S_SELINUX_URL)}; '
         f'printf "%s  %s\\n" {shlex.quote(K3S_SELINUX_SHA256)} '
         '"$RPM_DOWNLOAD" | sha256sum -c -; '
-        'sudo timeout 480 dnf -y install "$RPM_DOWNLOAD"; fi; '
+        f'sudo timeout 480 dnf -y {dnf_option_text}install '
+        '"$RPM_DOWNLOAD"; fi; '
         "test \"$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}' "
         'k3s-selinux)" '
         '= "$EXPECTED_SELINUX_RPM"; '
@@ -387,6 +403,8 @@ def rocky_host_prepare_command(role: str) -> str:
         'sudo sysctl --system >/dev/null; '
         'test "$(sysctl -n net.ipv4.ip_forward)" = 1; '
         'test "$(sysctl -n net.bridge.bridge-nf-call-iptables)" = 1; '
+        'sudo swapoff --all; '
+        'test -z "$(swapon --noheadings --show=NAME)"; '
         'if sudo systemctl list-unit-files firewalld.service --no-legend '
         '2>/dev/null | grep -q "^firewalld.service"; then '
         'timeout --signal=TERM 60s sudo systemctl disable --now '
@@ -394,6 +412,46 @@ def rocky_host_prepare_command(role: str) -> str:
         'if sudo systemctl is-active --quiet firewalld.service 2>/dev/null; '
         'then echo "firewalld remained active after disable." >&2; exit 1; fi; '
         'rpm -q container-selinux k3s-selinux >/dev/null'
+    )
+
+
+def rocky_host_prepare_command(role: str) -> str:
+    """Prepare one Rocky Linux 9 guest for the pinned K3s runtime.
+
+    Provider firewalls enforce the exact underlay matrix for this candidate.
+    K3s's documented RHEL-family recommendation is followed by disabling
+    firewalld on these ephemeral cluster nodes; pod isolation remains the
+    responsibility of the checked-in Kubernetes NetworkPolicies.
+    """
+
+    return _enterprise_linux_host_prepare_command(
+        role,
+        os_id='rocky',
+        os_label='Rocky Linux',
+    )
+
+
+def oracle_linux_host_prepare_command(role: str, *, region: str) -> str:
+    """Prepare one explicitly verified Oracle Linux 9 guest for K3s.
+
+    Oracle's optional Ksplice repository is excluded from benchmark guest
+    package transactions.  This preserves the existing OCI package boundary
+    while using the same checksum-pinned K3s and SELinux policy artifacts as
+    the qualified Rocky Linux 9 path.
+    """
+
+    return (
+        oci_dns_prepare_command((
+            f'yum.{str(region).strip()}.oci.oraclecloud.com',
+            'github.com',
+        ))
+        + '; '
+        + _enterprise_linux_host_prepare_command(
+            role,
+            os_id='ol',
+            os_label='Oracle Linux',
+            dnf_options=('--disablerepo=ol9_ksplice',),
+        )
     )
 
 

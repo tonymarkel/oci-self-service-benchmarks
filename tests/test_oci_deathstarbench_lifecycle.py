@@ -18,6 +18,10 @@ INPUTS = {
     'compartment_id': COMPARTMENT, 'availability_domain': 'test:US-ASHBURN-AD-1',
     'region': 'us-ashburn-1', 'shape': 'VM.Standard.E5.Flex', 'architecture': 'x86_64',
     'ocpus': 4, 'memory_gb': 32, 'application_image_id': IMAGE, 'support_image_id': IMAGE,
+    'defined_tags': {
+        'CostCenter': {'Department': 'Sales'},
+        'app-instance': {'object-read': 'YOUMUSTUSETHIS'},
+    },
     'public_key': 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEtest benchmark',
 }
 
@@ -80,7 +84,8 @@ class Cloud:
                 'availability_domain': INPUTS['availability_domain'], 'subnet_id': vnic_details['subnet_id']})
             boot = self.put('boot_volume', {'compartment_id': COMPARTMENT, 'image_id': source['image_id'],
                 'availability_domain': INPUTS['availability_domain'], 'size_in_gbs': 50})
-            self.put('boot_volume_attachment', {'compartment_id': COMPARTMENT, 'availability_domain': INPUTS['availability_domain'],
+            self.put('boot_volume_attachment', {'id': data['id'],
+                'compartment_id': COMPARTMENT, 'availability_domain': INPUTS['availability_domain'],
                 'instance_id': data['id'], 'boot_volume_id': boot['id']})
         if kind == 'volume_attachment':
             data['attachment_type'] = data.pop('type')
@@ -216,6 +221,131 @@ class OCIDistributedLifecycleTests(unittest.TestCase):
         self.destroy()
         self.assertEqual(len(self.cloud.calls), count)
 
+    def test_read_only_tenant_throttles_retry_with_bounded_backoff(self):
+        client = self.cloud.clients['network']
+        original = client.list_network_security_group_vnics
+        attempts = 0
+
+        def throttled(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise sdk.exceptions.ServiceError(
+                    429,
+                    'TooManyRequests',
+                    {},
+                    'tenant read throttle',
+                )
+            return original(*args, **kwargs)
+
+        with (
+            patch.object(
+                client,
+                'list_network_security_group_vnics',
+                side_effect=throttled,
+            ),
+            patch.object(oci.time, 'sleep') as sleep,
+        ):
+            result = oci._list(
+                client,
+                'list_network_security_group_vnics',
+                network_security_group_id='ocid1.nsg.oc1.iad.test',
+            )
+
+        self.assertEqual(result, [])
+        self.assertEqual(attempts, 3)
+        self.assertEqual(
+            [call.args[0] for call in sleep.call_args_list],
+            list(oci.READ_THROTTLE_RETRY_DELAYS[:2]),
+        )
+
+    def test_read_only_tenant_throttle_retry_is_bounded(self):
+        client = self.cloud.clients['network']
+        error = sdk.exceptions.ServiceError(
+            429,
+            'TooManyRequests',
+            {},
+            'persistent tenant read throttle',
+        )
+        with (
+            patch.object(
+                client,
+                'list_network_security_group_vnics',
+                side_effect=error,
+            ) as read,
+            patch.object(oci.time, 'sleep') as sleep,
+            self.assertRaises(sdk.exceptions.ServiceError),
+        ):
+            oci._list(
+                client,
+                'list_network_security_group_vnics',
+                network_security_group_id='ocid1.nsg.oc1.iad.test',
+            )
+
+        self.assertEqual(
+            read.call_count,
+            len(oci.READ_THROTTLE_RETRY_DELAYS) + 1,
+        )
+        self.assertEqual(
+            [call.args[0] for call in sleep.call_args_list],
+            list(oci.READ_THROTTLE_RETRY_DELAYS),
+        )
+
+    def test_persistent_audit_throttle_prevents_all_cleanup_mutations(self):
+        self.provision()
+        client = self.cloud.clients['network']
+        error = sdk.exceptions.TransientServiceError(
+            429,
+            'TooManyRequests',
+            {},
+            'persistent tenant audit throttle',
+        )
+        before = len(self.cloud.calls)
+        with (
+            patch.object(
+                client,
+                'list_network_security_group_vnics',
+                side_effect=error,
+            ) as read,
+            patch.object(oci.time, 'sleep'),
+            self.assertRaises(sdk.exceptions.TransientServiceError),
+        ):
+            self.destroy()
+
+        self.assertEqual(
+            read.call_count,
+            len(oci.READ_THROTTLE_RETRY_DELAYS) + 1,
+        )
+        self.assertEqual(len(self.cloud.calls), before)
+        self.assertEqual(self.contract['status'], 'ready')
+
+    def test_mutation_throttle_is_not_retried(self):
+        self.provision()
+        client = self.cloud.clients['compute']
+        error = sdk.exceptions.TransientServiceError(
+            429,
+            'TooManyRequests',
+            {},
+            'mutation throttle with unknown acceptance',
+        )
+        with (
+            patch.object(client, 'detach_volume', side_effect=error) as detach,
+            patch.object(oci.time, 'sleep') as sleep,
+            self.assertRaises(sdk.exceptions.TransientServiceError),
+        ):
+            self.destroy()
+
+        detach.assert_called_once()
+        self.assertFalse(sleep.called)
+        self.assertIsInstance(
+            detach.call_args.kwargs['retry_strategy'],
+            sdk.retry.NoneRetryStrategy,
+        )
+        self.assertEqual(
+            self.contract['entries']['database-attachment']['status'],
+            'deleting',
+        )
+
     def test_all_intents_and_inventory_persist_before_first_mutation(self):
         def verify(method):
             saved = self.snapshots[-1]['resources']
@@ -229,6 +359,38 @@ class OCIDistributedLifecycleTests(unittest.TestCase):
                 self.assertTrue(contract['entries']['vcn']['attempted_at'])
         self.cloud.on_mutation = verify
         self.provision()
+
+    def test_every_taggable_create_carries_exact_immutable_defined_tags(self):
+        self.provision()
+        expected = INPUTS['defined_tags']
+        for key, entry in self.contract['entries'].items():
+            with self.subTest(key=key):
+                body = entry['spec']['body']
+                if entry['spec']['kind'] == 'volume_attachment':
+                    self.assertNotIn('defined_tags', body)
+                else:
+                    self.assertEqual(body['defined_tags'], expected)
+                    self.assertIsNot(body['defined_tags'], expected)
+
+    def test_defined_tags_are_exact_validated_inputs_and_resume_contract(self):
+        for invalid in (
+            None,
+            {'bad.name': {'key': 'value'}},
+            {'namespace': {}},
+            {'namespace': {'bad key': 'value'}},
+            {'namespace': {'key': 1}},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                    oci.LifecycleError, 'defined_tags'):
+                oci._validate_inputs({**self.inputs, 'defined_tags': invalid})
+        self.provision()
+        changed = copy.deepcopy(self.inputs)
+        changed['defined_tags']['CostCenter']['Department'] = 'Marketing'
+        with self.assertRaisesRegex(oci.LifecycleError, 'change or recreate'):
+            oci.provision_distributed_deathstarbench_candidate(
+                self.job, inputs=changed, clients=self.cloud.clients,
+                persist=self.persist,
+            )
 
     def test_resume_ready_does_not_duplicate_resources_or_rules(self):
         self.provision()
@@ -265,6 +427,42 @@ class OCIDistributedLifecycleTests(unittest.TestCase):
             self.provision()
         self.provision()
         self.assertEqual(sum(name == 'add_network_security_group_security_rules' for name, _ in self.cloud.calls), 5)
+
+    def test_empty_unconfirmed_nsg_rules_do_not_strand_owned_cleanup(self):
+        failures = (
+            ConnectionError('rule request outcome unknown'),
+            sdk.exceptions.ServiceError(
+                403,
+                'NotAuthorized',
+                {},
+                'rule request explicitly rejected',
+            ),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                self.setUp()
+
+                def reject_rules(method):
+                    if method == 'add_network_security_group_security_rules':
+                        raise failure
+
+                self.cloud.on_mutation = reject_rules
+                with self.assertRaises(type(failure)):
+                    self.provision()
+                attempted = [
+                    entry
+                    for entry in self.contract['entries'].values()
+                    if entry.get('rules_attempted_at')
+                ]
+                self.assertEqual(len(attempted), 1)
+                self.assertNotIn('rules_ready', attempted[0])
+                self.assertEqual(
+                    self.cloud.rules.get(attempted[0]['id'], []),
+                    [],
+                )
+                self.cloud.on_mutation = None
+                self.destroy()
+                self.assertEqual(self.contract['status'], 'deleted')
 
     def test_partial_or_extra_rules_refuse_resume_and_cleanup(self):
         self.provision()
@@ -425,6 +623,143 @@ class OCIDistributedLifecycleTests(unittest.TestCase):
                 self.destroy()
                 self.assertEqual(self.contract['status'], 'deleted')
 
+    def test_parent_etag_change_is_revalidated_before_delete_retry(self):
+        self.provision()
+        network = self.cloud.clients['network']
+        original_get = network.get_internet_gateway
+        original_delete = network.delete_internet_gateway
+        rejected = False
+        delete_matches = []
+
+        def get_gateway(identity):
+            result = original_get(identity)
+            result.headers['etag'] = 'fresh' if rejected else 'stale'
+            return result
+
+        def delete_gateway(identity, **kwargs):
+            nonlocal rejected
+            delete_matches.append(kwargs['if_match'])
+            if not rejected:
+                rejected = True
+                raise sdk.exceptions.ServiceError(412, 'NoEtagMatch', {}, 'changed')
+            forwarded = dict(kwargs)
+            forwarded['if_match'] = '1'
+            return original_delete(identity, **forwarded)
+
+        with (patch.object(network, 'get_internet_gateway', side_effect=get_gateway),
+              patch.object(network, 'delete_internet_gateway', side_effect=delete_gateway)):
+            self.destroy()
+        self.assertEqual(delete_matches, ['stale', 'fresh'])
+        self.assertEqual(self.contract['status'], 'deleted')
+
+    def test_stable_exact_resource_can_use_persisted_etagless_fallback(self):
+        self.provision()
+        network = self.cloud.clients['network']
+        original_delete = network.delete_internet_gateway
+        delete_matches = []
+
+        def delete_gateway(identity, **kwargs):
+            delete_matches.append(kwargs.get('if_match'))
+            if len(delete_matches) <= oci.ETAG_DELETE_ATTEMPTS:
+                raise sdk.exceptions.ServiceError(412, 'NoEtagMatch', {}, 'changed')
+            forwarded = dict(kwargs)
+            forwarded['if_match'] = '1'
+            return original_delete(identity, **forwarded)
+
+        with (patch.object(oci.time, 'sleep'),
+              patch.object(network, 'delete_internet_gateway', side_effect=delete_gateway)):
+            self.destroy()
+        self.assertEqual(delete_matches, ['1', '1', '1', None])
+        igw = self.contract['entries']['igw']
+        self.assertTrue(igw['etag_fallback_attempted_at'])
+        self.assertEqual(igw['etag_fallback_observed'], '1')
+        self.assertEqual(igw['etag_fallback_confirmed'], '1')
+        self.assertEqual(self.contract['status'], 'deleted')
+
+    def test_identical_resource_with_unstable_get_etags_can_use_fallback(self):
+        self.provision()
+        network = self.cloud.clients['network']
+        original_get = network.get_internet_gateway
+        original_delete = network.delete_internet_gateway
+        get_count = 0
+        delete_matches = []
+
+        def get_gateway(identity):
+            nonlocal get_count
+            get_count += 1
+            result = original_get(identity)
+            result.headers['etag'] = f'unstable-{get_count}'
+            return result
+
+        def delete_gateway(identity, **kwargs):
+            delete_matches.append(kwargs.get('if_match'))
+            if len(delete_matches) <= oci.ETAG_DELETE_ATTEMPTS:
+                raise sdk.exceptions.ServiceError(
+                    412,
+                    'NoEtagMatch',
+                    {},
+                    'service computed a different ETag',
+                )
+            forwarded = dict(kwargs)
+            forwarded['if_match'] = '1'
+            return original_delete(identity, **forwarded)
+
+        with (
+            patch.object(oci.time, 'sleep'),
+            patch.object(
+                network,
+                'get_internet_gateway',
+                side_effect=get_gateway,
+            ),
+            patch.object(
+                network,
+                'delete_internet_gateway',
+                side_effect=delete_gateway,
+            ),
+        ):
+            self.destroy()
+
+        self.assertIsNone(delete_matches[-1])
+        igw = self.contract['entries']['igw']
+        self.assertNotEqual(
+            igw['etag_fallback_observed'],
+            igw['etag_fallback_confirmed'],
+        )
+        self.assertEqual(self.contract['status'], 'deleted')
+
+    def test_etagless_fallback_is_refused_for_non_gateway_mutations(self):
+        self.provision()
+        compute = self.cloud.clients['compute']
+        matches = []
+
+        def reject_detach(_identity, **kwargs):
+            matches.append(kwargs.get('if_match'))
+            raise sdk.exceptions.ServiceError(
+                412,
+                'NoEtagMatch',
+                {},
+                'attachment changed',
+            )
+
+        with (
+            patch.object(
+                compute,
+                'detach_volume',
+                side_effect=reject_detach,
+            ),
+            self.assertRaisesRegex(
+                oci.LifecycleError,
+                'only for the qualified internet gateway',
+            ),
+        ):
+            self.destroy()
+
+        self.assertEqual(matches, ['1', '1', '1'])
+        self.assertNotIn(
+            'etag_fallback_attempted_at',
+            self.contract['entries']['database-attachment'],
+        )
+
     def test_tampered_request_contract_refuses_mutation(self):
         self.provision()
         self.contract['entries']['database-data']['spec']['body']['size_in_gbs'] = 1
@@ -440,6 +775,18 @@ class OCIDistributedLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(oci.LifecycleError, 'benchmark-job'):
             self.destroy()
         self.assertEqual(before, len(self.cloud.calls))
+
+    def test_required_defined_tag_drift_refuses_all_cleanup_mutations(self):
+        self.provision()
+        identity = self.contract['entries']['database-data']['id']
+        self.cloud.items['volume'][identity]['defined_tags']['CostCenter']['Department'] = 'Marketing'
+        before = len(self.cloud.calls)
+        with self.assertRaisesRegex(
+                oci.LifecycleError,
+                r'defined_tags\.CostCenter\.Department no longer matches'):
+            self.destroy()
+        self.assertEqual(before, len(self.cloud.calls))
+        self.assertIn(identity, self.cloud.items['volume'])
 
     def test_image_architecture_or_custom_image_fails_before_mutation(self):
         for field, value in (('display_name', 'Oracle-Linux-9-aarch64'), ('compartment_id', COMPARTMENT), ('operating_system_version', '8.10')):
@@ -550,10 +897,26 @@ class OCIDistributedLifecycleTests(unittest.TestCase):
                 clients=self.cloud.clients, persist=lambda job: (_ for _ in ()).throw(OSError('disk full')))
         self.assertFalse(self.cloud.calls)
 
-    def test_boot_hydration_change_is_not_ownership_drift(self):
+    def test_provider_managed_implicit_transitions_are_not_ownership_drift(self):
         self.provision()
         for boot in self.cloud.items['boot_volume'].values():
             boot['is_hydrated'] = True
+        control = self.contract['entries']['control']
+        boot_attachment = control['implicit']['attachments']['boot']
+        boot_attachment['time_updated'] = '2026-09-29T22:43:31+00:00'
+        self.cloud.items['boot_volume_attachment'][boot_attachment['id']][
+            'time_updated'
+        ] = '2026-09-29T23:06:18+00:00'
+        boot_volume = control['implicit']['boot_volume']
+        boot_volume['snapshot']['time_updated'] = '2026-09-29T22:43:31+00:00'
+        self.cloud.items['boot_volume'][boot_volume['id']][
+            'time_updated'
+        ] = '2026-09-29T23:06:18+00:00'
+        oci.publish_distributed_runtime_projection(
+            self.job,
+            clients=self.cloud.clients,
+            persist=self.persist,
+        )
         self.destroy()
         self.assertEqual(self.contract['status'], 'deleted')
 
@@ -686,6 +1049,331 @@ class OCIDistributedLifecycleTests(unittest.TestCase):
                             self.provision()
                         self.assertEqual(before, len(self.cloud.calls))
                     self.assertNotIn('implicit', self.contract['entries']['control'])
+
+    def test_candidate_validation_is_read_only_and_returns_detached_contract(self):
+        self.provision()
+        before = copy.deepcopy(self.job)
+        calls = len(self.cloud.calls)
+        validated = oci.validate_distributed_deathstarbench_candidate(
+            self.job, clients=self.cloud.clients, require_ready=True)
+        self.assertEqual(self.job, before)
+        self.assertEqual(len(self.cloud.calls), calls)
+        validated['inputs']['region'] = 'changed-copy'
+        self.assertEqual(self.contract['inputs']['region'], INPUTS['region'])
+
+    def test_runtime_publication_and_exact_local_role_connections(self):
+        self.provision()
+        with self.assertRaisesRegex(oci.LifecycleError, 'cloud-validated and published'):
+            oci.distributed_deathstarbench_candidate_projection(self.job['resources'])
+        calls = len(self.cloud.calls)
+        aliases = oci.publish_distributed_runtime_projection(
+            self.job, clients=self.cloud.clients, persist=self.persist)
+        self.assertEqual(set(aliases), oci.RUNTIME_ALIAS_KEYS)
+        self.assertEqual(self.snapshots[-1]['resources']['ssh_user'], 'opc')
+        self.assertEqual(len(self.cloud.calls), calls)
+        before = copy.deepcopy(self.job)
+        projection = oci.distributed_deathstarbench_candidate_projection(self.job['resources'])
+        self.assertEqual(self.job, before)
+        self.assertEqual(projection['provider'], 'oci')
+        self.assertEqual(projection['zone'], INPUTS['availability_domain'])
+        self.assertEqual(projection['database_volume_id'], self.contract['entries']['database-data']['id'])
+        self.assertEqual(projection['database_attachment_id'], self.contract['entries']['database-attachment']['id'])
+        self.assertEqual(projection['database_device'], oci.DATABASE_DEVICE)
+        self.assertEqual(projection['database_mount_point'], '/var/lib/deathstarbench/database')
+        for role, node in projection['nodes'].items():
+            direct = role in {'control', 'load-generator'}
+            prefix = 'oci_dsb_' + role.replace('-', '_')
+            self.assertEqual(node['private_ip'], oci.PRIVATE_ADDRESSES[role])
+            self.assertEqual(node['instance_id'], self.contract['entries'][role]['id'])
+            self.assertEqual(node['host_key'], prefix + ('_public_ip' if direct else '_private_ip'))
+            self.assertEqual(node['jump_host_key'], None if direct else 'oci_dsb_control_public_ip')
+            self.assertEqual(bool(node['public_ip']), role in oci.PUBLIC_ROLES)
+        projection['nodes']['control']['private_ip'] = 'wrong-copy'
+        self.assertEqual(self.job['resources']['oci_dsb_control_private_ip'], '10.240.1.10')
+        self.assertEqual(self.job['resources']['role_node_inventory']['nodes'][3]['storage'][0]['mount_point'],
+                         '/var/lib/deathstarbench/database')
+
+    def test_runtime_alias_drift_is_never_overwritten(self):
+        self.provision()
+        oci.publish_distributed_runtime_projection(self.job, clients=self.cloud.clients, persist=self.persist)
+        for key, value in (('ssh_user', 'root'), ('provider', 'aws'),
+                           ('oci_dsb_control_public_ip', '198.51.100.254'),
+                           ('oci_dsb_database_private_ip', '10.240.3.99'),
+                           ('oci_dsb_database_volume_id', 'ocid1.volume.oc1.iad.foreign'),
+                           ('oci_dsb_database_device', '/dev/sda'),
+                           ('oci_dsb_database_mount_point', '/data')):
+            with self.subTest(key=key):
+                job = copy.deepcopy(self.job)
+                job['resources'][key] = value
+                with self.assertRaisesRegex(oci.LifecycleError, 'runtime alias'):
+                    oci.distributed_deathstarbench_candidate_projection(job['resources'])
+                with self.assertRaisesRegex(oci.LifecycleError, 'runtime alias'):
+                    oci.publish_distributed_runtime_projection(job, clients=self.cloud.clients, persist=self.persist)
+                self.assertEqual(job['resources'][key], value)
+
+    def test_runtime_rejects_partial_aliases_and_unknown_routes(self):
+        self.provision()
+        oci.publish_distributed_runtime_projection(self.job, clients=self.cloud.clients, persist=self.persist)
+        missing = copy.deepcopy(self.job)
+        missing['resources'].pop('oci_dsb_database_device')
+        with self.assertRaisesRegex(oci.LifecycleError, 'completely cloud-validated'):
+            oci.distributed_deathstarbench_candidate_projection(missing['resources'])
+        self.job['resources']['oci_dsb_override_public_ip'] = '198.51.100.254'
+        with self.assertRaisesRegex(oci.LifecycleError, 'Unknown OCI runtime aliases'):
+            oci.distributed_deathstarbench_candidate_projection(self.job['resources'])
+
+    def test_runtime_rejects_incomplete_or_nonrunning_cloud_before_publication(self):
+        self.cloud.fail_after = 'create_nat_gateway'
+        with self.assertRaises(ConnectionError):
+            self.provision()
+        with self.assertRaisesRegex(oci.LifecycleError, 'complete ready'):
+            oci.distributed_runtime_projection(self.job)
+        self.provision()
+        self.cloud.items['instance'][self.contract['entries']['application']['id']]['lifecycle_state'] = 'STOPPED'
+        with self.assertRaisesRegex(oci.LifecycleError, 'live ready resources'):
+            oci.publish_distributed_runtime_projection(self.job, clients=self.cloud.clients, persist=self.persist)
+        self.assertNotIn('ssh_user', self.job['resources'])
+
+    def test_runtime_rejects_live_graph_drift_without_mutating_saved_snapshots(self):
+        self.provision()
+        control = self.contract['entries']['control']
+        self.cloud.items['vnic'][control['implicit']['vnic']['id']]['public_ip'] = '198.51.100.254'
+        before = copy.deepcopy(self.job)
+        calls = len(self.cloud.calls)
+        with self.assertRaisesRegex(oci.LifecycleError, 'Implicit resource changed'):
+            oci.publish_distributed_runtime_projection(self.job, clients=self.cloud.clients, persist=self.persist)
+        self.assertEqual(self.job, before)
+        self.assertEqual(len(self.cloud.calls), calls)
+
+    def test_local_runtime_checks_captured_identity_and_pinned_image_evidence(self):
+        self.provision()
+        oci.publish_distributed_runtime_projection(self.job, clients=self.cloud.clients, persist=self.persist)
+        mutations = (
+            lambda contract: contract['entries']['control']['implicit']['boot_volume']['snapshot'].update(compartment_id='foreign'),
+            lambda contract: contract['entries']['control']['implicit']['attachments']['vnic'].update(instance_id='foreign'),
+            lambda contract: contract['images']['support'].update(id='foreign'),
+            lambda contract: contract['entries']['control']['implicit']['vnic']['snapshot'].update(private_ip='10.240.1.99'),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                job = copy.deepcopy(self.job)
+                mutate(job['resources'][oci.CONTRACT_KEY])
+                with self.assertRaises(oci.LifecycleError):
+                    oci.distributed_deathstarbench_candidate_projection(job['resources'])
+
+    def test_deleted_predicate_accepts_full_confirmed_graph_with_retained_tombstones(self):
+        self.provision()
+        oci.publish_distributed_runtime_projection(self.job, clients=self.cloud.clients, persist=self.persist)
+        self.assertFalse(oci.distributed_candidate_is_deleted(self.job))
+        self.destroy()
+        self.assertTrue(oci.distributed_candidate_is_deleted(self.job))
+        self.assertTrue(self.contract['entries']['control']['id'])
+        self.assertTrue(self.job['resources']['oci_dsb_control_public_ip'])
+        self.job['resources']['deathstarbench_distributed_network_qualification'] = {'retained': 'evidence'}
+        self.assertTrue(oci.distributed_candidate_is_deleted(self.job))
+        self.destroy()
+        with self.assertRaisesRegex(oci.LifecycleError, 'complete ready'):
+            oci.distributed_deathstarbench_candidate_projection(self.job['resources'])
+
+    def test_terminal_deletion_attestation_is_fresh_read_only_cloud_evidence(self):
+        self.provision()
+        self.destroy()
+        before = copy.deepcopy(self.job)
+        mutation_calls = len(self.cloud.calls)
+        persisted = len(self.snapshots)
+        network = self.cloud.clients['network']
+        compute = self.cloud.clients['compute']
+        block = self.cloud.clients['block']
+        self.cloud.on_mutation = lambda method: self.fail(
+            f'terminal deletion attestation attempted mutation {method}'
+        )
+
+        with (
+            patch.object(network, 'get_vcn', wraps=network.get_vcn) as get_vcn,
+            patch.object(network, 'list_vcns', wraps=network.list_vcns) as list_vcns,
+            patch.object(
+                network,
+                'list_route_tables',
+                wraps=network.list_route_tables,
+            ) as list_route_tables,
+            patch.object(
+                compute,
+                'get_vnic_attachment',
+                wraps=compute.get_vnic_attachment,
+            ) as get_vnic_attachment,
+            patch.object(
+                compute,
+                'list_vnic_attachments',
+                wraps=compute.list_vnic_attachments,
+            ) as list_vnic_attachments,
+            patch.object(
+                block,
+                'get_boot_volume',
+                wraps=block.get_boot_volume,
+            ) as get_boot_volume,
+            patch.object(
+                block,
+                'list_boot_volumes',
+                wraps=block.list_boot_volumes,
+            ) as list_boot_volumes,
+        ):
+            self.assertTrue(
+                oci.attest_distributed_candidate_terminal_deletion(
+                    self.job,
+                    clients=self.cloud.clients,
+                )
+            )
+
+        self.assertTrue(get_vcn.called)
+        self.assertTrue(list_vcns.called)
+        self.assertTrue(list_route_tables.called)
+        self.assertTrue(
+            all('vcn_id' not in call.kwargs for call in list_route_tables.call_args_list)
+        )
+        self.assertTrue(get_vnic_attachment.called)
+        self.assertTrue(list_vnic_attachments.called)
+        self.assertTrue(get_boot_volume.called)
+        self.assertTrue(list_boot_volumes.called)
+        self.assertEqual(self.job, before)
+        self.assertEqual(len(self.cloud.calls), mutation_calls)
+        self.assertEqual(len(self.snapshots), persisted)
+
+    def test_terminal_deletion_attestation_rejects_live_explicit_tombstone(self):
+        self.provision()
+        volume = self.contract['entries']['database-data']
+        identity = volume['id']
+        live_snapshot = copy.deepcopy(self.cloud.items['volume'][identity])
+        self.destroy()
+        self.cloud.items['volume'][identity] = live_snapshot
+        before = copy.deepcopy(self.job)
+
+        with self.assertRaisesRegex(oci.LifecycleError, 'explicit database-data still live'):
+            oci.attest_distributed_candidate_terminal_deletion(
+                self.job,
+                clients=self.cloud.clients,
+            )
+
+        self.assertEqual(self.job, before)
+
+    def test_terminal_deletion_attestation_rejects_live_list_after_get_404(self):
+        self.provision()
+        volume = self.contract['entries']['database-data']
+        identity = volume['id']
+        live_snapshot = copy.deepcopy(self.cloud.items['volume'][identity])
+        self.destroy()
+        block = self.cloud.clients['block']
+
+        with (
+            patch.object(block, 'get_volume', side_effect=not_found()),
+            patch.object(
+                block,
+                'list_volumes',
+                return_value=response([live_snapshot]),
+            ),
+            self.assertRaisesRegex(
+                oci.LifecycleError,
+                'explicit database-data still live',
+            ),
+        ):
+            oci.attest_distributed_candidate_terminal_deletion(
+                self.job,
+                clients=self.cloud.clients,
+            )
+
+    def test_terminal_deletion_attestation_accepts_retained_terminal_record(self):
+        self.provision()
+        volume = self.contract['entries']['database-data']
+        identity = volume['id']
+        terminal_snapshot = copy.deepcopy(self.cloud.items['volume'][identity])
+        self.destroy()
+        terminal_snapshot['lifecycle_state'] = 'TERMINATED'
+        self.cloud.items['volume'][identity] = terminal_snapshot
+
+        self.assertTrue(
+            oci.attest_distributed_candidate_terminal_deletion(
+                self.job,
+                clients=self.cloud.clients,
+            )
+        )
+
+    def test_terminal_deletion_attestation_ignores_transition_metadata_not_parents(self):
+        self.provision()
+        attachment = self.contract['entries']['control']['implicit']['attachments']['boot']
+        identity = attachment['id']
+        cloud_attachment = self.cloud.items['boot_volume_attachment'][identity]
+        attachment['time_updated'] = '2026-09-29T22:43:31.929000+00:00'
+        cloud_attachment['time_updated'] = attachment['time_updated']
+        self.destroy()
+        cloud_attachment = self.cloud.items['boot_volume_attachment'][identity]
+        cloud_attachment['time_updated'] = '2026-09-29T23:06:18.410000+00:00'
+        cloud_attachment['lifecycle_details'] = 'Detached during instance termination.'
+
+        self.assertTrue(
+            oci.attest_distributed_candidate_terminal_deletion(
+                self.job,
+                clients=self.cloud.clients,
+            )
+        )
+
+        cloud_attachment['instance_id'] = 'ocid1.instance.oc1.iad.foreign'
+        with self.assertRaisesRegex(
+            oci.LifecycleError,
+            r'control boot attachment\.instance_id no longer matches',
+        ):
+            oci.attest_distributed_candidate_terminal_deletion(
+                self.job,
+                clients=self.cloud.clients,
+            )
+
+    def test_terminal_deletion_attestation_accepts_confirmed_partial_cleanup(self):
+        error = sdk.exceptions.ServiceError(400, 'LimitExceeded', {}, 'no acceptance')
+        with patch.object(
+            self.cloud.clients['network'],
+            'create_nat_gateway',
+            side_effect=error,
+        ):
+            with self.assertRaises(sdk.exceptions.ServiceError):
+                self.provision()
+        self.destroy()
+
+        self.assertTrue(
+            oci.attest_distributed_candidate_terminal_deletion(
+                self.job,
+                clients=self.cloud.clients,
+            )
+        )
+
+    def test_deleted_predicate_accepts_confirmed_rejection_and_partial_graph_cleanup(self):
+        error = sdk.exceptions.ServiceError(400, 'LimitExceeded', {}, 'no acceptance')
+        with patch.object(self.cloud.clients['network'], 'create_nat_gateway', side_effect=error):
+            with self.assertRaises(sdk.exceptions.ServiceError):
+                self.provision()
+        self.destroy()
+        self.assertTrue(oci.distributed_candidate_is_deleted(self.job))
+        self.assertEqual(self.contract['entries']['nat']['status'], 'planned')
+
+    def test_deleted_predicate_rejects_forged_missing_or_conflicting_evidence(self):
+        self.provision()
+        forged = copy.deepcopy(self.job)
+        forged['resources'][oci.CONTRACT_KEY]['status'] = 'deleted'
+        self.assertFalse(oci.distributed_candidate_is_deleted(forged))
+        self.destroy()
+        mutations = (
+            lambda job: job['resources'][oci.CONTRACT_KEY].pop('deletion_confirmed_at'),
+            lambda job: job['resources'][oci.CONTRACT_KEY]['entries']['control'].pop('deletion_confirmed_at'),
+            lambda job: job['resources'][oci.CONTRACT_KEY]['entries']['control']['implicit']['boot_volume'].pop('deletion_confirmed_at'),
+            lambda job: job['resources'][oci.CONTRACT_KEY]['entries']['vcn'].pop('implicit'),
+            lambda job: job['resources'][oci.CONTRACT_KEY]['entries']['control'].update(deletion_confirmed_at='2000-01-01T00:00:00+00:00'),
+            lambda job: job['resources'].update(instance_id='untracked-other-instance'),
+            lambda job: job['resources']['role_node_inventory'].update(schema_version=99),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                job = copy.deepcopy(self.job)
+                mutate(job)
+                self.assertFalse(oci.distributed_candidate_is_deleted(job))
+                with self.assertRaises(oci.LifecycleError):
+                    oci.destroy_distributed_deathstarbench_candidate(job, clients=self.cloud.clients, persist=self.persist)
 
 
 if __name__ == '__main__':

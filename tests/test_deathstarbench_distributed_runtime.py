@@ -30,20 +30,25 @@ from app.deathstarbench_distributed import (
     WORKLOAD_JOURNAL_KEY,
     AzureK3sCandidatePlan,
     DistributedRuntimeError,
+    _prepare_distributed_k3s_candidate,
     _network_policy_positive_control_command,
     _network_policy_probe_command,
     _network_policy_probe_cleanup_command,
     _network_policy_probe_manifest,
     azure_k3s_candidate_plan,
+    aws_k3s_candidate_plan,
     distributed_k3s_candidate_plan,
     gcp_k3s_candidate_plan,
     parse_database_volume_attestation,
+    parse_aws_database_volume_attestation,
     parse_gcp_database_volume_attestation,
+    parse_oci_database_volume_attestation,
     parse_database_workload_storage_attestation,
     prepare_azure_distributed_k3s_candidate,
     prepare_azure_distributed_social_network_candidate,
     prepare_gcp_distributed_k3s_candidate,
     prepare_gcp_distributed_social_network_candidate,
+    oci_k3s_candidate_plan,
     qualify_distributed_network_paths,
 )
 from app.deathstarbench_k3s_workload import (
@@ -56,6 +61,7 @@ from app.deathstarbench_k3s_workload import (
 from app.deathstarbench_topology import build_topology_manifest
 from app.k3s_runtime import K3S_AGENT_TOKEN_FILE
 from app.main import RunCancelled, run_deathstarbench
+from app.remote_execution import SSHCommandError
 from app.resource_inventory import persist_role_node_inventory
 
 
@@ -755,6 +761,319 @@ class GcpDistributedRuntimeTests(unittest.TestCase):
                 PRIVATE_ADDRESSES['load-generator'],
             ).phase_names),
         )
+
+
+def projected_runtime(provider):
+    prefix = f'{provider}_dsb'
+    private_addresses = {
+        'control': '10.240.1.10',
+        'database': '10.240.3.11',
+        'cache': '10.240.3.12',
+        'application': '10.240.1.13',
+        'load-generator': '10.240.2.10',
+    }
+    resources = {'provider': provider}
+    nodes = {}
+    for index, (key, role) in enumerate((
+        ('control', 'control'),
+        ('database', 'database'),
+        ('cache', 'cache'),
+        ('application', 'application'),
+        ('load-generator', 'load_generator'),
+    ), start=10):
+        normalized = key.replace('-', '_')
+        direct = key in {'control', 'load-generator'}
+        host_key = (
+            f'{prefix}_{normalized}_public_ip'
+            if direct
+            else f'{prefix}_{normalized}_private_ip'
+        )
+        public_ip = f'198.51.100.{index}' if key in {
+            'control', 'application', 'load-generator'
+        } else None
+        resources[f'{prefix}_{normalized}_private_ip'] = private_addresses[key]
+        resources[f'{prefix}_{normalized}_public_ip'] = public_ip
+        nodes[key] = {
+            'key': key,
+            'role': role,
+            'node_name': f'dsb-{key}',
+            'instance_id': f'{provider}-instance-{key}',
+            'shape': 'candidate-shape',
+            'architecture': 'x86_64',
+            'private_ip': private_addresses[key],
+            'public_ip': public_ip,
+            'host_key': host_key,
+            'jump_host_key': (
+                None if direct else f'{prefix}_control_public_ip'
+            ),
+        }
+    projection = {
+        'provider': provider,
+        'topology_fingerprint': 'sha256:' + 'a' * 64,
+        'region': 'us-east-1' if provider == 'aws' else 'us-ashburn-1',
+        'database_volume_id': (
+            'vol-0123456789abcdef0'
+            if provider == 'aws'
+            else 'ocid1.volume.oc1.iad.example'
+        ),
+        'database_device': (
+            '/dev/oracleoci/oraclevdb' if provider == 'oci' else None
+        ),
+        'nodes': nodes,
+    }
+    return resources, projection
+
+
+class AwsOciDistributedRuntimeTests(unittest.TestCase):
+    def test_aws_and_oci_plan_dispatch_preserves_guest_and_route_contracts(self):
+        cases = (
+            (
+                'aws',
+                aws_k3s_candidate_plan,
+                'app.providers.aws.distributed_deathstarbench_candidate_projection',
+                'rocky_linux_9',
+            ),
+            (
+                'oci',
+                oci_k3s_candidate_plan,
+                'app.providers.oci.distributed_deathstarbench_candidate_projection',
+                'oracle_linux_9',
+            ),
+        )
+        for provider, factory, target, guest_os in cases:
+            with self.subTest(provider=provider):
+                resources, projection = projected_runtime(provider)
+                with mock.patch(target, return_value=projection):
+                    plan = factory(resources)
+                    dispatched = distributed_k3s_candidate_plan(resources)
+
+                self.assertEqual(dispatched, plan)
+                self.assertEqual(plan.provider, provider)
+                self.assertEqual(plan.guest_os, guest_os)
+                self.assertEqual(plan.region, projection['region'])
+                self.assertEqual(
+                    plan.database_volume_id,
+                    projection['database_volume_id'],
+                )
+                self.assertEqual(
+                    plan.host('database').jump_host_key,
+                    f'{provider}_dsb_control_public_ip',
+                )
+                self.assertEqual(
+                    plan.load_generator.host_key,
+                    f'{provider}_dsb_load_generator_public_ip',
+                )
+
+    def test_aws_and_oci_volume_attestations_bind_exact_provider_identity(self):
+        filesystem_uuid = '11111111-2222-3333-4444-555555555555'
+        aws_volume = 'vol-0123456789abcdef0'
+        aws_output = (
+            f'AWS_DSB_DATABASE_VOLUME volume_id={aws_volume} '
+            'device_link=/dev/disk/by-id/'
+            'nvme-Amazon_Elastic_Block_Store_vol0123456789abcdef0 '
+            f'uuid={filesystem_uuid} '
+            'mount_point=/var/lib/deathstarbench/database filesystem=xfs\n'
+        )
+        oci_volume = 'ocid1.volume.oc1.iad.example'
+        oci_output = (
+            f'OCI_DSB_DATABASE_VOLUME volume_id={oci_volume} '
+            'device_link=/dev/oracleoci/oraclevdb '
+            f'uuid={filesystem_uuid} '
+            'mount_point=/var/lib/deathstarbench/database filesystem=xfs\n'
+        )
+
+        self.assertEqual(
+            parse_aws_database_volume_attestation(
+                aws_output,
+                expected_volume_id=aws_volume,
+            )['volume_id'],
+            aws_volume,
+        )
+        self.assertEqual(
+            parse_oci_database_volume_attestation(
+                oci_output,
+                expected_volume_id=oci_volume,
+            )['device_link'],
+            '/dev/oracleoci/oraclevdb',
+        )
+        with self.assertRaises(DistributedRuntimeError):
+            parse_aws_database_volume_attestation(
+                aws_output.replace(aws_volume, 'vol-11111111111111111'),
+                expected_volume_id=aws_volume,
+            )
+        with self.assertRaises(DistributedRuntimeError):
+            parse_oci_database_volume_attestation(
+                oci_output.replace('oraclevdb', 'oraclevdc'),
+                expected_volume_id=oci_volume,
+            )
+
+    def test_provider_workload_storage_markers_are_not_interchangeable(self):
+        filesystem_uuid = '11111111-2222-3333-4444-555555555555'
+        for provider, marker in (
+            ('aws', 'AWS_DSB_WORKLOAD_STORAGE'),
+            ('oci', 'OCI_DSB_WORKLOAD_STORAGE'),
+        ):
+            output = (
+                f'{marker} uuid={filesystem_uuid} '
+                'root=/var/lib/deathstarbench/database/mongodb databases=6\n'
+            )
+            self.assertEqual(
+                parse_database_workload_storage_attestation(
+                    output,
+                    expected_filesystem_uuid=filesystem_uuid,
+                    provider=provider,
+                )['database_count'],
+                6,
+            )
+            with self.assertRaises(DistributedRuntimeError):
+                parse_database_workload_storage_attestation(
+                    output,
+                    expected_filesystem_uuid=filesystem_uuid,
+                    provider='oci' if provider == 'aws' else 'aws',
+                )
+
+    def test_prepare_selects_explicit_guest_adapter_before_remote_work(self):
+        for provider, expected_command in (
+            ('aws', 'prepare-rocky'),
+            ('oci', 'prepare-oracle'),
+        ):
+            resources, projection = projected_runtime(provider)
+            plan_factory = mock.Mock()
+            target = (
+                'app.providers.aws.distributed_deathstarbench_candidate_projection'
+                if provider == 'aws'
+                else 'app.providers.oci.distributed_deathstarbench_candidate_projection'
+            )
+            with mock.patch(target, return_value=projection):
+                plan_factory.return_value = distributed_k3s_candidate_plan(resources)
+            observed = []
+
+            def stop_after_first(_job, command, **_kwargs):
+                observed.append(command)
+                raise RuntimeError('stop after guest adapter selection')
+
+            job = {'resources': resources}
+            with (
+                mock.patch(
+                    'app.deathstarbench_distributed.rocky_host_prepare_command',
+                    return_value='prepare-rocky',
+                ),
+                mock.patch(
+                    'app.deathstarbench_distributed.oracle_linux_host_prepare_command',
+                    return_value='prepare-oracle',
+                ),
+                self.assertRaisesRegex(RuntimeError, 'stop after'),
+            ):
+                _prepare_distributed_k3s_candidate(
+                    job,
+                    plan_factory=plan_factory,
+                    execute=stop_after_first,
+                )
+
+            self.assertEqual(observed, [expected_command])
+
+    def test_oracle_host_prepare_retries_one_ssh_failure(self):
+        resources, projection = projected_runtime('oci')
+        plan_factory = mock.Mock()
+        with mock.patch(
+            'app.providers.oci.distributed_deathstarbench_candidate_projection',
+            return_value=projection,
+        ):
+            plan_factory.return_value = distributed_k3s_candidate_plan(resources)
+        observed = []
+        events = []
+
+        def fail_once_then_stop(_job, command, **_kwargs):
+            observed.append(command)
+            if command == 'prepare-oracle' and observed.count(command) == 1:
+                raise SSHCommandError('first-boot convergence failure')
+            if command != 'prepare-oracle':
+                raise RuntimeError('stop after host preparation')
+            return ''
+
+        with (
+            mock.patch(
+                'app.deathstarbench_distributed.oracle_linux_host_prepare_command',
+                return_value='prepare-oracle',
+            ),
+            self.assertRaisesRegex(RuntimeError, 'stop after host preparation'),
+        ):
+            _prepare_distributed_k3s_candidate(
+                {'resources': resources},
+                plan_factory=plan_factory,
+                execute=fail_once_then_stop,
+                emit=lambda _job, label, message: events.append((label, message)),
+            )
+
+        self.assertEqual(observed[:2], ['prepare-oracle', 'prepare-oracle'])
+        self.assertEqual(
+            [message for _label, message in events if 'retrying once' in message],
+            [
+                'Oracle Linux host preparation did not converge on the first '
+                'attempt for dsb-control; retrying once.'
+            ],
+        )
+
+    def test_oracle_host_prepare_propagates_second_ssh_failure(self):
+        resources, projection = projected_runtime('oci')
+        plan_factory = mock.Mock()
+        with mock.patch(
+            'app.providers.oci.distributed_deathstarbench_candidate_projection',
+            return_value=projection,
+        ):
+            plan_factory.return_value = distributed_k3s_candidate_plan(resources)
+        observed = []
+
+        def always_fail(_job, command, **_kwargs):
+            observed.append(command)
+            raise SSHCommandError('persistent host preparation failure')
+
+        with (
+            mock.patch(
+                'app.deathstarbench_distributed.oracle_linux_host_prepare_command',
+                return_value='prepare-oracle',
+            ),
+            self.assertRaisesRegex(
+                SSHCommandError,
+                'persistent host preparation failure',
+            ),
+        ):
+            _prepare_distributed_k3s_candidate(
+                {'resources': resources},
+                plan_factory=plan_factory,
+                execute=always_fail,
+            )
+
+        self.assertEqual(observed, ['prepare-oracle', 'prepare-oracle'])
+
+    def test_rocky_host_prepare_does_not_retry_ssh_failure(self):
+        resources, projection = projected_runtime('aws')
+        plan_factory = mock.Mock()
+        with mock.patch(
+            'app.providers.aws.distributed_deathstarbench_candidate_projection',
+            return_value=projection,
+        ):
+            plan_factory.return_value = distributed_k3s_candidate_plan(resources)
+        observed = []
+
+        def fail(_job, command, **_kwargs):
+            observed.append(command)
+            raise SSHCommandError('rocky preparation failure')
+
+        with (
+            mock.patch(
+                'app.deathstarbench_distributed.rocky_host_prepare_command',
+                return_value='prepare-rocky',
+            ),
+            self.assertRaisesRegex(SSHCommandError, 'rocky preparation failure'),
+        ):
+            _prepare_distributed_k3s_candidate(
+                {'resources': resources},
+                plan_factory=plan_factory,
+                execute=fail,
+            )
+
+        self.assertEqual(observed, ['prepare-rocky'])
 
 
 class DistributedRuntimeOrchestrationTests(unittest.TestCase):

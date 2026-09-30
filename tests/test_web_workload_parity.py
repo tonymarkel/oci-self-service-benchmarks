@@ -111,6 +111,48 @@ def shared_job(provider):
 
 
 class WebGuestContractTests(unittest.TestCase):
+    def test_distributed_guest_os_is_explicit_and_not_inferred_from_cloud(self):
+        aws_rocky = SimpleNamespace(
+            provider='aws',
+            guest_os='rocky_linux_9',
+            region='us-east-1',
+        )
+        oci_oracle = SimpleNamespace(
+            provider='oci',
+            guest_os='oracle_linux_9',
+            region='us-ashburn-1',
+        )
+
+        aws_readiness = web.readiness_command(
+            aws_rocky,
+            'deathstarbench',
+            'loadgen',
+            expected_architecture='x86_64',
+        )
+        oci_readiness = web.readiness_command(
+            oci_oracle,
+            'deathstarbench',
+            'loadgen',
+            region=oci_oracle.region,
+            expected_architecture='x86_64',
+        )
+        aws_install = '\n'.join(
+            step.command
+            for step in web.deathstarbench_install_steps(aws_rocky, 'loadgen')
+        )
+        oci_install = '\n'.join(
+            step.command
+            for step in web.deathstarbench_install_steps(oci_oracle, 'loadgen')
+        )
+
+        self.assertIn('mirrors.rockylinux.org', aws_readiness)
+        self.assertNotIn('cdn.amazonlinux.com', aws_readiness)
+        self.assertIn('yum.us-ashburn-1.oci.oraclecloud.com', oci_readiness)
+        self.assertNotIn('spal-release', aws_install)
+        self.assertIn('install epel-release', aws_install)
+        self.assertIn('oracle-epel-release-el9', oci_install)
+        self.assertIn('ol9_developer_EPEL', oci_install)
+
     def test_provider_readiness_and_apache_packages_are_distribution_specific(self):
         aws_readiness = web.readiness_command(
             'aws', 'apachebench', 'service', region='us-east-2'

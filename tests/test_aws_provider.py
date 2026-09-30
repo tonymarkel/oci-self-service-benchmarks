@@ -22,9 +22,11 @@ class FakeSession:
     def __init__(self, **clients):
         self.clients = clients
         self.calls = []
+        self.client_configs = []
 
-    def client(self, service_name, region_name=None):
+    def client(self, service_name, region_name=None, config=None):
         self.calls.append((service_name, region_name))
+        self.client_configs.append((service_name, region_name, config))
         return self.clients[service_name]
 
 

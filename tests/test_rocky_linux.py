@@ -139,6 +139,15 @@ class RockyLinuxGuestContractTests(unittest.TestCase):
         self.assertNotIn('cdn.amazonlinux.com', command)
         self.assert_valid_bash(command)
 
+        aws_command = rocky_linux.readiness_command(
+            'x86_64',
+            ('mirrors.rockylinux.org', 'github.com'),
+            provider='aws',
+        )
+        self.assertIn('The AWS benchmark guest must be Rocky Linux 9', aws_command)
+        self.assertNotIn('Amazon Linux', aws_command)
+        self.assert_valid_bash(aws_command)
+
     def test_readiness_and_dnf_reject_shell_injection(self):
         with self.assertRaisesRegex(ValueError, 'hostname'):
             rocky_linux.readiness_command('x86_64', ['github.com; id'])
@@ -351,6 +360,100 @@ class RockyLinuxGuestContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'filesystem UUID'):
             rocky_linux.gcp_deathstarbench_database_volume_attestation_command(
                 'database-data',
+                'not-a-uuid',
+            )
+
+    def test_aws_distributed_database_mount_uses_exact_ebs_identity(self):
+        volume_id = 'vol-0123456789abcdef0'
+        device_link = (
+            '/dev/disk/by-id/'
+            'nvme-Amazon_Elastic_Block_Store_vol0123456789abcdef0'
+        )
+        command = (
+            rocky_linux.aws_deathstarbench_database_volume_mount_command(
+                volume_id
+            )
+        )
+
+        self.assertIn(f'VOLUME_ID={volume_id}', command)
+        self.assertIn(f'DEVICE_LINK={device_link}', command)
+        self.assertNotIn('nvme-Amazon_Elastic_Block_Store_*', command)
+        self.assertNotIn('/dev/sdf', command)
+        self.assertIn('[ -L "$DEVICE_LINK" ]', command)
+        self.assertIn('lsblk -dnro SERIAL "$DEVICE"', command)
+        self.assertIn('EXPECTED_SERIAL=vol0123456789abcdef0', command)
+        self.assertIn('lsblk -srnpo NAME "$ROOT_DEVICE"', command)
+        self.assertIn('lsblk -nrpo NAME "$DEVICE"', command)
+        self.assertIn('wipefs -n --noheadings --output TYPE', command)
+        self.assertIn('sudo mkfs.xfs "$DEVICE"', command)
+        self.assertNotIn('mkfs.xfs -f', command)
+        self.assertIn(
+            'UUID=%s /var/lib/deathstarbench/database xfs '
+            'discard,nofail 0 2 # cloud-benchmark-dsb-database',
+            command,
+        )
+        self.assertIn(
+            'AWS_DSB_DATABASE_VOLUME volume_id=%s device_link=%s uuid=%s '
+            'mount_point=/var/lib/deathstarbench/database filesystem=xfs',
+            command,
+        )
+        self.assert_valid_bash(command)
+
+    def test_aws_distributed_database_attestation_is_read_only(self):
+        volume_id = 'vol-0123456789abcdef0'
+        filesystem_uuid = '12345678-1234-1234-1234-123456789abc'
+        command = (
+            rocky_linux.aws_deathstarbench_database_volume_attestation_command(
+                volume_id,
+                filesystem_uuid,
+            )
+        )
+
+        self.assertIn(
+            'DEVICE_LINK=/dev/disk/by-id/'
+            'nvme-Amazon_Elastic_Block_Store_vol0123456789abcdef0',
+            command,
+        )
+        self.assertIn(f'EXPECTED_UUID={filesystem_uuid}', command)
+        self.assertIn('lsblk -dnro SERIAL "$DEVICE"', command)
+        self.assertIn('grep -Fxq "$EXPECTED_FSTAB" /etc/fstab', command)
+        self.assertNotIn('mkfs', command)
+        self.assertNotIn('wipefs', command)
+        self.assertNotIn('sudo mount', command)
+        self.assertNotIn('sudo install', command)
+        self.assertIn(
+            'AWS_DSB_DATABASE_VOLUME volume_id=%s device_link=%s uuid=%s',
+            command,
+        )
+        self.assert_valid_bash(command)
+
+    def test_aws_distributed_workload_storage_has_provider_marker(self):
+        command = (
+            rocky_linux.aws_deathstarbench_database_workload_storage_command(
+                '12345678-1234-1234-1234-123456789abc'
+            )
+        )
+
+        self.assertIn('AWS_DSB_WORKLOAD_STORAGE', command)
+        self.assertNotIn('AZURE_DSB_WORKLOAD_STORAGE', command)
+        self.assertIn('container_file_t', command)
+        self.assert_valid_bash(command)
+
+    def test_aws_distributed_database_commands_reject_untrusted_identity(self):
+        for volume_id in (
+            'vol-01234567; id',
+            'vol-XYZ45678',
+            'vol-123',
+            '../vol-01234567',
+        ):
+            with self.subTest(volume_id=volume_id):
+                with self.assertRaisesRegex(ValueError, 'EBS volume ID'):
+                    rocky_linux.aws_deathstarbench_database_volume_mount_command(
+                        volume_id
+                    )
+        with self.assertRaisesRegex(ValueError, 'filesystem UUID'):
+            rocky_linux.aws_deathstarbench_database_volume_attestation_command(
+                'vol-0123456789abcdef0',
                 'not-a-uuid',
             )
 

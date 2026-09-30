@@ -1963,15 +1963,16 @@ def _run_distributed_social_network_measurement(
         job,
         load_generator,
         web_guest.readiness_command(
-            plan.provider,
+            plan,
             'deathstarbench',
             'loadgen',
+            region=plan.region,
             expected_architecture='x86_64',
         ),
         timeout=900,
     )
     for step in web_guest.deathstarbench_install_steps(
-        plan.provider,
+        plan,
         'loadgen',
     ):
         _execute(

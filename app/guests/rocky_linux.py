@@ -1,4 +1,4 @@
-"""Rocky Linux 9 guest contract for GCP and Azure benchmarks.
+"""Rocky Linux 9 guest contract for GCP, Azure, and AWS benchmarks.
 
 The module contains no cloud API calls.  It validates the supported guest
 surface and returns deterministic metadata and shell commands for providers
@@ -20,7 +20,7 @@ from app.guests import amazon_linux
 
 
 SSH_USER = 'benchmark'
-SUPPORTED_PROVIDERS = frozenset({'gcp', 'azure'})
+SUPPORTED_PROVIDERS = frozenset({'gcp', 'azure', 'aws'})
 IMAGE_PROJECT = 'rocky-linux-cloud'
 IMAGE_FAMILIES = {
     'x86_64': 'rocky-linux-9',
@@ -45,6 +45,7 @@ SUPPORTED_IPERF3_PROTOCOLS = frozenset({'tcp', 'udp', 'sctp'})
 SUPPORTED_IPERF3_PROTOCOLS_BY_PROVIDER = {
     'gcp': SUPPORTED_IPERF3_PROTOCOLS,
     'azure': frozenset({'tcp', 'udp'}),
+    'aws': frozenset({'tcp', 'udp'}),
 }
 SUPPORTED_PHORONIX_PROFILES = frozenset(phoronix.PROFILES)
 SUPPORTED_LLM_BENCHMARKS = frozenset({'llama_bench'})
@@ -113,6 +114,7 @@ _HOST_RE = re.compile(
 _GCE_DEVICE_NAME_RE = re.compile(
     r'^[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?$'
 )
+_EBS_VOLUME_ID_RE = re.compile(r'^vol-[0-9a-f]{8,17}$')
 _LINUX_USER_RE = re.compile(r'^[a-z_][a-z0-9_-]{0,31}$')
 _SSH_ALGORITHM_RE = re.compile(
     r'^(?:ssh-(?:ed25519|rsa)|ecdsa-sha2-nistp(?:256|384|521)|'
@@ -140,7 +142,11 @@ def _validated_provider(value: str) -> str:
 
 
 def _provider_label(value: str) -> str:
-    return {'gcp': 'GCP', 'azure': 'Azure'}[_validated_provider(value)]
+    return {
+        'gcp': 'GCP',
+        'azure': 'Azure',
+        'aws': 'AWS',
+    }[_validated_provider(value)]
 
 
 def supported_iperf3_protocols(provider: str = 'gcp') -> frozenset[str]:
@@ -1310,6 +1316,242 @@ def gcp_deathstarbench_database_volume_attestation_command(
         'mount_point=/var/lib/deathstarbench/database filesystem=xfs\\n" '
         '"$DEVICE_NAME" "$DEVICE_LINK" "$EXPECTED_UUID"'
     )
+
+
+def _validated_ebs_volume_id(volume_id: str) -> str:
+    normalized = str(volume_id).strip().lower()
+    if not _EBS_VOLUME_ID_RE.fullmatch(normalized):
+        raise ValueError(
+            'The AWS DeathStarBench database EBS volume ID is invalid.'
+        )
+    return normalized
+
+
+def aws_deathstarbench_database_volume_mount_command(
+    volume_id: str,
+) -> str:
+    """Mount only the manifest-owned Nitro EBS volume at the database path.
+
+    Nitro exposes the EBS ID as both the NVMe serial and a stable ``by-id``
+    link.  Both identities must agree with the provider projection before an
+    otherwise blank whole disk may be formatted.  Device enumeration and the
+    EC2 attachment's requested ``/dev/sd*`` name are intentionally unused.
+    """
+
+    normalized_id = _validated_ebs_volume_id(volume_id)
+    expected_serial = normalized_id.replace('-', '')
+    device_link = (
+        '/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_'
+        f'{expected_serial}'
+    )
+    return (
+        'set -euo pipefail; '
+        f'VOLUME_ID={shlex.quote(normalized_id)}; '
+        f'EXPECTED_SERIAL={shlex.quote(expected_serial)}; '
+        f'DEVICE_LINK={shlex.quote(device_link)}; '
+        'MOUNT_POINT=/var/lib/deathstarbench/database; '
+        'DEVICE_READY=false; for attempt in $(seq 1 60); do '
+        'if [ -L "$DEVICE_LINK" ] && [ -b "$DEVICE_LINK" ]; then '
+        'DEVICE_READY=true; break; fi; '
+        'echo "Waiting for exact AWS DeathStarBench EBS volume $VOLUME_ID '
+        'at $DEVICE_LINK ($attempt/60)."; '
+        'if [ "$attempt" -lt 60 ]; then sleep 2; fi; done; '
+        'if [ "$DEVICE_READY" != true ]; then '
+        'echo "The exact AWS DeathStarBench EBS volume did not appear: '
+        '$DEVICE_LINK" >&2; exit 1; fi; '
+        'DEVICE=$(readlink -f "$DEVICE_LINK"); '
+        'if [ ! -b "$DEVICE" ]; then '
+        'echo "The AWS DeathStarBench EBS link does not resolve to a block '
+        'device." >&2; exit 1; fi; '
+        'case "$(basename "$DEVICE")" in nvme*n1) ;; *) '
+        'echo "The AWS DeathStarBench EBS volume is not a Nitro NVMe disk." '
+        '>&2; exit 1;; esac; '
+        'if [ "$(lsblk -dnro TYPE "$DEVICE")" != disk ]; then '
+        'echo "The AWS DeathStarBench EBS attachment is not a whole disk." '
+        '>&2; exit 1; fi; '
+        'ACTUAL_SERIAL=$(lsblk -dnro SERIAL "$DEVICE" '
+        '| tr -d "[:space:]-" | tr "[:upper:]" "[:lower:]"); '
+        'if [ "$ACTUAL_SERIAL" != "$EXPECTED_SERIAL" ]; then '
+        'echo "The AWS NVMe serial does not match EBS volume $VOLUME_ID." '
+        '>&2; exit 1; fi; '
+        'ROOT_SOURCE=$(sudo findmnt -rn -o SOURCE --mountpoint /); '
+        'ROOT_DEVICE=$(readlink -f "$ROOT_SOURCE"); '
+        'if [ ! -b "$ROOT_DEVICE" ]; then '
+        'echo "The AWS guest root filesystem did not resolve to a block '
+        'device." >&2; exit 1; fi; '
+        'ROOT_ANCESTRY=$(lsblk -srnpo NAME "$ROOT_DEVICE"); '
+        'test -n "$ROOT_ANCESTRY"; '
+        'if printf "%s\\n" "$ROOT_ANCESTRY" | grep -Fxq "$DEVICE"; then '
+        'echo "Refusing to format or mount the AWS boot disk as the '
+        'DeathStarBench database volume." >&2; exit 1; fi; '
+        'DEVICE_TREE=$(lsblk -nrpo NAME "$DEVICE"); test -n "$DEVICE_TREE"; '
+        'CHILD_COUNT=$(printf "%s\\n" "$DEVICE_TREE" | tail -n +2 '
+        '| awk \'NF { count++ } END { print count + 0 }\'); '
+        'if [ "$CHILD_COUNT" -ne 0 ]; then '
+        'echo "The AWS DeathStarBench EBS volume already has partitions or '
+        'child devices; refusing to format it." >&2; exit 1; fi; '
+        'if [ -L "$MOUNT_POINT" ] '
+        '|| { [ -e "$MOUNT_POINT" ] && [ ! -d "$MOUNT_POINT" ]; }; then '
+        'echo "The DeathStarBench database mount point is not a trusted '
+        'directory." >&2; exit 1; fi; '
+        'sudo install -d -o root -g root -m 0755 "$MOUNT_POINT"; '
+        'if [ "$(readlink -f "$MOUNT_POINT")" != "$MOUNT_POINT" ]; then '
+        'echo "The DeathStarBench database mount point resolves outside its '
+        'fixed path." >&2; exit 1; fi; '
+        'DEVICE_MOUNTS=$(lsblk -dnro MOUNTPOINTS "$DEVICE" '
+        '| sed \'/^[[:space:]]*$/d\'); '
+        'if [ -n "$DEVICE_MOUNTS" ] '
+        '&& [ "$DEVICE_MOUNTS" != "$MOUNT_POINT" ]; then '
+        'echo "The AWS DeathStarBench EBS volume is already mounted at an '
+        'unexpected path." >&2; exit 1; fi; '
+        'FSTYPE=$(sudo blkid -s TYPE -o value "$DEVICE" 2>/dev/null || true); '
+        'if [ -z "$FSTYPE" ]; then '
+        'SIGNATURES=$(sudo wipefs -n --noheadings --output TYPE "$DEVICE" '
+        '| awk \'NF { print }\'); '
+        'if [ -n "$SIGNATURES" ]; then '
+        'echo "Refusing to format the AWS EBS volume because it contains '
+        'unrecognized storage signatures." >&2; exit 1; fi; '
+        'sudo mkfs.xfs "$DEVICE"; '
+        'elif [ "$FSTYPE" != xfs ]; then '
+        'echo "Refusing to replace unexpected $FSTYPE filesystem on the AWS '
+        'DeathStarBench EBS volume." >&2; exit 1; fi; '
+        'UUID=$(sudo blkid -s UUID -o value "$DEVICE" '
+        '| tr "[:upper:]" "[:lower:]"); '
+        'if [ -z "$UUID" ]; then '
+        'echo "The AWS DeathStarBench EBS volume has no filesystem UUID." '
+        '>&2; exit 1; fi; '
+        'MOUNTED_SOURCE=$(sudo findmnt -rn -o SOURCE '
+        '--mountpoint "$MOUNT_POINT" 2>/dev/null || true); '
+        'MOUNTED_UUID=$(sudo findmnt -rn -o UUID '
+        '--mountpoint "$MOUNT_POINT" 2>/dev/null '
+        '| tr "[:upper:]" "[:lower:]" || true); '
+        'if [ -n "$MOUNTED_SOURCE" ] '
+        '&& { [ -z "$MOUNTED_UUID" ] || [ "$MOUNTED_UUID" != "$UUID" ]; }; '
+        'then echo "A different filesystem is already mounted at '
+        '/var/lib/deathstarbench/database." >&2; exit 1; fi; '
+        'if sudo awk -v mount="$MOUNT_POINT" '
+        "'$0 !~ /^[[:space:]]*#/ && NF >= 2 && $2 == mount "
+        "&& $0 !~ /# cloud-benchmark-dsb-database$/ { found=1 } "
+        "END { exit found ? 0 : 1 }' /etc/fstab; then "
+        'echo "Refusing to replace a non-benchmark DeathStarBench database '
+        'fstab entry." >&2; exit 1; fi; '
+        'FSTAB_TMP=$(mktemp); '
+        "sudo awk '$0 !~ /# cloud-benchmark-dsb-database$/' /etc/fstab "
+        '>"$FSTAB_TMP"; '
+        'printf "UUID=%s /var/lib/deathstarbench/database xfs '
+        'discard,nofail 0 2 # cloud-benchmark-dsb-database\\n" '
+        '"$UUID" >>"$FSTAB_TMP"; '
+        'sudo install -m 0644 "$FSTAB_TMP" /etc/fstab; rm -f "$FSTAB_TMP"; '
+        'if [ -z "$MOUNTED_UUID" ]; then sudo mount "$MOUNT_POINT"; fi; '
+        'MOUNTED_SOURCE=$(sudo findmnt -rn -o SOURCE '
+        '--mountpoint "$MOUNT_POINT"); '
+        'MOUNTED_DEVICE=$(readlink -f "$MOUNTED_SOURCE"); '
+        'VERIFY_UUID=$(sudo findmnt -rn -o UUID --mountpoint "$MOUNT_POINT" '
+        '| tr "[:upper:]" "[:lower:]"); '
+        'VERIFY_TYPE=$(sudo findmnt -rn -o FSTYPE --mountpoint "$MOUNT_POINT"); '
+        'test "$MOUNTED_DEVICE" = "$DEVICE"; test "$VERIFY_UUID" = "$UUID"; '
+        'test "$VERIFY_TYPE" = xfs; '
+        'DEVICE_MOUNTS=$(lsblk -dnro MOUNTPOINTS "$DEVICE" '
+        '| sed \'/^[[:space:]]*$/d\'); '
+        'test "$DEVICE_MOUNTS" = "$MOUNT_POINT"; '
+        'sudo chown root:root "$MOUNT_POINT"; sudo chmod 0755 "$MOUNT_POINT"; '
+        'if command -v restorecon >/dev/null 2>&1; then '
+        'sudo restorecon -F "$MOUNT_POINT"; fi; '
+        'printf "AWS_DSB_DATABASE_VOLUME volume_id=%s device_link=%s uuid=%s '
+        'mount_point=/var/lib/deathstarbench/database filesystem=xfs\\n" '
+        '"$VOLUME_ID" "$DEVICE_LINK" "$UUID"'
+    )
+
+
+def aws_deathstarbench_database_volume_attestation_command(
+    volume_id: str,
+    filesystem_uuid: str,
+) -> str:
+    """Re-attest one exact Nitro EBS filesystem without mutating it."""
+
+    normalized_id = _validated_ebs_volume_id(volume_id)
+    normalized_uuid = str(filesystem_uuid).strip().lower()
+    if not re.fullmatch(
+        r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+        normalized_uuid,
+    ):
+        raise ValueError(
+            'DeathStarBench database attestation requires an exact filesystem UUID.'
+        )
+    expected_serial = normalized_id.replace('-', '')
+    device_link = (
+        '/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_'
+        f'{expected_serial}'
+    )
+    return (
+        'set -euo pipefail; '
+        f'VOLUME_ID={shlex.quote(normalized_id)}; '
+        f'EXPECTED_SERIAL={shlex.quote(expected_serial)}; '
+        f'DEVICE_LINK={shlex.quote(device_link)}; '
+        'MOUNT_POINT=/var/lib/deathstarbench/database; '
+        f'EXPECTED_UUID={shlex.quote(normalized_uuid)}; '
+        'for attempt in $(seq 1 60); do '
+        'if [ -L "$DEVICE_LINK" ] && [ -b "$DEVICE_LINK" ]; then break; fi; '
+        'if [ "$attempt" -lt 60 ]; then sleep 2; fi; done; '
+        'if [ ! -L "$DEVICE_LINK" ] || [ ! -b "$DEVICE_LINK" ]; then '
+        'echo "The AWS DeathStarBench EBS volume is unavailable for '
+        'read-only attestation: $DEVICE_LINK" >&2; exit 1; fi; '
+        'DEVICE=$(readlink -f "$DEVICE_LINK"); test -b "$DEVICE"; '
+        'case "$(basename "$DEVICE")" in nvme*n1) ;; *) exit 1;; esac; '
+        'test "$(lsblk -dnro TYPE "$DEVICE")" = disk; '
+        'ACTUAL_SERIAL=$(lsblk -dnro SERIAL "$DEVICE" '
+        '| tr -d "[:space:]-" | tr "[:upper:]" "[:lower:]"); '
+        'if [ "$ACTUAL_SERIAL" != "$EXPECTED_SERIAL" ]; then '
+        'echo "The AWS NVMe serial does not match EBS volume $VOLUME_ID." '
+        '>&2; exit 1; fi; '
+        'DEVICE_TREE=$(lsblk -nrpo NAME "$DEVICE"); test -n "$DEVICE_TREE"; '
+        'test "$(printf "%s\\n" "$DEVICE_TREE" | tail -n +2 '
+        '| awk \'NF { count++ } END { print count + 0 }\')" -eq 0; '
+        'ROOT_SOURCE=$(sudo findmnt -rn -o SOURCE --mountpoint /); '
+        'ROOT_DEVICE=$(readlink -f "$ROOT_SOURCE"); test -b "$ROOT_DEVICE"; '
+        'ROOT_ANCESTRY=$(lsblk -srnpo NAME "$ROOT_DEVICE"); '
+        'test -n "$ROOT_ANCESTRY"; '
+        'if printf "%s\\n" "$ROOT_ANCESTRY" | grep -Fxq "$DEVICE"; then '
+        'echo "The AWS DeathStarBench EBS volume resolves into the '
+        'root-device ancestry." >&2; exit 1; fi; '
+        'test -d "$MOUNT_POINT"; test ! -L "$MOUNT_POINT"; '
+        'test "$(readlink -f "$MOUNT_POINT")" = "$MOUNT_POINT"; '
+        'DEVICE_TYPE=$(sudo blkid -s TYPE -o value "$DEVICE" 2>/dev/null); '
+        'test "$DEVICE_TYPE" = xfs; '
+        'DEVICE_UUID=$(sudo blkid -s UUID -o value "$DEVICE" '
+        '| tr "[:upper:]" "[:lower:]"); '
+        'if [ "$DEVICE_UUID" != "$EXPECTED_UUID" ]; then '
+        'echo "The AWS DeathStarBench EBS volume UUID changed." >&2; exit 1; fi; '
+        'MOUNTED_SOURCE=$(sudo findmnt -rn -o SOURCE '
+        '--mountpoint "$MOUNT_POINT"); '
+        'MOUNTED_DEVICE=$(readlink -f "$MOUNTED_SOURCE"); '
+        'test -b "$MOUNTED_DEVICE"; test "$MOUNTED_DEVICE" = "$DEVICE"; '
+        'MOUNTED_UUID=$(sudo findmnt -rn -o UUID '
+        '--mountpoint "$MOUNT_POINT" | tr "[:upper:]" "[:lower:]"); '
+        'MOUNTED_TYPE=$(sudo findmnt -rn -o FSTYPE '
+        '--mountpoint "$MOUNT_POINT"); '
+        'test "$MOUNTED_UUID" = "$EXPECTED_UUID"; test "$MOUNTED_TYPE" = xfs; '
+        'DEVICE_MOUNTS=$(lsblk -dnro MOUNTPOINTS "$DEVICE" '
+        '| sed \'/^[[:space:]]*$/d\'); '
+        'test "$DEVICE_MOUNTS" = "$MOUNT_POINT"; '
+        'EXPECTED_FSTAB="UUID=$EXPECTED_UUID '
+        '/var/lib/deathstarbench/database xfs discard,nofail 0 2 '
+        '# cloud-benchmark-dsb-database"; '
+        'grep -Fxq "$EXPECTED_FSTAB" /etc/fstab; '
+        'printf "AWS_DSB_DATABASE_VOLUME volume_id=%s device_link=%s uuid=%s '
+        'mount_point=/var/lib/deathstarbench/database filesystem=xfs\\n" '
+        '"$VOLUME_ID" "$DEVICE_LINK" "$EXPECTED_UUID"'
+    )
+
+
+def aws_deathstarbench_database_workload_storage_command(
+    filesystem_uuid: str,
+) -> str:
+    """Prepare provider-neutral MongoDB roots on an attested EBS disk."""
+
+    return azure_deathstarbench_database_workload_storage_command(
+        filesystem_uuid
+    ).replace('AZURE_DSB_WORKLOAD_STORAGE', 'AWS_DSB_WORKLOAD_STORAGE')
 
 
 def iperf3_peer_startup_script(

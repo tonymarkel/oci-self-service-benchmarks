@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import shlex
 from typing import Any, Mapping
 
-from app.guests import amazon_linux, rocky_linux
+from app.guests import amazon_linux, oracle_linux, rocky_linux
 
 
 SUPPORTED_PROVIDERS = frozenset({'oci', 'aws', 'gcp', 'azure'})
@@ -111,6 +111,32 @@ def provider_id(value: Any) -> str:
     return provider
 
 
+def guest_os_id(value: Any) -> str:
+    """Resolve an explicit guest contract without conflating it with cloud."""
+
+    if isinstance(value, Mapping):
+        raw = value.get('guest_os')
+    elif isinstance(value, str):
+        raw = None
+    else:
+        raw = getattr(value, 'guest_os', None)
+    if raw is None:
+        return {
+            'aws': 'amazon_linux_2023',
+            'gcp': 'rocky_linux_9',
+            'azure': 'rocky_linux_9',
+            'oci': 'oracle_linux_9_legacy',
+        }[provider_id(value)]
+    guest_os = str(raw).strip().lower()
+    if guest_os not in {
+        'amazon_linux_2023',
+        'rocky_linux_9',
+        'oracle_linux_9',
+    }:
+        raise ValueError(f'Unsupported web guest OS contract: {guest_os!r}.')
+    return guest_os
+
+
 def _validated_benchmark(value: str) -> str:
     benchmark = str(value).strip().lower()
     if benchmark not in SUPPORTED_BENCHMARKS:
@@ -134,12 +160,15 @@ def readiness_hosts(
 ) -> tuple[str, ...]:
     """Return the exact external hosts needed by one web guest role."""
     provider = provider_id(provider_value)
+    guest_os = guest_os_id(provider_value)
     benchmark = _validated_benchmark(benchmark_value)
     role = _validated_role(role_value)
-    if provider == 'oci':
+    if guest_os in {'oracle_linux_9', 'oracle_linux_9_legacy'}:
         if not region:
             raise ValueError('OCI web guest readiness requires a region.')
         base = (f'yum.{region}.oci.oraclecloud.com',)
+    elif guest_os == 'rocky_linux_9':
+        base = ('mirrors.rockylinux.org',)
     else:
         base = (_BASE_READINESS_HOST[provider],)
     if benchmark == 'apachebench':
@@ -162,20 +191,23 @@ def readiness_command(
 ) -> str:
     """Build cloud guest readiness; OCI retains its orchestrator helper."""
     provider = provider_id(provider_value)
+    guest_os = guest_os_id(provider_value)
     hosts = readiness_hosts(
-        provider,
+        provider_value,
         benchmark_value,
         role_value,
         region=region,
     )
-    if provider == 'aws':
+    if guest_os == 'amazon_linux_2023':
         return amazon_linux.readiness_command(hosts)
-    if provider in {'gcp', 'azure'}:
+    if guest_os == 'rocky_linux_9':
         return rocky_linux.readiness_command(
             expected_architecture,
             hosts,
             provider=provider,
         )
+    if guest_os == 'oracle_linux_9':
+        return oracle_linux.readiness_command(expected_architecture, hosts)
     raise ValueError(
         'OCI web readiness is handled by wait_for_guest_readiness to preserve '
         'the existing Oracle Linux lifecycle.'
@@ -188,15 +220,16 @@ def apachebench_install_steps(
 ) -> tuple[InstallStep, ...]:
     """Return Apache HTTP Server or load-generator packages by provider."""
     provider = provider_id(provider_value)
+    guest_os = guest_os_id(provider_value)
     role = _validated_role(role_value)
-    if provider == 'oci':
+    if guest_os == 'oracle_linux_9_legacy':
         raise ValueError(
             'OCI ApacheBench packages use the existing dnf_install helper.'
         )
     packages = _APACHEBENCH_PACKAGES[role]
     command = (
         amazon_linux.dnf_install_command(packages)
-        if provider == 'aws'
+        if guest_os == 'amazon_linux_2023'
         else rocky_linux.dnf_install_command(packages)
     )
     label = (
@@ -239,20 +272,26 @@ def deathstarbench_install_steps(
 ) -> tuple[InstallStep, ...]:
     """Return the Podman service or x86 wrk2 guest installation steps."""
     provider = provider_id(provider_value)
+    guest_os = guest_os_id(provider_value)
     role = _validated_role(role_value)
-    if provider == 'oci':
+    if guest_os == 'oracle_linux_9_legacy':
         raise ValueError(
             'OCI DeathStarBench packages use the existing Oracle Linux '
             'installation helpers.'
         )
 
     if role == 'service':
-        base_packages = _DEATHSTARBENCH_SERVICE_BASE_PACKAGES[provider]
+        base_packages = _DEATHSTARBENCH_SERVICE_BASE_PACKAGES.get(
+            provider,
+            frozenset({'git', 'podman', 'python3', 'python3-pyyaml'}),
+        )
     else:
         base_packages = _DEATHSTARBENCH_LOADGEN_BASE_PACKAGES
     dnf_command = (
         amazon_linux.dnf_install_command
-        if provider == 'aws'
+        if guest_os == 'amazon_linux_2023'
+        else oracle_linux.dnf_install_command
+        if guest_os == 'oracle_linux_9'
         else rocky_linux.dnf_install_command
     )
     steps = [InstallStep(
@@ -260,7 +299,7 @@ def deathstarbench_install_steps(
         command=dnf_command(base_packages),
     )]
 
-    if provider == 'aws':
+    if guest_os == 'amazon_linux_2023':
         steps.extend((
             InstallStep(
                 name='Amazon Linux SPAL release prerequisite',
@@ -285,6 +324,28 @@ def deathstarbench_install_steps(
                 ),
                 command=pinned_podman_compose_install_command(),
             ))
+        return tuple(steps)
+
+    if guest_os == 'oracle_linux_9':
+        steps.extend((
+            InstallStep(
+                name='Oracle Linux DNF repository tooling',
+                command=oracle_linux.dnf_install_command({
+                    'dnf-plugins-core',
+                    'oracle-epel-release-el9',
+                }),
+            ),
+            InstallStep(
+                name='Oracle Linux developer EPEL repository',
+                command=oracle_linux.developer_epel_enable_command(),
+            ),
+            InstallStep(
+                name=f'DeathStarBench {role} Oracle EPEL packages',
+                command=oracle_linux.dnf_install_command(
+                    _DEATHSTARBENCH_EPEL_PACKAGES[role]
+                ),
+            ),
+        ))
         return tuple(steps)
 
     steps.extend((

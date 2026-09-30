@@ -1,22 +1,25 @@
 # Distributed DeathStarBench design
 
-Status: the foundation, Azure five-node infrastructure, the unreleased GCP
-five-node Compute Engine candidate, provider-neutral four-node K3s bootstrap,
-deterministic Social Network deployment, candidate-image publication,
-deterministic Reed98 initialization, bounded warm-up, measured traffic,
-reporting, exact provider cleanup, shared cross-process ownership, and
-failure-injection machinery are implemented. One safe pre-initialization Azure
-hard-exit/reacquisition/resume/cleanup path has passed live qualification. The
-GCP candidate has passed positive workload and measurement, required and
-forbidden network probes, durable-initializer response-loss reconciliation,
-safe pre-initialization crash/resume, unsafe post-initialization cleanup-only,
-cleanup interruption/recovery, and active-work SIGTERM qualification.
+Status: the provider-neutral foundation and operator-only five-node
+infrastructure, K3s, Social Network workload, network-policy qualification,
+cleanup, recovery, and measurement machinery now cover Azure, GCP, AWS, and
+OCI. All four providers have live measured results. AWS job `675d8b6ba5ae`
+and OCI job `b610d368e781` first live-qualified provisioning, guest
+preparation, the exact K3s runtime, the digest-locked workload, required and
+forbidden network paths, and complete cloud cleanup; both deliberately omitted
+`--measure`. OCI job `52fd33e7a66f` subsequently passed the complete dataset,
+warm-up, measurement, result/report, and terminal-cleanup path, followed by AWS
+job `98a16f2c3e8a` on the same shared contract. GCP additionally has the
+representative crash, response-loss, cleanup, and signal evidence described
+below, and Azure has one safe pre-initialization hard-exit, reacquisition,
+resume, and cleanup qualification.
+
 `distributed_tiered_v1` is still unreleased for normal cloud provisioning. The
 UI does not offer it, and the normal API/provider path rejects it before
-creating a run or making a cloud write. Immutable load-driver publication or
-equivalent qualification, the corresponding representative Azure failure
-paths, and infrastructure/runtime/workload qualification on AWS and OCI remain
-release gates.
+creating a run or making a cloud write. The remaining release gates include an
+immutable load-driver publication or equivalent qualification, representative
+Azure failure paths, representative AWS and OCI failure/recovery qualification,
+and final cross-provider review of the cleanup evidence.
 
 ## Benchmark modes
 
@@ -49,7 +52,7 @@ Every result records:
 - workload, warm-up, duration, threads, connections, and offered rate; and
 - provider-observed hardware and storage as provenance.
 
-The shared Azure/GCP candidate pipeline additionally pins dataset revision
+The shared four-provider candidate pipeline additionally pins dataset revision
 `social-network-socfb-reed98-compose-seed1-v1`, load-driver revision
 `wrk2-6ecb097-native-v1`, and measurement revision
 `social-network-distributed-measurement-v1`. It records the exact hashes of
@@ -74,8 +77,8 @@ revision `social-network-6ecb097-workload-v1` is generated from checked-in
 component and policy assets audited against DeathStarBench commit
 `6ecb09706140f8730b5385c08f1386c654c3c526`. Its image-lock schema requires an
 exact per-platform digest for every custom and supporting image; the candidate
-lock was published and qualified in Azure, but deliberately remains marked
-unreleased. The exact candidate is checked in at
+lock was published and has been exercised by all four provider candidates, but
+deliberately remains marked unreleased. The exact candidate is checked in at
 `docs/qualification/deathstarbench-social-network-images-v1.json`.
 Provider guest preparation is an explicit qualification item: SELinux must be
 enforcing with the expected policies and labels, cgroup v2 and swap state must
@@ -247,28 +250,136 @@ manifest's frontend-first order, then the database disk, boot disks, firewall
 rules, router, subnets, and VPC. It clears the GCP ownership and runtime journals
 only after independent lookups prove every expected resource absent.
 
-## Internal K3s bootstrap (Azure and GCP candidates)
+## AWS operator candidate
+
+AWS now has the same internal, unreleased five-node lifecycle and shared
+runtime/workload hooks. It remains reachable only through the operator
+qualification wrapper. One selected availability zone contains a dedicated
+`10.240.0.0/16` VPC with management, load-generator, and private data subnets.
+Control, application, and load generator have public addresses; database and
+cache do not. An internet gateway serves the public subnets, a run-owned zonal
+NAT gateway serves the private data subnet, and role-specific security groups
+admit only the persisted topology paths.
+
+The fixed support shapes are `m7i.large` for control, cache, and load generator
+and `m7i.xlarge` for database. The application uses the explicitly selected
+shape. Before any write, live `DescribeInstanceTypes` data must exactly match
+the fixed support-role capacities and the application's explicitly pinned vCPU
+and memory values. Every boot disk is an encrypted 50-GiB gp3 volume with 3,000
+IOPS and 125 MiB/s. Database storage is a separate encrypted 100-GiB gp3 volume
+with the same performance contract and `DeleteOnTermination=false`. `/dev/sdf`
+is only the EC2 attachment name. Guest preparation accepts the disk only through
+the Nitro by-id path derived from the exact persisted EBS volume ID, checks its
+NVMe serial, excludes the boot-device ancestry, and then creates and re-attests
+the XFS mount at `/var/lib/deathstarbench/database`.
+
+Both support and application AMIs are complete immutable Rocky Linux 9 pins:
+AMI ID, publisher account, image name, creation timestamp, architecture, root
+device, and Marketplace product code or an explicit null product code for the
+approved Rocky public publisher. The adapter does not discover a moving image
+or accept Marketplace terms. Before publishing SSH aliases it reconstructs and
+validates the entire live graph, including instance and primary-ENI addresses,
+route associations, exact security-group rules, NAT/IGW state, EBS attachments,
+boot disks, ownership tags, and imported SSH key identity.
+
+Every candidate EC2 client uses `total_max_attempts=1`. Botocore therefore
+cannot hide an uncertain non-idempotent create behind an automatic retry; the
+lifecycle controller persists the intent and reconciles any ambiguous response.
+When an atomic create response contains a complete verifiable identity, that ID
+is persisted before any eventually consistent tag-index lookup and all later
+reads use the exact ID.
+
+Cleanup is guest-independent and frontend-first. It performs a whole-graph
+read-only audit before mutation, refuses foreign or drifted relationships,
+deletes in dependency order, and then runs a second read-only reconciliation
+before accepting the strict terminal tombstone predicate. Missing resources
+without an owned delete intent and unresolved creates remain recoverable rather
+than being guessed away.
+
+## OCI operator candidate
+
+OCI now has an equivalent internal, unreleased five-node lifecycle and shared
+runtime/workload hooks. All resources occupy one selected availability domain
+inside a dedicated `10.240.0.0/16` VCN. The public management and load-generator
+subnets use an internet gateway; the private data subnet uses a NAT gateway.
+Each role has an exact NSG allowlist, and an explicitly empty managed security
+list prevents inherited broad ingress. The fixed support shape is
+`VM.Standard.E5.Flex`: control uses 1 OCPU/4 GiB, database 2 OCPUs/16 GiB, and
+cache and load generator 1 OCPU/8 GiB. The application uses the selected
+supported Standard Flex shape and capacity.
+
+OCI support and application images are explicit Oracle Linux 9 platform-image
+OCIDs checked for lifecycle state, architecture, and shape compatibility before
+the first write. The database receives a separate 256-GiB block volume at
+20 VPUs/GB. Its paravirtualized, nonshareable, writable attachment is fixed at
+`/dev/oracleoci/oraclevdb`; guest code never enumerates unused disks or falls
+back to a kernel-assigned name. The exact volume OCID, whole-disk and root-disk
+exclusion, XFS UUID, mount, and fstab entry are attested before workload use.
+
+Some OCI compartments require tag defaults to be supplied explicitly. The
+wrapper therefore accepts an exact defined-tag document, for example:
+
+```json
+{
+  "CostCenter": {
+    "Department": "<approved-value>"
+  }
+}
+```
+
+Pass that file with `--oci-defined-tags-json`. The complete namespace/key/value
+map is saved in the immutable provider pin and copied onto every taggable
+candidate resource. Resume rejects a different map, and graph validation and
+cleanup reject tag drift. The option may be omitted only when the tenancy
+accepts the deliberately pinned empty map; it is required when a compartment
+tag policy requires explicit values.
+
+Oracle Linux preparation preserves OCI's DHCP-provided VCN resolver instead of
+writing an ad-hoc resolver. It proves that NetworkManager received
+`169.254.169.254`, reloads the DNS configuration, and bounds retries for the
+required package and artifact hosts. Package transactions exclude the optional
+`ol9_ksplice` repository. K3s preparation disables active swap with
+`swapoff --all`, and both the preparation command and the independent preflight
+require the active swap-device list to be empty. The host command is idempotent;
+the operator path permits one bounded retry only for a failed Oracle Linux SSH
+preparation attempt before failing closed.
+
+OCI cleanup re-audits the full owned VCN, instance/VNIC/boot-volume graph,
+database attachment, NSG membership, exact rules, relationships, tags, and
+implicit VCN children before every destructive operation. Deletes normally use
+the current GET ETag. For the observed OCI control-plane case where an exact
+unchanged target receives a fresh ETag from every GET and three conditional
+deletes each return `NoEtagMatch`, the adapter permits one narrowly guarded
+no-If-Match delete. That fallback first performs two more full-graph audits and
+requires two identical exact target payloads in a nonterminal state plus two
+recorded nonempty ETags; the ETags may differ. The one delete has SDK retries
+disabled, and the fallback observations are persisted. Foreign children,
+ambiguous absence, or any unstable payload still stop cleanup with ownership
+retained.
+
+## Internal K3s bootstrap (all provider candidates)
 
 The internal runtime hook reloads and validates the persisted topology,
 fingerprint, five-node role inventory, fixed provider role identities, private
 addresses, shapes, architectures, and database disk before its first SSH
 process. Control is reached directly; database, cache, and application are
 reached at their private addresses through a local OpenSSH proxy on the exact
-control public address. The GCP application has a public address for its cloud
-contract, but runtime and workload management deliberately use its private
-address through control so the execution path matches Azure. The private key
-never leaves the orchestrator, and the jump and destination share the run-owned
-known-hosts database and cancellation boundary.
+control public address. GCP, AWS, and OCI application nodes have public
+addresses for their cloud contracts, but runtime and workload management use
+their private addresses through control so the execution path remains common.
+The private key never leaves the orchestrator, and the jump and destination
+share the run-owned known-hosts database and cancellation boundary.
 
-The four cluster hosts are prepared in manifest order. Rocky Linux 9 and its
-exact SELinux policy are verified, and firewalld is disabled inside the strict
-provider firewall boundary: the existing Azure NSGs or the role-tagged GCP
-rules. Required modules/sysctls are persisted, and the architecture-specific
-K3s binary plus air-gap bundle are checksum-verified.
+The four cluster hosts are prepared in manifest order. Rocky Linux 9 is used on
+Azure, GCP, and AWS; Oracle Linux 9 is used on OCI. The exact SELinux policy is
+verified, and firewalld is disabled inside each provider's strict cloud
+firewall boundary. Required modules/sysctls are persisted, and the
+architecture-specific K3s binary plus air-gap bundle are checksum-verified.
 On Azure the database disk is resolved only through LUN 0's fixed NVMe/SCSI
-links. On GCP it is resolved only through the persisted
-`/dev/disk/by-id/google-*` link described above. In both cases it is formatted
-only when blank, mounted by XFS UUID at
+links; GCP uses its persisted `/dev/disk/by-id/google-*` link; AWS uses the
+exact EBS-volume Nitro by-id/serial identity; and OCI uses only
+`/dev/oracleoci/oraclevdb` after the cloud attachment is bound to the persisted
+volume OCID. In every case it is formatted only when blank, mounted by XFS UUID at
 `/var/lib/deathstarbench/database`, and recorded as a non-secret attestation.
 
 The control plane uses exact pod/service CIDRs and Flannel VXLAN. Traefik,
@@ -335,11 +446,12 @@ and node placement and rejects missing or extra workload objects.
 The six MongoDB instances each receive a static PersistentVolume and
 PersistentVolumeClaim rooted at
 `/var/lib/deathstarbench/database/mongodb/<component>`. Before applying them,
-the provider-specific database guest hook re-attests the Azure LUN 0 or exact
-GCP device-name XFS mount and UUID. The shared path then creates only the owned
-MongoDB directories, persists their SELinux `container_file_t` labeling, and
-fails closed on an unowned or mismatched path. Live readiness requires every
-volume and claim to be bound to the expected host path on the database node.
+the provider-specific database guest hook re-attests the Azure LUN 0, exact GCP
+device-name, exact AWS EBS/Nitro identity, or fixed OCI attachment XFS mount and
+UUID. The shared path then creates only the owned MongoDB directories, persists
+their SELinux `container_file_t` labeling, and fails closed on an unowned or
+mismatched path. Live readiness requires every volume and claim to be bound to
+the expected host path on the database node.
 
 The bundle applies namespace, storage, policy, service, and workload phases in
 that fixed order. A default-deny baseline is paired with allow rules generated
@@ -376,7 +488,7 @@ gate.
 
 ## Internal dataset and measurement candidate
 
-The Azure and GCP candidates expose the same provider-neutral operator-only
+All four provider candidates expose the same provider-neutral operator-only
 execution hook outside the normal run path. Provider adapters supply only the
 validated inventory and SSH routes; the initialization, warm-up, wrk2 command,
 parsing, evidence, result, and comparison logic is shared. Its cleanup-owned
@@ -413,6 +525,11 @@ observations, raw-output and metrics hashes, and exact pre/post identities for
 all 27 workload Pods. Cleanup removes the execution journal as cloud ownership
 state, while the completed result and report retain the safe comparison and
 qualification evidence.
+
+The measurement implementation is wired and positively live-qualified on AWS
+and OCI, including Reed98 initialization, wrk2, `results.json`, report
+generation, and terminal cleanup. The first workload-only run on each provider
+remains useful independent deployment and network-policy evidence.
 
 ## Interruption and cross-process recovery
 
@@ -458,6 +575,193 @@ Synthetic coverage exercises every checkpoint and replay decision, both
 injection modes, real subprocess exit-86 and fresh-process reacquisition,
 SIGINT/SIGTERM during blocked waits, historical/current lock exclusion, and
 the normal web-run, destroy, and history-deletion ownership races.
+
+## AWS and OCI operator qualification
+
+`scripts/qualify_aws_oci_deathstarbench_distributed.py` is the only supported
+entrypoint for the unreleased AWS and OCI candidates. It takes an explicit
+`--provider aws|oci`, acquires the shared per-run lease, persists the plan,
+image-lock copy, and immutable `distributed-provider-pin.json` before the first
+cloud write, and then uses only that saved identity for resume and cleanup. The
+pin includes the local profile selector and OCI compartment where applicable,
+region and placement, application capacity, exact OS image identities, exact
+OCI defined tags when applicable, and a digest of the SSH public key.
+Credentials, the private key, and its passphrase are never written to the pin.
+
+An AWS run additionally requires an image-pin file containing exactly one
+support-image and one application-image contract. Each contract fixes the AMI
+ID, publisher account, name, creation timestamp, product code (or null for the
+approved Rocky public publisher), architecture, and root-device name. For
+example, a workload-only invocation is:
+
+```bash
+.venv/bin/python scripts/qualify_aws_oci_deathstarbench_distributed.py \
+  --provider aws \
+  --ssh-env-file .env \
+  --image-lock docs/qualification/deathstarbench-social-network-images-v1.json \
+  --aws-profile default \
+  --aws-image-pin <exact-rocky-image-pin.json> \
+  --region us-east-1 \
+  --availability-zone us-east-1a \
+  --application-shape m7i.xlarge \
+  --application-vcpus 4 \
+  --application-memory-gib 16
+```
+
+An OCI run requires exact compartment, availability-domain, application and
+support image OCIDs, architecture, and shape/capacity inputs. Supply the
+defined-tag file described above whenever compartment policy requires it:
+
+```bash
+.venv/bin/python scripts/qualify_aws_oci_deathstarbench_distributed.py \
+  --provider oci \
+  --ssh-env-file .env \
+  --image-lock docs/qualification/deathstarbench-social-network-images-v1.json \
+  --oci-profile DEFAULT \
+  --oci-compartment-id <compartment-ocid> \
+  --oci-defined-tags-json <exact-defined-tags.json> \
+  --region us-ashburn-1 \
+  --availability-zone <availability-domain> \
+  --application-shape VM.Standard.E5.Flex \
+  --oci-application-architecture x86_64 \
+  --application-vcpus 4 \
+  --application-memory-gib 32 \
+  --oci-application-image-id <oracle-linux-9-image-ocid> \
+  --oci-support-image-id <oracle-linux-9-image-ocid>
+```
+
+These examples omit `--measure`, so success means exact `cluster_ready`,
+`workload_ready`, required/forbidden network evidence, and terminal cloud
+cleanup. Adding `--measure` selects the shared initialization and measurement
+path. That path is now live-qualified on both AWS and OCI.
+
+The wrapper also supports `--resume <job-id>` and
+`--cleanup-only <job-id>`. Resume reloads and validates the saved provider pin,
+plan, image lock, topology, provider graph, runtime, and workload journal; an
+explicit override must equal the saved value. Cleanup-only needs cloud control
+plane credentials but no guest or SSH access, and it never discards ownership
+until a fresh provider-specific absence proof succeeds. If a non-default OCI
+config path was used, repeat `--oci-config-file` so the saved profile can be
+loaded from the same credentials file.
+
+## AWS and OCI live qualification evidence
+
+The first complete workload-and-network AWS qualification passed on
+2026-09-29 as job `675d8b6ba5ae`:
+
+- It ran in `us-east-1a` with Rocky Linux 9 on all nodes. Control, cache, and
+  load generator used `m7i.large`; database used `m7i.xlarge`; and application
+  used `m7i.xlarge` with 4 vCPUs and 16 GiB. Both application and support pins
+  selected the exact public Rocky image
+  `Rocky-9-EC2-Base-9.8-20260525.0.x86_64`, AMI
+  `ami-07f1ef003bc5de2b1`, publisher `792107900819`, creation timestamp
+  `2026-06-24T22:23:39.000Z`, root device `/dev/sda1`, and no product code.
+- The database guest accepted only EBS volume `vol-0c8fe368ac301ed51`
+  through its corresponding Nitro serial/by-id identity, mounted it as XFS at
+  `/var/lib/deathstarbench/database`, and bound the six MongoDB paths to that
+  filesystem.
+- The run proved the exact four-node K3s membership, node architecture and role
+  placement, control taint, CoreDNS placement, all 27 workload components, six
+  bound MongoDB PV/PVC pairs, exact image identities, and NetworkPolicies.
+- Network qualification connected load generator to application TCP/8080;
+  blocked load generator to control TCP/6443 and database/cache TCP/22; and
+  bracketed a blocked default-deny Redis probe with two exact `PONG` controls.
+- Automatic cleanup reached `destroyed` with no error or cleanup error. The
+  retained inventory marks every instance and the database volume deleted, and
+  a second AWS recovery pass supplied the terminal absence proof.
+
+The corresponding OCI qualification passed on 2026-09-29 as job
+`b610d368e781`:
+
+- It ran in `us-ashburn-1`, availability domain
+  `DfpY:US-ASHBURN-AD-1`, with an exact Oracle Linux 9.8 platform image on all
+  nodes: `Oracle-Linux-9.8-2026.09.18-0`, image OCID
+  `ocid1.image.oc1.iad.aaaaaaaag3xchijubmnnvvd2mwlsaftbwtlbpcge5mpilv4xcujc37iis6xq`.
+  The application used `VM.Standard.E5.Flex` at 4 OCPUs/32 GiB; the support
+  roles used the fixed E5 Flex capacities described above. The live tenancy's
+  required `CostCenter.Department` defined tag was supplied through the exact
+  immutable tag file and attached to every taggable resource.
+- Oracle Linux guest preparation proved the OCI VCN resolver, disabled active
+  swap, installed and verified the exact K3s SELinux policy, and passed the
+  shared host preflight. Database storage used only
+  `/dev/oracleoci/oraclevdb`, bound to the persisted block-volume OCID, and was
+  re-attested as the XFS backing store for the six MongoDB paths.
+- The same exact K3s, 27-component workload, six PV/PVC pairs, image,
+  placement, and NetworkPolicy attestations passed. The required TCP/8080,
+  three forbidden cloud paths, and bracketed Kubernetes default-deny probe
+  produced the same qualified outcomes as AWS.
+- Automatic cleanup reached `destroyed` with no error or cleanup error. Fresh
+  whole-graph validation proved the VCN, gateways, routes, subnets, NSGs,
+  instances, VNICs, boot volumes, database volume and attachment absent before
+  terminal success.
+
+AWS job `675d8b6ba5ae` and this first OCI run stopped before dataset
+initialization and emitted no performance result or report. Their retained
+runtime/workload/network journals are qualification evidence; their role
+inventories retain deleted provider IDs as audit tombstones rather than live
+ownership.
+
+The first complete measured OCI qualification then passed on 2026-09-29 as job
+`52fd33e7a66f`:
+
+- It used the same `us-ashburn-1` availability domain and Oracle Linux 9 guest
+  contract. The application was `VM.Standard.E5.Flex` at 4 OCPUs/32 GiB. The
+  exact K3s cluster contained control, database, cache, and application nodes;
+  the fixed x86_64 load generator remained a separate fifth host.
+- Independent database checks proved an empty starting state and the exact
+  Reed98 result: 962 users, 37,624 follow edges, and 9,424 posts. The durable
+  initializer completed once before traffic began.
+- At the target 100 requests/second, a 30-second warm-up completed 3,000 of
+  3,000 requests at 99.996683 requests/second. The 60.003025-second measured
+  interval completed all 5,994 sent requests at 99.894964 requests/second,
+  with p50/p95/p99 latency of 3.329/5.663/7.191 ms. HTTP, socket, connect,
+  read, write, timeout, and uncompleted-request counters were all zero.
+- All 27 Pod identities were unchanged across measurement and every restart
+  count remained zero. The strict result and comparison contracts passed;
+  `results.json` and `report.html` were both generated and retained.
+- Every OCI resource was destroyed and the final job state is `destroyed` with
+  no error or cleanup error. A post-restart cleanup-only audit initially failed
+  closed when OCI legitimately advanced `time_updated` on terminal boot
+  attachments. Terminal validation was narrowed to their genuinely immutable
+  identity and relationship projection; the rerun then proved complete absence
+  and cleared the stale cleanup error. This validates that specific terminal
+  cleanup-only convergence, not the still-pending representative OCI
+  interruption and response-loss gates.
+
+The immediately preceding AWS attempt, job `d7b5e018e6b1`, exposed a specific
+EC2 eventual-consistency boundary. `CreateInternetGateway` returned the accepted
+IGW identity, but the then-current controller discarded that response ID and an
+immediate tag-filtered lookup could not yet see the gateway. Provisioning failed
+closed with the VPC and IGW retained in the durable graph. The fix strictly
+validates the atomic create response, persists its exact ID before any follow-up
+read, and then uses exact-ID lookup instead of the eventually consistent tag
+index. The partial VPC/IGW graph was safely reconciled and destroyed; the job
+retains `destroyed` state with no cleanup error.
+
+The first complete measured AWS qualification then passed on 2026-09-29 as job
+`98a16f2c3e8a`:
+
+- It ran in `us-east-1`, availability zone `us-east-1a`, with Rocky Linux 9.
+  The application used `m7i.xlarge` at 4 vCPUs/16 GiB. Control, database,
+  cache, and application formed the exact four-node K3s cluster, while a
+  separate x86_64 `m7i.large` host generated load.
+- Independent database checks proved an empty starting state and the exact
+  Reed98 result: 962 users, 37,624 follow edges, and 9,424 posts. The durable
+  initializer completed once before traffic began.
+- At the target 100 requests/second, the 30-second warm-up completed 3,000 of
+  3,000 requests. The measured 60.003645-second interval completed all 5,994
+  sent requests at 99.893931 requests/second, with p50/p95/p99 latency of
+  3.711/6.555/8.527 ms. HTTP, socket, connect, read, write, timeout, and
+  uncompleted-request counters were all zero.
+- All 27 Pod identities were unchanged across measurement and every restart
+  count remained zero. The strict result and comparison contracts passed;
+  `results.json` and `report.html` were both generated and retained.
+- Exact cleanup deleted the complete tagged AWS graph, and a fresh-process
+  cleanup-only run subsequently reloaded the persisted graph and passed its
+  terminal absence audit. Final state is `destroyed` with no error or cleanup
+  error. This positive measurement and post-restart cleanup proof do not replace
+  the still-pending representative injected AWS interruption, response-loss,
+  and resume qualifications.
 
 ## GCP operator qualification
 
@@ -836,8 +1140,10 @@ paths, safe pre-initialization recovery, unsafe post-initialization cleanup-only
 initializer response loss, cleanup interruption, and active-work signal
 evidence in addition to positive deployment and measurement. The corresponding
 representative Azure paths, publication or equivalent qualification of an
-immutable load-driver artifact, and the same core qualification on AWS and OCI
-remain release requirements.
+immutable load-driver artifact, and representative AWS and OCI failure/recovery
+qualification remain release requirements. AWS and OCI now satisfy their
+positive deployment and measurement gates, but not their representative
+injected interruption, response-loss, and resume gates.
 
 ## Network and access policy
 
@@ -907,6 +1213,22 @@ order and performs fresh absence lookups across the complete graph before
 forgetting any ownership metadata. Partial deletion leaves the remaining
 contract recoverable by `--cleanup-only`.
 
+For AWS, cleanup reconstructs the exact tagged resource graph in the saved
+account, region, and availability zone. It refuses drift in routes, security
+groups, ENIs, public-address policy, key material, EBS attachments, boot-volume
+settings, or VPC child inventory before deleting anything. After dependency-
+ordered deletion it performs a second read-only recovery and requires every
+saved graph entry to be an owned deletion tombstone.
+
+For OCI, cleanup similarly has no resource-group shortcut. It verifies the
+complete VCN child graph, immutable defined tags and ownership tags, NSG rules
+and membership, VNIC and boot-volume attachments, and the database-volume
+attachment before each mutation. Current ETags are refreshed on conflict; the
+narrow stable-state fallback described above is allowed only after repeated
+whole-graph proofs. Final success requires a fresh live validation of complete
+absence, while any ambiguity leaves the durable graph available to
+`--cleanup-only`.
+
 ## Release sequence
 
 1. **Implemented:** versioned model, result fingerprint, immutable runtime
@@ -922,13 +1244,14 @@ contract recoverable by `--cleanup-only`.
    lifecycle and operator harness are implemented with synthetic coverage.
    Positive live workload/measurement plus safe resume, cleanup-only, network,
    response-loss, cleanup-interruption, and active-signal qualification passed.
-   AWS and OCI infrastructure candidates are being reviewed on separate
-   branches; their runtime/workload integration and live qualification remain.
-4. **Implemented for the Azure and GCP candidates:** the provider-neutral K3s
+   AWS and OCI now use the shared operator wrapper and have passed positive
+   infrastructure, workload, network, measured-result, report, and
+   terminal-cleanup qualification.
+4. **Implemented for all four provider candidates:** the provider-neutral K3s
    bootstrap, OS preparation, provider-specific exact database mount, secure
    node joining, and cluster-placement attestation are covered synthetically.
-   Both Azure and GCP paths passed positive live qualification. Runtime v5 uses
-   the smallest valid NodePort range, normalizes only
+   Azure, GCP, AWS, and OCI have passed positive live qualification. Runtime v5
+   uses the smallest valid NodePort range, normalizes only
    audited Kubernetes API round trips, and attests the runtime's exact public
    image identities.
 5. **In progress:** the checked-in, pinned Social Network manifest and
@@ -936,32 +1259,35 @@ contract recoverable by `--cleanup-only`.
    architecture-aware image selection, phased retry journal, and exact live
    attestation are implemented with synthetic coverage. The manual GHCR image
    workflow published the candidate, the exact digest lock is checked in, and
-   positive Azure and GCP qualification passed with the same renderer and
-   attestor. GCP also passed the representative required/forbidden cloud and
-   Kubernetes policy probes. Equivalent Azure evidence and AWS/OCI runtime
-   integration remain. The release and UI gates stay closed.
-6. **Implemented for the Azure and GCP candidates, with both core paths
-   live-qualified:** deterministic Reed98 initialization, durable
+   positive qualification on all four providers passed with the same renderer
+   and attestor. GCP, AWS, and OCI also passed the representative
+   required/forbidden cloud and Kubernetes policy probes. Equivalent Azure
+   network evidence remains. The release and UI gates stay closed.
+6. **Implemented and positively live-qualified on all four provider
+   candidates:** deterministic Reed98 initialization, durable
    at-most-once dispatch and reconciliation, exact database cardinality checks,
    bounded warm-up and measurement from the dedicated x86 load generator,
-   result/report
-   generation, comparison fingerprinting, and cleanup. Shared run ownership,
-   all four checkpoint/replay decisions, hard and graceful injection, and
-   signal unwinding have synthetic coverage. Live job `f6131578cb93` also
-   passed the safe `load_generator_ready` hard-exit, cross-process resume,
+   result/report generation, comparison fingerprinting, and cleanup. Shared run
+   ownership, all four checkpoint/replay decisions, hard and graceful
+   injection, and signal unwinding have synthetic coverage. Live job
+   `f6131578cb93` also passed the safe `load_generator_ready` hard-exit,
+   cross-process resume,
    strict measurement, report, and cleanup path. The two post-run
    ownership/identity hardenings plus GCP safe recovery,
    post-initialization cleanup-only behavior, initializer response loss,
    cleanup interruption, and active-work SIGTERM have live evidence. The
-   corresponding representative Azure paths and all AWS/OCI runtime paths still
-   require live failure qualification.
+   corresponding representative Azure, AWS, and OCI failure/recovery paths
+   still require live qualification.
    Initialization is not resumable after partial dataset mutation: an
    interrupted initialization fails closed and requires fresh infrastructure
    rather than continuing from an unknown database state. Those remaining
    representative paths remain release gates.
-7. **GCP complete; AWS/OCI in progress:** GCP recovery and representative
-   negative-path evidence are retained above. Implement, review, and live
-   qualify the equivalent provider lifecycle on AWS and OCI.
+7. **Positive provider qualification complete; failure gates in progress:**
+   GCP recovery and representative negative-path evidence are retained above.
+   AWS and OCI now have positive live infrastructure, K3s, workload, network,
+   measured-result, report, and cleanup evidence. Both also have post-restart
+   terminal cleanup-only proofs. Their broader injected interruption,
+   response-loss, and resume gates remain.
 8. **Planned:** per-role CPU, memory, network, disk, restart, and readiness
    telemetry.
 9. **Planned:** offered-load sweeps, repeated trials, and
@@ -970,6 +1296,6 @@ contract recoverable by `--cleanup-only`.
    revisions.
 
 The UI exposes only released profiles. Until the remaining representative
-Azure failure paths, AWS and OCI qualification, immutable load-driver gate, and
-all provider cleanup release gates pass, the existing compact mode remains the
-only runnable option.
+Azure, AWS, and OCI failure/recovery qualifications, the immutable load-driver
+gate, and final provider cleanup release review pass, the existing compact mode
+remains the only runnable option.

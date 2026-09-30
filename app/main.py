@@ -109,6 +109,7 @@ from .resource_inventory import (
     ResourceInventoryError,
     load_role_node_inventory,
 )
+from .remote_execution import SSHCommandError
 from .run_lease import (
     RunLeaseError,
     RunLeaseHeldError,
@@ -171,13 +172,6 @@ PRESERVED_RUN_STATUSES = frozenset({
 })
 DELETABLE_RUN_STATUSES = frozenset({'destroyed', 'reported', 'failed'})
 SAVED_RUN_ARTIFACTS = ('report.html', 'state.json', 'results.json')
-
-
-class SSHCommandError(RuntimeError):
-    def __init__(self, message, output='', returncode=None):
-        super().__init__(message)
-        self.output = output
-        self.returncode = returncode
 
 
 class RunCancelled(BaseException):

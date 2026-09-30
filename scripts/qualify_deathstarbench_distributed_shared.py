@@ -335,8 +335,12 @@ def _preflight_anonymous_ghcr_images(
         _preflight_one_ghcr_manifest(reference, open_request=open_request)
 
 
-def _ssh_material() -> dict[str, str | None]:
-    defaults = application.load_ssh_defaults()
+def _ssh_material(
+    env_path: Path | None = None,
+) -> dict[str, str | None]:
+    """Load benchmark SSH material from the default or explicit env file."""
+
+    defaults = application.load_ssh_defaults(env_path)
     if defaults.get('configured') is not True:
         raise QualificationError(
             str(defaults.get('error') or 'Benchmark SSH keys are not configured.')

@@ -31,6 +31,7 @@ from app.k3s_runtime import (
     control_tokens_initialize_command,
     host_preflight_command,
     normalized_architecture,
+    oracle_linux_host_prepare_command,
     rocky_host_prepare_command,
     secure_agent_token_ca_sha256,
     secure_agent_token_read_command,
@@ -152,6 +153,11 @@ class K3sRuntimeCommandTests(unittest.TestCase):
             self.assertIn('modprobe br_netfilter', command)
             self.assertIn('sysctl -n net.ipv4.ip_forward', command)
             self.assertIn('/etc/sysctl.d/90-deathstarbench-k3s.conf', command)
+            self.assertIn('sudo swapoff --all', command)
+            self.assertIn(
+                'test -z "$(swapon --noheadings --show=NAME)"',
+                command,
+            )
             self.assertIn('systemctl disable --now firewalld.service', command)
             self.assertNotRegex(
                 command,
@@ -182,6 +188,68 @@ class K3sRuntimeCommandTests(unittest.TestCase):
         self.assertIn('xfsprogs', database)
         self.assertNotIn('policycoreutils-python-utils', control)
         self.assertIn('policycoreutils-python-utils', database)
+
+    def test_oracle_linux_host_preparation_is_explicit_and_fail_closed(self):
+        control = oracle_linux_host_prepare_command(
+            'control', region='us-ashburn-1'
+        )
+        database = oracle_linux_host_prepare_command(
+            'database', region='us-ashburn-1'
+        )
+
+        for command in (control, database):
+            self.assertIn('if [ "$ID" != ol ]', command)
+            self.assertIn(
+                'The distributed K3s candidate requires Oracle Linux 9.',
+                command,
+            )
+            self.assertIn('--disablerepo=ol9_ksplice', command)
+            self.assertIn('nmcli general reload dns-full', command)
+            self.assertIn('EXPECTED_OCI_RESOLVER=169.254.169.254', command)
+            self.assertIn(
+                'yum.us-ashburn-1.oci.oraclecloud.com github.com',
+                command,
+            )
+            self.assertIn(K3S_SELINUX_URL, command)
+            self.assertIn(K3S_SELINUX_SHA256, command)
+            self.assertIn('sha256sum -c -', command)
+            self.assertIn('rpm -V k3s-selinux', command)
+            self.assertIn('container-selinux', command)
+            self.assertIn('modprobe overlay', command)
+            self.assertIn('modprobe br_netfilter', command)
+            self.assertIn('sudo swapoff --all', command)
+            self.assertIn(
+                'test -z "$(swapon --noheadings --show=NAME)"',
+                command,
+            )
+            self.assertNotIn('get.k3s.io', command)
+            self.assertNotRegex(command, r'curl[^;]*\|\s*(?:ba)?sh')
+            subprocess.run(
+                ['bash', '-n'],
+                input=command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotIn('xfsprogs', control)
+        self.assertIn('xfsprogs', database)
+        self.assertIn('policycoreutils-python-utils', database)
+        self.assertNotIn('test "$ID" = rocky', control)
+        self.assertNotIn('nmcli general reload dns-full', rocky_host_prepare_command('control'))
+
+        for role in ('loadgen', 'root', 'database; id'):
+            with self.subTest(role=role):
+                with self.assertRaisesRegex(ValueError, 'host role'):
+                    oracle_linux_host_prepare_command(
+                        role,
+                        region='us-ashburn-1',
+                    )
+
+        with self.assertRaisesRegex(ValueError, 'hostname'):
+            oracle_linux_host_prepare_command(
+                'control',
+                region='us-ashburn-1; id',
+            )
 
     def test_host_commands_set_a_deterministic_system_path(self):
         expected = f'PATH={runtime._SYSTEM_COMMAND_PATH}; export PATH;'

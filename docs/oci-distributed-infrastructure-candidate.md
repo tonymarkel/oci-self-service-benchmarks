@@ -1,27 +1,34 @@
 # OCI distributed infrastructure candidate
 
-This is an **operator-only, infrastructure-only candidate**, not a released
-benchmark mode. The normal UI/API/provider dispatch and release gate are
-unchanged. No guest preparation, K3s bootstrap, workload installation,
-measurement, or cloud qualification is included in this slice.
+This is an **operator-only candidate**, not a released benchmark mode. The
+normal UI/API/provider dispatch and release gate are unchanged. A separate
+operator wrapper now connects the infrastructure adapter to Oracle Linux guest
+preparation, the shared K3s bootstrap, Social Network workload, network
+qualification, optional measurement path, resume, and cleanup-only machinery.
+See `docs/deathstarbench-distributed.md` for the complete current contract and
+live qualification evidence.
 
 `app.providers.oci` is separate from the existing compact OCI implementation.
 Its two entrypoints are `provision_distributed_deathstarbench_candidate` and
 `destroy_distributed_deathstarbench_candidate`. They require an exclusive run
 lease held by the caller, a durable `persist(job)` callback, and authenticated
 OCI `compute`, `network`, and `block` SDK clients pinned to the input region.
-There is intentionally no public CLI until the operator lease/recovery wrapper
-and live qualification are implemented.
+Direct use still requires the caller-held lease; the supported operator
+entrypoint is `scripts/qualify_aws_oci_deathstarbench_distributed.py`.
 
 ## Explicit inputs and layout
 
 The input dictionary requires `compartment_id`, `availability_domain`, `region`,
 `shape`, `architecture`, `ocpus`, `memory_gb`, `application_image_id`,
-`support_image_id`, and a single SSH `public_key`. Credentials and private keys
-are never plan values. Image OCIDs must refer to compatible Oracle Linux 9
-platform images. Image details and compatibility are read before cloud writes;
-there is no moving image lookup or Marketplace agreement acceptance. The guest
-login contract is `opc`; guest/kernel qualification is a subsequent slice.
+`support_image_id`, exact `defined_tags`, and a single SSH `public_key`.
+Credentials and private keys are never plan values. Image OCIDs must refer to
+compatible Oracle Linux 9 platform images. Image details and compatibility are
+read before cloud writes; there is no moving image lookup or Marketplace
+agreement acceptance. The guest login contract is `opc`. The wrapper accepts
+the tag map from `--oci-defined-tags-json`, persists it in the immutable
+provider pin, applies it to every taggable resource, and rejects drift during
+resume and cleanup. An empty object is valid only when tenancy policy permits
+it.
 
 The five nodes occupy one AD in a dedicated `10.240.0.0/16` VCN:
 
@@ -81,6 +88,13 @@ depending on implicit deletion.
   instance remains live; only observed termination allows those checks to stop.
   Observed deletion/termination requires an owned, timestamped delete intent
   in the whole-graph preflight; otherwise cleanup refuses before any mutation.
+- Retry a delete after `NoEtagMatch` only after refreshing and re-auditing the
+  full graph. If three conditioned deletes fail while OCI returns an unchanged
+  exact target payload with a fresh nonempty ETag on every GET, the optional
+  no-If-Match form is allowed only after two more full-graph audits and two
+  identical nonterminal target payloads. Both nonempty ETags are recorded and
+  may differ. The one fallback delete disables SDK retries; any unstable
+  payload still fails closed.
 - Cleanup enumerates child resources in the configured compartment. Operators
   must not share the dedicated VCN or move its children across compartments.
   This is not tenant-wide discovery; OCI dependency checks still prevent parent
@@ -93,10 +107,30 @@ depending on implicit deletion.
 
 ## Validation and remaining gates
 
-The stateful fake suite exercises normal lifecycle, implicit resources, response
-loss, partial creation, foreign dependencies, immutable-contract drift, and
-ETag-conditioned deletion. It makes no cloud requests. Live OCI provisioning,
-network reachability, failure injection, Oracle Linux/UEK guest preparation,
-and K3s/workload execution are still required before any release decision.
+The stateful fake suite exercises normal lifecycle, implicit resources,
+response loss, partial creation, foreign dependencies, immutable-contract
+drift, required defined tags, and guarded ETag deletion. Operator wrapper job
+`b610d368e781` passed live OCI provisioning, Oracle Linux 9 DNS/swap/SELinux
+preparation, exact database mounting, K3s readiness, Social Network workload
+readiness, required and forbidden network probes, and terminal cleanup on
+2026-09-29. It did not use `--measure` and is not a benchmark result.
+
+Measured job `52fd33e7a66f` then passed the complete live path in
+`us-ashburn-1`, `DfpY:US-ASHBURN-AD-1`, with a 4-OCPU/32-GiB
+`VM.Standard.E5.Flex` application node, the exact four-node K3s cluster, and a
+separate fixed load generator. It proved 962 Reed98 users, 37,624 follow edges,
+and 9,424 posts; completed a 30-second warm-up and all 5,994 measured requests
+at the target 100 requests/second (99.894964 observed); recorded p50/p95/p99
+latency of 3.329/5.663/7.191 ms with zero errors, timeouts, or uncompleted
+requests; and proved all 27 Pod identities unchanged with zero restarts. Strict
+result, comparison, `results.json`, and report gates passed.
+
+After process restart, cleanup-only initially refused its terminal audit because
+OCI had legitimately advanced boot-attachment `time_updated`. Terminal
+validation was corrected to retain only genuinely immutable boot-attachment
+identity and relationship fields. The rerun proved every resource absent,
+finalized `destroyed`, and cleared `cleanup_error`. Keep the release gate closed
+until representative OCI interruption/recovery paths and the remaining
+cross-provider gates pass.
 
 SDK reference: [OCI Core clients](https://docs.oracle.com/en-us/iaas/tools/python/latest/api/core.html).

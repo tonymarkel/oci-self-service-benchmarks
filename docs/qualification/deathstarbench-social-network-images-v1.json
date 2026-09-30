@@ -2,8 +2,8 @@
   "image_set_revision": "social-network-images-v1",
   "load_driver": {
     "architecture": "x86_64",
-    "context_sha256": "dd32e5de2f5332b79b91e5d5ec6ac0acaf5891e5befb0c816e168a22ed0b0066",
-    "image": "ghcr.io/tonymarkel/deathstarbench-load-driver@sha256:9d8f6b0d92e15581817d0e692017456f691e1be4b2eb97aa4e510e37b579a0ac",
+    "context_sha256": "4967715d0c23e40f01eb0acd0841e103e32b031b44c907d3dce5c233adc2785c",
+    "image": "ghcr.io/tonymarkel/deathstarbench-load-driver@sha256:5669318f8e955ccab71ecd768a31d0add0540c610e6abf0fc0ebf076330dab5d",
     "luajit_revision": "2090842410e0ba6f81fad310a77bf5432488249a",
     "luasocket_source_sha256": "f4a207f50a3f99ad65def8e29c54ac9aac668b216476f7fae3fae92413398ed2",
     "platform": "linux/amd64",
@@ -13,7 +13,7 @@
     "upstream_revision": "6ecb09706140f8730b5385c08f1386c654c3c526",
     "wrk2_source_sha256": "c144d32b300c2768a2d69b78ac42c682e332db992cff8b5a79c8d0b2262cf087",
     "wrk2_tree_git_sha": "ebb227ba3684e6b69166abbeefe8210ada396018",
-    "wrk_binary_sha256": "e2d0bc6d4ae1edbe5e1da718add89bdd60d9bbc576d02c883f76075924f857ee"
+    "wrk_binary_sha256": "524155ca43451170646de69b1d4e83a22b46c3950e5d0af56ae717bd3bae01a0"
   },
   "platforms": {
     "linux/amd64": {

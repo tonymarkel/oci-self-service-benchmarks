@@ -25,10 +25,10 @@ QUALIFIED_IMAGE_LOCK = (
     / "deathstarbench-social-network-images-v1.json"
 )
 QUALIFIED_IMAGE_LOCK_SHA256 = (
-    "5b8a10f513eaba3c40c390563c24605bb43321b6984eb94ca50c8d9754cc0e00"
+    "e67a54dbc64e241442c1757586365a55e54ef3a6940b1d1a93ea29155f780d1f"
 )
 QUALIFIED_IMAGE_LOCK_FINGERPRINT = (
-    "sha256:afa9a7850c7231139c5b79025155674d1dbe8ad18582741fdac2dd686a9d789e"
+    "sha256:bbe843b5a6c6509f452fbda9db1a8c226e2544dae63b869f4f2f7915f441388d"
 )
 
 
@@ -443,11 +443,15 @@ class DeathStarBenchImageLockTests(unittest.TestCase):
             QUALIFIED_IMAGE_LOCK_FINGERPRINT,
         )
         self.assertIs(lock["released"], False)
-        self.assertFalse(validated.load_driver.published)
-        self.assertEqual(validated.load_driver.context_sha256, "0" * 64)
+        self.assertTrue(validated.load_driver.published)
+        self.assertEqual(
+            validated.load_driver.context_sha256,
+            "cc323dbb814cf97096867b337e27b03a2f8789238aa7c5cfa07468214c6d2003",
+        )
         self.assertEqual(
             validated.load_driver.image,
-            "ghcr.io/tonymarkel/deathstarbench-load-driver@sha256:" + "0" * 64,
+            "ghcr.io/tonymarkel/deathstarbench-load-driver@sha256:"
+            "d9bec4a2329279141f7ead30ecf45087859b310708d5ae7e3a5dd49d9605e68d",
         )
         references = [
             reference

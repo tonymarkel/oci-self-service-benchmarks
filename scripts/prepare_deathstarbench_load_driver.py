@@ -336,9 +336,9 @@ private_ipv4() {
 
 run_driver() {
   [[ $# == 14 ]] || fail "run requires exactly seven named arguments"
-  [[ $1 == --target && $3 == --port && $5 == --threads &&
-     $7 == --connections && $9 == --rate && $11 == --duration &&
-     $13 == --max-user-index ]] || fail "run arguments are missing or out of order"
+  [[ ${1} == --target && ${3} == --port && ${5} == --threads &&
+     ${7} == --connections && ${9} == --rate && ${11} == --duration &&
+     ${13} == --max-user-index ]] || fail "run arguments are missing or out of order"
   local target=$2 port=$4 threads=$6 connections=$8 rate=${10} duration=${12} max_user_index=${14}
   private_ipv4 "$target" || fail "target must be an RFC1918 IPv4 address"
   require_uint port "$port" 1 65535

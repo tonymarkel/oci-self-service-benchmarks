@@ -408,6 +408,40 @@ class LoadDriverRuntimeAttestationTests(unittest.TestCase):
                     self.assertEqual(result.stdout, "")
                     self.assertIn(error, result.stderr)
 
+    def test_run_parses_all_seven_ordered_named_arguments(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            entrypoint, environment = runtime_attestation_fixture(Path(temporary))
+            result = subprocess.run(
+                [
+                    str(entrypoint),
+                    "run",
+                    "--target",
+                    "10.240.1.13",
+                    "--port",
+                    "8080",
+                    "--threads",
+                    "2",
+                    "--connections",
+                    "3",
+                    "--rate",
+                    "100",
+                    "--duration",
+                    "5",
+                    "--max-user-index",
+                    "962",
+                ],
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 64)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(
+                result.stderr,
+                "load-driver: connections must be at least and divisible by threads\n",
+            )
+
 
 class LoadDriverLockTests(unittest.TestCase):
     def test_merge_retains_workload_refs_and_locks_exact_direct_manifest(self):

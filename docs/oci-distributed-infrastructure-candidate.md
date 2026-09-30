@@ -125,6 +125,21 @@ latency of 3.329/5.663/7.191 ms with zero errors, timeouts, or uncompleted
 requests; and proved all 27 Pod identities unchanged with zero restarts. Strict
 result, comparison, `results.json`, and report gates passed.
 
+Fresh artifact-backed measurement-v2 job `931d33b4c243` then passed on
+2026-09-30 with the final immutable driver. It completed all 5,994 requests at
+99.889435 requests/second with p50/p95/p99 latency of 3.077/4.983/6.235 ms,
+100 percent completion, zero errors, and unchanged Pod identity. Its
+measurement-evidence, normalized-metrics, and raw-output SHA-256 values are
+`3c6d152c594a00f23b2f4b860929c29d1f1f3871d30c6ca438ae4ef81e9ee35d`,
+`be2354c611627bd9075645ccbaf3ed6a62f3c7fd4191b34ab3dc069f34368f62`,
+and `587abfa82e911f8ebe152991734075880214eb78f4a50aeddfd20bf12fcf55b3`.
+Automatic cleanup reached `destroyed` with no error or cleanup error. A fresh
+read-only audit at `2026-09-30T23:36:52.591609Z` checked all 39 exact saved
+primary and implicit identities for each of this run and the two formal OCI
+failure-matrix runs, plus their compartment-scoped children. It found zero live
+resources and zero query errors; terminal provider tombstones were retained
+only as OCI history.
+
 After process restart, cleanup-only initially refused its terminal audit because
 OCI had legitimately advanced boot-attachment `time_updated`. Terminal
 validation was corrected to retain only genuinely immutable boot-attachment
@@ -161,8 +176,8 @@ projected no recoverable ownership.
 This completes OCI's representative checkpoint failure matrix. OCI does not
 claim live active-signal or cleanup-interruption qualification; those paths
 remain synthetically covered but are outside this matrix. The candidate remains
-unreleased. The broader remaining release gates are representative Azure
-failure paths, publication or equivalent qualification of an immutable load
-driver, and final cross-provider cleanup review.
+unreleased. The operator-path prerequisite gates are complete; public UI/API
+lifecycle integration and the coordinated release-flag transition remain a
+separate slice.
 
 SDK reference: [OCI Core clients](https://docs.oracle.com/en-us/iaas/tools/python/latest/api/core.html).

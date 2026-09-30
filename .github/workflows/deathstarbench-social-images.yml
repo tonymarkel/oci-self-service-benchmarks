@@ -155,7 +155,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - name: Record load-driver publication limitations
+      - name: Record load-driver publication requirements
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
           ## DeathStarBench amd64 load-driver candidate
@@ -168,8 +168,8 @@ jobs:
           GHCR creates new packages as private by default. A package owner must
           change `deathstarbench-load-driver` to **Public**, then independently
           verify an anonymous pull of the exact platform digest before adopting
-          the candidate lock. The checked-in zero-digest placeholder is not a
-          released artifact and must be replaced before live use.
+          the candidate lock. Publication and anonymous pull qualification do
+          not by themselves change the checked-in release flag.
           SUMMARY
 
   publish-candidate:

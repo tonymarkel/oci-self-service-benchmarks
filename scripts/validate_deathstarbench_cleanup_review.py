@@ -75,7 +75,7 @@ def _exact_keys(
         _fail(path, 'unknown keys: ' + ', '.join(sorted(unknown)))
 
 
-def _timestamp(value: Any, path: str) -> None:
+def _timestamp(value: Any, path: str) -> datetime:
     if not isinstance(value, str) or not value.endswith('Z'):
         _fail(path, 'must be an RFC 3339 UTC timestamp ending in Z')
     try:
@@ -86,6 +86,7 @@ def _timestamp(value: Any, path: str) -> None:
         ) from exc
     if parsed.utcoffset() is None or parsed.utcoffset().total_seconds() != 0:
         _fail(path, 'must use UTC')
+    return parsed
 
 
 def _job_id(value: Any, path: str) -> str:
@@ -235,6 +236,16 @@ def _validate_provider(provider: str, value: Any) -> bool:
             f'{terminal_path}.sampled_run_ids',
             'must reference only retained reviewed runs',
         )
+    representative_run_ids = set(evidenced.values())
+    missing_terminal_run_ids = (
+        representative_run_ids - set(normalized_sampled)
+    )
+    if missing_terminal_run_ids:
+        _fail(
+            f'{terminal_path}.sampled_run_ids',
+            'must cover every evidenced representative scenario run; missing '
+            + ', '.join(sorted(missing_terminal_run_ids)),
+        )
     for key in ('predicate', 'retained_state'):
         if not isinstance(terminal[key], str) or not terminal[key].strip():
             _fail(f'{terminal_path}.{key}', 'must be a non-empty string')
@@ -329,6 +340,13 @@ def _validate_provider(provider: str, value: Any) -> bool:
                 )
     if not inventory_run_ids:
         _fail(inventory_path, 'must cover at least one reviewed run')
+    missing_inventory_run_ids = representative_run_ids - inventory_run_ids
+    if missing_inventory_run_ids:
+        _fail(
+            f'{inventory_path}.scopes',
+            'must cover every evidenced representative scenario run; missing '
+            + ', '.join(sorted(missing_inventory_run_ids)),
+        )
     return matrix_complete
 
 
@@ -345,7 +363,7 @@ def validate_cleanup_review(value: Any) -> dict[str, Any]:
         _fail('topology_id', 'is unsupported')
     if root['runtime_id'] != 'k3s_v1':
         _fail('runtime_id', 'is unsupported')
-    _timestamp(root['reviewed_at'], 'reviewed_at')
+    reviewed_at = _timestamp(root['reviewed_at'], 'reviewed_at')
 
     providers = _mapping(root['providers'], 'providers')
     if set(providers) != PROVIDERS:
@@ -361,6 +379,18 @@ def validate_cleanup_review(value: Any) -> dict[str, Any]:
         provider: _validate_provider(provider, providers[provider])
         for provider in sorted(PROVIDERS)
     }
+    latest_inventory_at = max(
+        _timestamp(
+            providers[provider]['independent_cloud_inventory']['checked_at'],
+            f'providers.{provider}.independent_cloud_inventory.checked_at',
+        )
+        for provider in sorted(PROVIDERS)
+    )
+    if reviewed_at < latest_inventory_at:
+        _fail(
+            'reviewed_at',
+            'must not precede any independent cloud inventory check',
+        )
 
     overall = root['overall_gate_complete']
     if type(overall) is not bool:

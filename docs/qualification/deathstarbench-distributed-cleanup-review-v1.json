@@ -3,8 +3,8 @@
   "review_kind": "deathstarbench_distributed_cleanup",
   "topology_id": "distributed_tiered_v1",
   "runtime_id": "k3s_v1",
-  "reviewed_at": "2026-09-30T20:06:02Z",
-  "overall_gate_complete": false,
+  "reviewed_at": "2026-09-30T23:45:09Z",
+  "overall_gate_complete": true,
   "providers": {
     "aws": {
       "representative_matrix": {
@@ -47,12 +47,13 @@
         "retained_state": "Twenty-one deleted graph tombstones, deleted role inventory, and non-cloud runtime, workload, execution, and network evidence remain for audit."
       },
       "independent_cloud_inventory": {
-        "checked_at": "2026-09-30T20:06:02Z",
-        "method": "Fresh read-only exact graph recovery plus job-tag and VPC-child scans",
+        "checked_at": "2026-09-30T23:20:44Z",
+        "method": "Fresh read-only exact graph recovery plus job-tag and VPC-child scans across every representative run",
         "scopes": [
           {
             "run_ids": [
               "3249984b8909",
+              "26c5d0701087",
               "4c2e0c6feafd"
             ],
             "scope": {
@@ -64,17 +65,17 @@
               {
                 "category": "saved_graph_entries",
                 "live_resource_count": 0,
-                "outcome": "absent"
+                "outcome": "no_live_resources"
               },
               {
                 "category": "tagged_boot_volumes_and_other_children",
                 "live_resource_count": 0,
-                "outcome": "absent"
+                "outcome": "no_live_resources"
               },
               {
                 "category": "vpc_child_inventory",
                 "live_resource_count": 0,
-                "outcome": "absent"
+                "outcome": "no_live_resources"
               }
             ]
           }
@@ -89,19 +90,26 @@
           "unsafe_cleanup_only"
         ],
         "evidenced_scenario_runs": {
-          "safe_resume": "f6131578cb93"
+          "safe_resume": "8643abe372ec",
+          "initializer_response_loss": "8643abe372ec",
+          "unsafe_cleanup_only": "aa4137546cac"
         },
-        "complete": false
+        "complete": true
       },
       "runs": {
-        "f6131578cb93": {
-          "state_sha256": "sha256:4711d6faf3b63e659f07fc9a363a3a1517b0374a276aa791db23ac5f3a996710",
-          "interruption_evidence_sha256": "sha256:cb8d84ffb24859b63328b569654fdcea5f6f06918206cf1b0ce530a7c8be8977"
+        "8643abe372ec": {
+          "state_sha256": "sha256:0fa83b8a8e1ec97c4a0cd1ce77c2797d634aef7cbaa54afd18f1a4c05efef6c6",
+          "interruption_evidence_sha256": "sha256:26ea3c2bd385ff8bcc14ae6a3b44c2aa5ba29ad28c127921e0059c3e938ae3a6"
+        },
+        "aa4137546cac": {
+          "state_sha256": "sha256:ba8291a843f3d0c30990255726f584ca1a5a20d8b7006fab4eb264f97d9ccdf9",
+          "interruption_evidence_sha256": "sha256:88cc3a65cf4d8d7a02d3d55e31435ac736011938a0ef9bf6e7dcd23a7a367a34"
         }
       },
       "local_terminal_evidence": {
         "sampled_run_ids": [
-          "f6131578cb93"
+          "8643abe372ec",
+          "aa4137546cac"
         ],
         "predicate": "destroyed status, no cleanup error, no recoverable resources, and no Azure cleanup ownership key",
         "predicate_result": true,
@@ -111,16 +119,32 @@
         "retained_state": "Only non-cloud benchmark summary and qualification evidence remain after the exact resource-group contract is cleared."
       },
       "independent_cloud_inventory": {
-        "checked_at": "2026-09-30T20:06:02Z",
-        "method": "Azure CLI exact resource-group existence lookup",
+        "checked_at": "2026-09-30T23:28:07Z",
+        "method": "Fresh Azure CLI exact resource-group existence lookups for every representative run",
         "scopes": [
           {
             "run_ids": [
-              "f6131578cb93"
+              "8643abe372ec"
             ],
             "scope": {
               "subscription": "saved immutable launch subscription",
-              "resource_group": "benchmark-f6131578cb93"
+              "resource_group": "benchmark-8643abe372ec"
+            },
+            "queries": [
+              {
+                "category": "resource_group",
+                "live_resource_count": 0,
+                "outcome": "absent"
+              }
+            ]
+          },
+          {
+            "run_ids": [
+              "aa4137546cac"
+            ],
+            "scope": {
+              "subscription": "saved immutable launch subscription",
+              "resource_group": "benchmark-aa4137546cac"
             },
             "queries": [
               {
@@ -188,11 +212,12 @@
         "retained_state": "Only non-cloud benchmark summary and qualification evidence remain after the twenty-resource deterministic graph is cleared."
       },
       "independent_cloud_inventory": {
-        "checked_at": "2026-09-30T20:06:02Z",
-        "method": "GCP CLI exact run-prefix inventory queries",
+        "checked_at": "2026-09-30T23:23:47Z",
+        "method": "Fresh GCP CLI exact run-prefix inventory queries across every representative run",
         "scopes": [
           {
             "run_ids": [
+              "c1cfa27160d6",
               "dd9b5a1cae6f",
               "aafb628115c7"
             ],
@@ -200,7 +225,7 @@
               "project": "gcp-benchmarks-506115",
               "regions": "global and us-east1",
               "zones": "us-east1-b",
-              "name_prefixes": "benchmark-dd9b5a1cae6f-dsb and benchmark-aafb628115c7-dsb"
+              "name_prefixes": "benchmark-c1cfa27160d6-dsb, benchmark-dd9b5a1cae6f-dsb, and benchmark-aafb628115c7-dsb"
             },
             "queries": [
               {
@@ -275,8 +300,8 @@
         "retained_state": "Twenty-one explicit deleted tombstones, captured implicit child identities, deleted role inventory, and non-cloud runtime, workload, execution, and network evidence remain for audit."
       },
       "independent_cloud_inventory": {
-        "checked_at": "2026-09-30T20:06:02Z",
-        "method": "Fresh read-only GET and compartment-scoped list attestation for every retained explicit and implicit identity",
+        "checked_at": "2026-09-30T23:36:52.591609Z",
+        "method": "Fresh read-only GET and compartment-scoped list attestation for every retained explicit and implicit identity across every representative run",
         "scopes": [
           {
             "run_ids": [

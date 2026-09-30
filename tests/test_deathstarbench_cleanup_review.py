@@ -20,22 +20,28 @@ class DeathStarBenchCleanupReviewTests(unittest.TestCase):
     def setUp(self):
         self.receipt = json.loads(RECEIPT_PATH.read_text(encoding='utf-8'))
 
-    def test_checked_in_receipt_is_valid_and_azure_keeps_gate_closed(self):
+    def test_checked_in_receipt_is_valid_and_complete(self):
         validated = review.validate_cleanup_review(self.receipt)
 
-        self.assertFalse(validated['overall_gate_complete'])
-        self.assertFalse(
-            validated['providers']['azure']['representative_matrix']['complete']
+        provider_completeness = []
+        for record in validated['providers'].values():
+            evidenced = record['representative_matrix'][
+                'evidenced_scenario_runs'
+            ]
+            expected_complete = (
+                set(evidenced) == review.REPRESENTATIVE_SCENARIOS
+            )
+            self.assertIs(
+                record['representative_matrix']['complete'],
+                expected_complete,
+            )
+            self.assertTrue(record['representative_matrix']['complete'])
+            provider_completeness.append(expected_complete)
+        self.assertIs(
+            validated['overall_gate_complete'],
+            all(provider_completeness),
         )
-        self.assertTrue(
-            validated['providers']['aws']['representative_matrix']['complete']
-        )
-        self.assertTrue(
-            validated['providers']['gcp']['representative_matrix']['complete']
-        )
-        self.assertTrue(
-            validated['providers']['oci']['representative_matrix']['complete']
-        )
+        self.assertTrue(validated['overall_gate_complete'])
 
     def test_validator_fails_closed_on_missing_provider_bad_id_or_bad_date(self):
         cases = []
@@ -90,13 +96,97 @@ class DeathStarBenchCleanupReviewTests(unittest.TestCase):
                 ):
                     review.validate_cleanup_review(value)
 
+    def test_review_must_not_predate_independent_inventory(self):
+        receipt = copy.deepcopy(self.receipt)
+        receipt['reviewed_at'] = '2026-09-30T00:00:00Z'
+
+        with self.assertRaisesRegex(
+            review.CleanupReviewValidationError,
+            'reviewed_at.*must not precede',
+        ):
+            review.validate_cleanup_review(receipt)
+
+    def test_representative_runs_require_terminal_and_inventory_coverage(self):
+        missing_terminal = copy.deepcopy(self.receipt)
+        aws = missing_terminal['providers']['aws']
+        safe_run_id = aws['representative_matrix']['evidenced_scenario_runs'][
+            'safe_resume'
+        ]
+        aws['local_terminal_evidence']['sampled_run_ids'].remove(safe_run_id)
+
+        missing_inventory = copy.deepcopy(self.receipt)
+        aws = missing_inventory['providers']['aws']
+        response_loss_run_id = aws['representative_matrix'][
+            'evidenced_scenario_runs'
+        ]['initializer_response_loss']
+        for scope in aws['independent_cloud_inventory']['scopes']:
+            scope['run_ids'] = [
+                job_id
+                for job_id in scope['run_ids']
+                if job_id != response_loss_run_id
+            ]
+
+        for label, value, path, run_id in (
+            (
+                'missing terminal coverage',
+                missing_terminal,
+                'local_terminal_evidence.sampled_run_ids',
+                safe_run_id,
+            ),
+            (
+                'missing inventory coverage',
+                missing_inventory,
+                'independent_cloud_inventory.scopes',
+                response_loss_run_id,
+            ),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    review.CleanupReviewValidationError,
+                    rf'{path}.*missing {run_id}',
+                ):
+                    review.validate_cleanup_review(value)
+
+    def test_one_run_may_cover_multiple_representative_scenarios(self):
+        receipt = copy.deepcopy(self.receipt)
+        aws = receipt['providers']['aws']
+        matrix = aws['representative_matrix']['evidenced_scenario_runs']
+        original_response_loss_run_id = matrix['initializer_response_loss']
+        shared_run_id = matrix['safe_resume']
+        matrix['initializer_response_loss'] = shared_run_id
+
+        aws['local_terminal_evidence']['sampled_run_ids'] = [
+            job_id
+            for job_id in aws['local_terminal_evidence']['sampled_run_ids']
+            if job_id != original_response_loss_run_id
+        ]
+        for scope in aws['independent_cloud_inventory']['scopes']:
+            scope['run_ids'] = [
+                job_id
+                for job_id in scope['run_ids']
+                if job_id != original_response_loss_run_id
+            ]
+
+        validated = review.validate_cleanup_review(receipt)
+
+        self.assertEqual(
+            validated['providers']['aws']['representative_matrix'][
+                'evidenced_scenario_runs'
+            ]['initializer_response_loss'],
+            shared_run_id,
+        )
+
     def test_overall_gate_cannot_open_while_any_provider_matrix_is_incomplete(self):
         unsafe = copy.deepcopy(self.receipt)
+        unsafe['providers']['aws']['representative_matrix'][
+            'evidenced_scenario_runs'
+        ].pop('initializer_response_loss')
+        unsafe['providers']['aws']['representative_matrix']['complete'] = False
         unsafe['overall_gate_complete'] = True
 
         with self.assertRaisesRegex(
             review.CleanupReviewValidationError,
-            'incomplete providers: azure',
+            'incomplete providers: aws',
         ):
             review.validate_cleanup_review(unsafe)
 

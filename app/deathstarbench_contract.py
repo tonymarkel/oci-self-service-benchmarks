@@ -146,13 +146,13 @@ def runtime_profile(
 
 
 def require_released_runtime(topology_id: str, runtime_id: str):
-    """Reject a modeled profile until its complete cloud lifecycle is ready."""
+    """Reject a modeled profile until its public product lifecycle is enabled."""
 
     profile = runtime_profile(topology_id, runtime_id)
     if not profile.released:
         raise ValueError(
             f'DeathStarBench {profile.label} is not released yet; its '
-            'multi-node provisioning and cleanup path is still being '
-            'qualified. Use Compact / single-host for runnable plans.'
+            'public plan, API, and lifecycle integration is not enabled. '
+            'Use Compact / single-host for runnable plans.'
         )
     return profile

@@ -38,6 +38,7 @@ from app.deathstarbench_distributed_measurement import (
     initializer_execution_identity,
     _load_command,
     _load_driver_artifact_marker,
+    load_generator_attestation_command,
     non_mutating_frontend_probe_command,
     parse_dataset_attestation,
     parse_dataset_database_attestation,
@@ -320,6 +321,32 @@ class MeasurementExecutor:
 
 
 class DistributedDatasetContractTests(unittest.TestCase):
+    def test_load_driver_digest_check_does_not_short_read_under_pipefail(self):
+        load_driver = validate_image_lock(candidate_image_lock()).load_driver
+        commands = (
+            load_generator_attestation_command(load_driver),
+            _load_command(
+                APPLICATION_PRIVATE_IP,
+                measurement_options(),
+                10,
+                load_driver=load_driver,
+                job_id='abc123def456',
+                phase='measurement',
+            ),
+        )
+        for command in commands:
+            with self.subTest(command=command[:80]):
+                subprocess.run(
+                    ['bash', '-n'],
+                    input=command,
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+                self.assertIn('REPO_DIGESTS=$(', command)
+                self.assertIn('grep -Fx "$IMAGE"', command)
+                self.assertNotIn('grep -Fqx', command)
+
     def test_load_driver_cleanup_accepts_only_proven_absence(self):
         load_driver = validate_image_lock(candidate_image_lock()).load_driver
         command = _load_command(

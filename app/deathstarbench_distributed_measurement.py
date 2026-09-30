@@ -276,9 +276,9 @@ def load_generator_attestation_command(
         f'IMAGE={image}; EXPECTED_MARKER={marker}; '
         'sudo podman pull --quiet "$IMAGE" >/dev/null; '
         'sudo podman image exists "$IMAGE"; '
-        'sudo podman image inspect --format '
-        "'{{range .RepoDigests}}{{println .}}{{end}}' \"$IMAGE\" "
-        '| grep -Fqx "$IMAGE"; '
+        'REPO_DIGESTS=$(sudo podman image inspect --format '
+        "'{{range .RepoDigests}}{{println .}}{{end}}' \"$IMAGE\"); "
+        'printf "%s\\n" "$REPO_DIGESTS" | grep -Fx "$IMAGE" >/dev/null; '
         'ATTESTATION=$(sudo podman run --rm --pull=never --network=none '
         '--read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m '
         '--cap-drop=all --security-opt=no-new-privileges --pids-limit=64 '
@@ -1154,9 +1154,9 @@ def _load_command(
         "trap 'cleanup_load_driver; exit 130' HUP INT TERM; "
         'cleanup_load_driver; '
         'sudo podman image exists "$IMAGE"; '
-        'sudo podman image inspect --format '
-        "'{{range .RepoDigests}}{{println .}}{{end}}' \"$IMAGE\" "
-        '| grep -Fqx "$IMAGE"; '
+        'REPO_DIGESTS=$(sudo podman image inspect --format '
+        "'{{range .RepoDigests}}{{println .}}{{end}}' \"$IMAGE\"); "
+        'printf "%s\\n" "$REPO_DIGESTS" | grep -Fx "$IMAGE" >/dev/null; '
         'ATTESTATION=$(sudo podman run --rm --pull=never --network=none '
         '--read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m '
         '--cap-drop=all --security-opt=no-new-privileges --pids-limit=64 '

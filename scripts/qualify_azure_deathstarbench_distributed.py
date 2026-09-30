@@ -101,6 +101,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        '--ssh-env-file',
+        type=Path,
+        help=(
+            'Optional .env file containing benchmark SSH key paths. Useful '
+            'when the qualification script runs from an isolated worktree.'
+        ),
+    )
+    parser.add_argument(
         '--subscription-id',
         default=os.getenv('AZURE_SUBSCRIPTION_ID'),
         help='Azure subscription ID (or AZURE_SUBSCRIPTION_ID).',
@@ -348,6 +356,27 @@ def _require_resumable(
     *,
     measure: bool = False,
 ) -> None:
+    evidence = _read_interruption_evidence(str(job['id']))
+    if evidence is not None:
+        if evidence['subsequent_signal'] is None:
+            evidence_state = evidence['execution_state']
+            replay_decision = evidence['replay_decision']
+        else:
+            evidence_state = evidence['subsequent_signal_execution_state']
+            replay_decision = evidence['subsequent_signal_replay_decision']
+        current_state = _execution_state(job)
+        if replay_decision != 'resume_allowed':
+            raise QualificationError(
+                f'Qualification job {job["id"]} retained interruption '
+                'evidence requires cleanup-only recovery.'
+            )
+        if current_state != evidence_state:
+            raise QualificationError(
+                f'Qualification job {job["id"]} current measurement state '
+                f'{current_state!r} does not exactly match retained '
+                f'interruption evidence state {evidence_state!r}; use '
+                '--cleanup-only instead.'
+            )
     shared._require_resumable(
         job,
         provider_name='Azure',
@@ -433,10 +462,11 @@ def _cleanup(job: dict[str, Any]) -> bool:
 
 
 def _cleanup_only(job_id: str) -> int:
-    # Prove the requested path is a candidate before creating/refreshing lease
-    # metadata, then re-load under the lease so cleanup never mutates stale
-    # pre-lock state.
-    _load_candidate_job(job_id)
+    job_id = str(job_id)
+    if not application.RUN_ID_PATTERN.fullmatch(job_id):
+        raise QualificationError(
+            'Qualification job IDs must be 12 lowercase hex digits.'
+        )
     with _exclusive_job_lock(job_id):
         job = _load_candidate_job(job_id)
         evidence_error: Exception | None = None
@@ -751,23 +781,46 @@ def _qualify(args: argparse.Namespace) -> int:
         False,
     )
     if args.resume:
-        # Ownership is proven before even creating the harness lock file. Once
-        # this persisted candidate is accepted, acquire the shared lease and
-        # re-load it so no stale pre-lock object can authorize mutation.
-        preliminary = _load_candidate_job(args.resume)
-        job_id = str(preliminary['id'])
+        job_id = str(args.resume)
+        if not application.RUN_ID_PATTERN.fullmatch(job_id):
+            raise QualificationError(
+                'Qualification job IDs must be 12 lowercase hex digits.'
+            )
         print(f'Azure qualification job: {job_id}', flush=True)
 
         with _exclusive_job_lock(job_id):
-            job = _load_candidate_job(job_id)
+            try:
+                job = _load_candidate_job(job_id)
 
-            def resume_setup():
+                # Complete every resume preflight before entering the runner,
+                # whose finally block intentionally owns cleanup after cloud
+                # work begins. A refused resume must leave the retained Azure
+                # graph untouched for an explicit --cleanup-only decision.
                 _require_resumable(job, measure=args.measure)
+                if (
+                    interrupt_at is not None
+                    and _read_interruption_evidence(job_id) is not None
+                ):
+                    raise QualificationError(
+                        'A recovery with retained interruption evidence cannot '
+                        'inject another checkpoint.'
+                    )
                 _require_resume_workload_settings(job, args)
-                ssh = _ssh_material()
+                ssh = _ssh_material(args.ssh_env_file)
                 _job, plan = _resume_job(job, ssh)
                 image_lock = _lock_for_run(args.image_lock, job)
                 _preflight_anonymous_ghcr_images(image_lock)
+            except QualificationError:
+                # This updater reloads canonical evidence and is a no-op when
+                # none exists. Preserve the interruption origin and cleanup
+                # fields; only finalize the refused recovery attempt.
+                _update_interruption_evidence(
+                    {'id': job_id},
+                    recovery_outcome='resume_refused',
+                )
+                raise
+
+            def resume_setup():
                 return plan, ssh, image_lock
 
             return _run_qualification(
@@ -785,7 +838,7 @@ def _qualify(args: argparse.Namespace) -> int:
     # A new run performs every local/registry validation before its ownership
     # journal exists. No Azure write is possible until the job is persisted and
     # entered into the cleanup-guaranteed lifecycle below.
-    ssh = _ssh_material()
+    ssh = _ssh_material(args.ssh_env_file)
     image_lock = _read_image_lock(args.image_lock)
     _preflight_anonymous_ghcr_images(image_lock)
     plan = _plan(args, ssh)

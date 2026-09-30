@@ -59,6 +59,27 @@ def image_lock():
         'upstream_revision': UPSTREAM_REVISION,
         'released': False,
         'platforms': platforms,
+        'load_driver': {
+            'architecture': 'x86_64',
+            'platform': 'linux/amd64',
+            'revision': 'wrk2-6ecb097-oci-amd64-v1',
+            'image': (
+                'ghcr.io/example/deathstarbench-load-driver@sha256:' + '1' * 64
+            ),
+            'published': True,
+            'upstream_revision': UPSTREAM_REVISION,
+            'context_sha256': '2' * 64,
+            'wrk_binary_sha256': '3' * 64,
+            'wrk2_tree_git_sha': 'ebb227ba3684e6b69166abbeefe8210ada396018',
+            'wrk2_source_sha256': '4' * 64,
+            'luajit_revision': '2090842410e0ba6f81fad310a77bf5432488249a',
+            'luasocket_source_sha256': (
+                'f4a207f50a3f99ad65def8e29c54ac9aac668b216476f7fae3fae92413398ed2'
+            ),
+            'request_script_sha256': (
+                'ab2cd04b6cffb53beaf27efd8dfb5eae7dcd6c8abecbb70623fda93139b3dd32'
+            ),
+        },
     }
 
 
@@ -137,6 +158,11 @@ class ImageLockTests(unittest.TestCase):
 
         self.assertEqual(set(validated.platforms), {'linux/amd64', 'linux/arm64'})
         self.assertRegex(validated.fingerprint, r'^sha256:[0-9a-f]{64}$')
+        self.assertTrue(validated.load_driver.published)
+        self.assertEqual(
+            validated.load_driver.image,
+            image_lock()['load_driver']['image'],
+        )
         self.assertIn(
             '@sha256:',
             validated.image('aarch64', 'social-network-microservices'),
@@ -170,6 +196,16 @@ class ImageLockTests(unittest.TestCase):
         released = image_lock()
         released['released'] = True
         cases.append(released)
+
+        placeholder_marked_published = image_lock()
+        placeholder_marked_published['load_driver']['image'] = (
+            'ghcr.io/example/deathstarbench-load-driver@sha256:' + '0' * 64
+        )
+        cases.append(placeholder_marked_published)
+
+        extra_driver_field = image_lock()
+        extra_driver_field['load_driver']['tag'] = 'moving'
+        cases.append(extra_driver_field)
 
         for value in cases:
             with self.subTest(value=value):

@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+import copy
 import hashlib
 from io import BytesIO
 import json
@@ -19,12 +20,21 @@ from app.deathstarbench_contract import (
     DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
     DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
     DISTRIBUTED_IMAGE_SET_REVISION,
+    DISTRIBUTED_LOAD_DRIVER_REVISION,
     DISTRIBUTED_TIERED_TOPOLOGY_ID,
     DISTRIBUTED_WORKLOAD_REVISION,
     K3S_RUNTIME_ID,
     K3S_RUNTIME_JOURNAL_KEY,
 )
-from app.deathstarbench_k3s_workload import REQUIRED_IMAGE_KEYS, UPSTREAM_REVISION
+from app.deathstarbench_k3s_workload import (
+    IMAGE_LOCK_SCHEMA_VERSION,
+    LOAD_DRIVER_LUAJIT_REVISION,
+    LOAD_DRIVER_LUASOCKET_SOURCE_SHA256,
+    LOAD_DRIVER_REQUEST_SCRIPT_SHA256,
+    LOAD_DRIVER_WRK2_TREE_GIT_SHA,
+    REQUIRED_IMAGE_KEYS,
+    UPSTREAM_REVISION,
+)
 from app.run_lease import inspect_run_lease
 from scripts import qualify_azure_deathstarbench_distributed as qualification
 
@@ -95,13 +105,34 @@ def candidate_image_lock():
             if image_key in custom:
                 manifest_bodies[digest] = body
         platforms[platform] = {'images': images}
+    load_driver_body = b'linux/amd64:load-driver:manifest'
+    load_driver_digest = f'sha256:{hashlib.sha256(load_driver_body).hexdigest()}'
+    manifest_bodies[load_driver_digest] = load_driver_body
     return ({
-        'schema_version': 1,
+        'schema_version': IMAGE_LOCK_SCHEMA_VERSION,
         'workload_revision': DISTRIBUTED_WORKLOAD_REVISION,
         'image_set_revision': DISTRIBUTED_IMAGE_SET_REVISION,
         'upstream_revision': UPSTREAM_REVISION,
         'released': False,
         'platforms': platforms,
+        'load_driver': {
+            'architecture': 'x86_64',
+            'platform': 'linux/amd64',
+            'revision': DISTRIBUTED_LOAD_DRIVER_REVISION,
+            'image': (
+                'ghcr.io/example/deathstarbench-load-driver@'
+                f'{load_driver_digest}'
+            ),
+            'published': True,
+            'upstream_revision': UPSTREAM_REVISION,
+            'context_sha256': '2' * 64,
+            'wrk_binary_sha256': '3' * 64,
+            'wrk2_tree_git_sha': LOAD_DRIVER_WRK2_TREE_GIT_SHA,
+            'wrk2_source_sha256': '4' * 64,
+            'luajit_revision': LOAD_DRIVER_LUAJIT_REVISION,
+            'luasocket_source_sha256': LOAD_DRIVER_LUASOCKET_SOURCE_SHA256,
+            'request_script_sha256': LOAD_DRIVER_REQUEST_SCRIPT_SHA256,
+        },
     }, manifest_bodies)
 
 
@@ -132,6 +163,7 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
         return SimpleNamespace(
             resume=None,
             image_lock=Path('/candidate/image-lock.json'),
+            ssh_env_file=None,
             subscription_id='subscription-id',
             region='eastus2',
             zone='1',
@@ -847,7 +879,7 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
         new_job.assert_not_called()
         provision.assert_not_called()
 
-    def test_resume_preflight_failure_still_cleans_loaded_candidate(self):
+    def test_resume_preflight_failure_refuses_without_cleanup(self):
         args = self.args()
         args.resume = 'abc123def456'
         args.image_lock = None
@@ -867,14 +899,27 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
                 side_effect=lambda _job_id: nullcontext(),
             ),
             mock.patch.object(qualification, '_ssh_material', ssh),
-            mock.patch.object(qualification, '_persist'),
             mock.patch.object(qualification, '_cleanup', return_value=True) as cleanup,
+            mock.patch.object(
+                qualification,
+                '_run_qualification',
+                side_effect=AssertionError(
+                    'refused resume entered cleanup-owning runner'
+                ),
+            ) as run,
         ):
-            result = qualification._qualify(args)
+            with self.assertRaisesRegex(
+                qualification.QualificationError,
+                'missing key',
+            ):
+                qualification._qualify(args)
 
-        self.assertEqual(result, 1)
-        cleanup.assert_called_once_with(job)
-        self.assertIn('missing key', job['error'])
+        ssh.assert_called_once_with(None)
+        run.assert_not_called()
+        cleanup.assert_not_called()
+        self.assertEqual(job['status'], 'queued')
+        self.assertNotIn('error', job)
+        self.assertNotIn('cleanup_error', job)
 
     def test_resume_never_replaces_saved_image_lock(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -965,7 +1010,7 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
         )
 
         self.assertEqual(fetched, set(manifests))
-        self.assertEqual(len(fetched), 6)
+        self.assertEqual(len(fetched), 7)
 
     def test_anonymous_ghcr_preflight_rejects_wrong_manifest_bytes(self):
         image_lock, _manifests = candidate_image_lock()
@@ -1015,7 +1060,7 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
                 job_id='abc123def456',
             )
 
-    def test_resume_refuses_teardown_state_and_attempts_cleanup(self):
+    def test_resume_refuses_teardown_state_without_cleanup(self):
         args = self.args()
         args.resume = 'abc123def456'
         job = self.job()
@@ -1031,16 +1076,27 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
                 '_exclusive_job_lock',
                 side_effect=lambda _job_id: nullcontext(),
             ),
-            mock.patch.object(qualification, '_persist'),
             mock.patch.object(qualification, '_ssh_material') as ssh,
             mock.patch.object(qualification, '_cleanup', return_value=True) as cleanup,
+            mock.patch.object(
+                qualification,
+                '_run_qualification',
+                side_effect=AssertionError(
+                    'refused resume entered cleanup-owning runner'
+                ),
+            ) as run,
         ):
-            result = qualification._qualify(args)
+            with self.assertRaisesRegex(
+                qualification.QualificationError,
+                '--cleanup-only abc123def456',
+            ):
+                qualification._qualify(args)
 
-        self.assertEqual(result, 1)
         ssh.assert_not_called()
-        cleanup.assert_called_once_with(job)
-        self.assertIn('--cleanup-only abc123def456', job['error'])
+        run.assert_not_called()
+        cleanup.assert_not_called()
+        self.assertEqual(job['status'], 'cleanup_failed')
+        self.assertNotIn('error', job)
 
     def test_measurement_resume_refuses_one_shot_state_before_ssh(self):
         args = self.args()
@@ -1069,14 +1125,27 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
                 'provision_distributed_deathstarbench_candidate',
             ) as provision,
             mock.patch.object(qualification, '_cleanup', return_value=True) as cleanup,
+            mock.patch.object(
+                qualification,
+                '_run_qualification',
+                side_effect=AssertionError(
+                    'unsafe resume entered cleanup-owning runner'
+                ),
+            ) as run,
         ):
-            outcome = qualification._qualify(args)
+            with self.assertRaisesRegex(
+                qualification.QualificationError,
+                'not safe to resume',
+            ):
+                qualification._qualify(args)
 
-        self.assertEqual(outcome, 1)
         ssh.assert_not_called()
         provision.assert_not_called()
-        cleanup.assert_called_once_with(job)
-        self.assertIn('not safe to resume', job['error'])
+        run.assert_not_called()
+        cleanup.assert_not_called()
+        self.assertEqual(job['status'], 'queued')
+        self.assertNotIn('error', job)
+        self.assertNotIn('cleanup_error', job)
 
     def test_workload_only_resume_refuses_any_measurement_journal(self):
         args = self.args()
@@ -1103,14 +1172,27 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
                 qualification.azure,
                 'provision_distributed_deathstarbench_candidate',
             ) as provision,
-            mock.patch.object(qualification, '_cleanup', return_value=True),
+            mock.patch.object(qualification, '_cleanup', return_value=True) as cleanup,
+            mock.patch.object(
+                qualification,
+                '_run_qualification',
+                side_effect=AssertionError(
+                    'workload-only refusal entered cleanup-owning runner'
+                ),
+            ) as run,
         ):
-            outcome = qualification._qualify(args)
+            with self.assertRaisesRegex(
+                qualification.QualificationError,
+                'workload-only',
+            ):
+                qualification._qualify(args)
 
-        self.assertEqual(outcome, 1)
         ssh.assert_not_called()
         provision.assert_not_called()
-        self.assertIn('workload-only', job['error'])
+        run.assert_not_called()
+        cleanup.assert_not_called()
+        self.assertEqual(job['status'], 'queued')
+        self.assertNotIn('error', job)
 
     def test_measurement_resume_allows_only_safe_pre_init_states(self):
         for state in ('preparing_load_generator', 'load_generator_ready'):
@@ -1122,6 +1204,266 @@ class AzureDeathStarBenchLiveQualificationHarnessTests(unittest.TestCase):
                     DEATHSTARBENCH_EXECUTION_JOURNAL_KEY: {'state': state},
                 }
                 qualification._require_resumable(job, measure=True)
+
+    def test_retained_evidence_must_authorize_and_exactly_match_resume(self):
+        cases = (
+            (
+                'initialization_started',
+                'load_generator_ready',
+                'requires cleanup-only recovery',
+            ),
+            (
+                'load_generator_ready',
+                'preparing_load_generator',
+                'does not exactly match retained interruption evidence',
+            ),
+        )
+        for evidence_state, current_state, expected_error in cases:
+            with (
+                self.subTest(
+                    evidence_state=evidence_state,
+                    current_state=current_state,
+                ),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                runs = Path(temporary)
+                job = self.job()
+                (runs / job['id']).mkdir()
+                job['resources'] = {
+                    'provider': 'azure',
+                    'azure_distributed_candidate': True,
+                    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY: {
+                        'state': evidence_state,
+                    },
+                }
+                with mock.patch.object(qualification.application, 'RUNS', runs):
+                    qualification._record_checkpoint_interruption(
+                        job,
+                        evidence_state,
+                        mode='hard',
+                    )
+                    job['resources'][
+                        DEATHSTARBENCH_EXECUTION_JOURNAL_KEY
+                    ]['state'] = current_state
+                    with self.assertRaisesRegex(
+                        qualification.QualificationError,
+                        expected_error,
+                    ):
+                        qualification._require_resumable(job, measure=True)
+
+    def test_latest_retained_signal_evidence_is_authoritative(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runs = Path(temporary)
+            job = self.job()
+            (runs / job['id']).mkdir()
+            job['resources'] = {
+                'provider': 'azure',
+                'azure_distributed_candidate': True,
+                DEATHSTARBENCH_EXECUTION_JOURNAL_KEY: {
+                    'state': 'load_generator_ready',
+                },
+            }
+            with mock.patch.object(qualification.application, 'RUNS', runs):
+                qualification._record_checkpoint_interruption(
+                    job,
+                    'load_generator_ready',
+                    mode='hard',
+                )
+                job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY][
+                    'state'
+                ] = 'warmup_started'
+                qualification._record_signal_interruption(job, signal.SIGTERM)
+                # Regressing the current journal cannot erase the later proof
+                # that one-shot workload execution had already started.
+                job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY][
+                    'state'
+                ] = 'load_generator_ready'
+                with self.assertRaisesRegex(
+                    qualification.QualificationError,
+                    'requires cleanup-only recovery',
+                ):
+                    qualification._require_resumable(job, measure=True)
+
+    def test_exact_safe_retained_evidence_allows_resume_preflight(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runs = Path(temporary)
+            job = self.job()
+            (runs / job['id']).mkdir()
+            job['resources'] = {
+                'provider': 'azure',
+                'azure_distributed_candidate': True,
+                DEATHSTARBENCH_EXECUTION_JOURNAL_KEY: {
+                    'state': 'load_generator_ready',
+                },
+            }
+            with mock.patch.object(qualification.application, 'RUNS', runs):
+                qualification._record_checkpoint_interruption(
+                    job,
+                    'load_generator_ready',
+                    mode='hard',
+                )
+                qualification._require_resumable(job, measure=True)
+
+    def test_unsafe_resume_is_refused_without_mutating_graph_or_status(self):
+        immutable_fields = (
+            'source',
+            'mode',
+            'checkpoint',
+            'signal',
+            'execution_state',
+            'replay_decision',
+            'requested_at',
+            'cleanup_outcome',
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            runs = Path(temporary)
+            job = self.job()
+            (runs / job['id']).mkdir()
+            job['resources'] = {
+                'provider': 'azure',
+                'azure_distributed_candidate': True,
+                DEATHSTARBENCH_EXECUTION_JOURNAL_KEY: {
+                    'state': 'warmup_started',
+                },
+            }
+            with mock.patch.object(qualification.application, 'RUNS', runs):
+                qualification._record_checkpoint_interruption(
+                    job,
+                    'warmup_started',
+                    mode='hard',
+                )
+                origin = qualification._read_interruption_evidence(job['id'])
+                resources_before = copy.deepcopy(job['resources'])
+                status_before = job['status']
+                with (
+                    mock.patch.object(
+                        qualification,
+                        '_load_candidate_job',
+                        return_value=job,
+                    ) as load,
+                    mock.patch.object(
+                        qualification,
+                        '_exclusive_job_lock',
+                        return_value=nullcontext(),
+                    ),
+                    mock.patch.object(
+                        qualification,
+                        '_run_qualification',
+                        side_effect=AssertionError(
+                            'unsafe resume entered cleanup-owning runner'
+                        ),
+                    ) as run,
+                    mock.patch.object(
+                        qualification,
+                        '_cleanup',
+                        side_effect=AssertionError(
+                            'unsafe resume attempted cleanup'
+                        ),
+                    ) as cleanup,
+                    mock.patch.object(
+                        qualification,
+                        '_ssh_material',
+                        side_effect=AssertionError(
+                            'unsafe resume advanced beyond replay preflight'
+                        ),
+                    ) as ssh,
+                ):
+                    outcome = qualification.main([
+                        '--resume',
+                        job['id'],
+                        '--measure',
+                    ])
+                evidence = qualification._read_interruption_evidence(job['id'])
+
+        self.assertEqual(outcome, 2)
+        load.assert_called_once_with(job['id'])
+        run.assert_not_called()
+        cleanup.assert_not_called()
+        ssh.assert_not_called()
+        self.assertEqual(job['status'], status_before)
+        self.assertEqual(job['resources'], resources_before)
+        self.assertNotIn('error', job)
+        self.assertNotIn('cleanup_error', job)
+        for field in immutable_fields:
+            self.assertEqual(evidence[field], origin[field])
+        self.assertEqual(evidence['recovery_outcome'], 'resume_refused')
+
+    def test_candidate_validation_refusal_is_leased_and_updates_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runs = Path(temporary)
+            job = self.job()
+            (runs / job['id']).mkdir()
+            job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
+                'state': 'load_generator_ready',
+            }
+            order = []
+
+            class TrackingLease:
+                def __enter__(self):
+                    order.append('lease-entered')
+
+                def __exit__(self, *_args):
+                    order.append('lease-released')
+
+            def refuse_candidate(_job_id):
+                order.append('candidate-load')
+                raise qualification.QualificationError(
+                    'saved candidate validation failed'
+                )
+
+            with mock.patch.object(qualification.application, 'RUNS', runs):
+                qualification._record_checkpoint_interruption(
+                    job,
+                    'load_generator_ready',
+                    mode='hard',
+                )
+                origin = qualification._read_interruption_evidence(job['id'])
+                with (
+                    mock.patch.object(
+                        qualification,
+                        '_exclusive_job_lock',
+                        return_value=TrackingLease(),
+                    ) as lock,
+                    mock.patch.object(
+                        qualification,
+                        '_load_candidate_job',
+                        side_effect=refuse_candidate,
+                    ) as load,
+                    mock.patch.object(
+                        qualification,
+                        '_run_qualification',
+                        side_effect=AssertionError(
+                            'invalid candidate entered the runner'
+                        ),
+                    ) as run,
+                    mock.patch.object(
+                        qualification,
+                        '_cleanup',
+                        side_effect=AssertionError(
+                            'invalid candidate attempted cleanup'
+                        ),
+                    ) as cleanup,
+                ):
+                    outcome = qualification.main([
+                        '--resume',
+                        job['id'],
+                        '--measure',
+                    ])
+                evidence = qualification._read_interruption_evidence(job['id'])
+
+        self.assertEqual(outcome, 2)
+        lock.assert_called_once_with(job['id'])
+        load.assert_called_once_with(job['id'])
+        self.assertEqual(
+            order,
+            ['lease-entered', 'candidate-load', 'lease-released'],
+        )
+        run.assert_not_called()
+        cleanup.assert_not_called()
+        for field in origin:
+            if field != 'recovery_outcome':
+                self.assertEqual(evidence[field], origin[field])
+        self.assertEqual(evidence['recovery_outcome'], 'resume_refused')
 
     def test_resume_refuses_workload_setting_drift(self):
         args = self.args()
@@ -1708,7 +2050,7 @@ raise AssertionError('hard exit unexpectedly returned')
                 evidence = qualification._read_interruption_evidence(job['id'])
 
         self.assertEqual(outcome, 0)
-        self.assertEqual(loader.call_count, 2)
+        loader.assert_called_once_with(job['id'])
         self.assertEqual(evidence['cleanup_outcome'], 'completed')
         self.assertEqual(evidence['recovery_outcome'], 'cleanup_completed')
 
@@ -2153,31 +2495,65 @@ raise AssertionError('hard exit unexpectedly returned')
 
                 self.assertFalse(inspect_run_lease(runs, job['id']).held)
 
-    def test_resume_reloads_candidate_after_acquiring_lease(self):
+    def test_resume_loads_candidate_once_after_acquiring_lease(self):
         args = self.args()
         args.resume = 'abc123def456'
-        preliminary = self.job()
+        args.ssh_env_file = Path('/configured/benchmark-keys.env')
         fresh = self.job()
         fresh['resources'] = {
             'provider': 'azure',
             'azure_distributed_candidate': True,
         }
+        plan = object()
+        ssh = {
+            'private_key': 'private',
+            'public_key': 'public',
+            'passphrase': None,
+        }
+        image_lock = {'lock': 'candidate'}
+        order = []
+
+        class TrackingLease:
+            def __enter__(self):
+                order.append('lease-entered')
+
+            def __exit__(self, *_args):
+                order.append('lease-released')
+
+        def load_candidate(job_id):
+            order.append('candidate-load')
+            self.assertEqual(job_id, fresh['id'])
+            return fresh
+
         with (
             mock.patch.object(
                 qualification,
                 '_load_candidate_job',
-                side_effect=(preliminary, fresh),
+                side_effect=load_candidate,
             ) as loader,
             mock.patch.object(
                 qualification,
                 '_exclusive_job_lock',
-                side_effect=lambda _job_id: nullcontext(),
+                return_value=TrackingLease(),
+            ),
+            mock.patch.object(qualification, '_require_resumable'),
+            mock.patch.object(qualification, '_require_resume_workload_settings'),
+            mock.patch.object(
+                qualification,
+                '_ssh_material',
+                return_value=ssh,
+            ) as ssh_material,
+            mock.patch.object(
+                qualification,
+                '_resume_job',
+                return_value=(fresh, plan),
             ),
             mock.patch.object(
                 qualification,
-                '_read_interruption_evidence',
-                return_value=None,
+                '_lock_for_run',
+                return_value=image_lock,
             ),
+            mock.patch.object(qualification, '_preflight_anonymous_ghcr_images'),
             mock.patch.object(
                 qualification,
                 '_run_qualification',
@@ -2187,26 +2563,45 @@ raise AssertionError('hard exit unexpectedly returned')
             outcome = qualification._qualify(args)
 
         self.assertEqual(outcome, 0)
-        self.assertEqual(loader.call_count, 2)
+        loader.assert_called_once_with(fresh['id'])
+        self.assertEqual(
+            order,
+            ['lease-entered', 'candidate-load', 'lease-released'],
+        )
+        ssh_material.assert_called_once_with(args.ssh_env_file)
         self.assertIs(run.call_args.args[0], fresh)
+        self.assertEqual(run.call_args.args[1](), (plan, ssh, image_lock))
 
-    def test_cleanup_reloads_candidate_after_acquiring_lease(self):
-        preliminary = self.job()
+    def test_cleanup_loads_candidate_once_after_acquiring_lease(self):
         fresh = self.job()
         fresh['resources'] = {
             'provider': 'azure',
             'azure_distributed_candidate': True,
         }
+        order = []
+
+        class TrackingLease:
+            def __enter__(self):
+                order.append('lease-entered')
+
+            def __exit__(self, *_args):
+                order.append('lease-released')
+
+        def load_candidate(job_id):
+            order.append('candidate-load')
+            self.assertEqual(job_id, fresh['id'])
+            return fresh
+
         with (
             mock.patch.object(
                 qualification,
                 '_load_candidate_job',
-                side_effect=(preliminary, fresh),
+                side_effect=load_candidate,
             ) as loader,
             mock.patch.object(
                 qualification,
                 '_exclusive_job_lock',
-                side_effect=lambda _job_id: nullcontext(),
+                return_value=TrackingLease(),
             ),
             mock.patch.object(
                 qualification,
@@ -2222,7 +2617,11 @@ raise AssertionError('hard exit unexpectedly returned')
             outcome = qualification._cleanup_only('abc123def456')
 
         self.assertEqual(outcome, 0)
-        self.assertEqual(loader.call_count, 2)
+        loader.assert_called_once_with(fresh['id'])
+        self.assertEqual(
+            order,
+            ['lease-entered', 'candidate-load', 'lease-released'],
+        )
         cleanup.assert_called_once_with(fresh)
 
     def test_cleanup_accepts_destroyed_state_with_harmless_provenance(self):

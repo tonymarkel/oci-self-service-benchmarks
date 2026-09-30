@@ -25,10 +25,10 @@ QUALIFIED_IMAGE_LOCK = (
     / "deathstarbench-social-network-images-v1.json"
 )
 QUALIFIED_IMAGE_LOCK_SHA256 = (
-    "663e0bfaefa3d7ae19eae2430e0cc5bdcf1ccfe6c858927c2b0d4b1f5ab472e5"
+    "5b8a10f513eaba3c40c390563c24605bb43321b6984eb94ca50c8d9754cc0e00"
 )
 QUALIFIED_IMAGE_LOCK_FINGERPRINT = (
-    "sha256:e5435057d7813e563f6c4f40e7d877660326d83a87ce1df805f9440e161487d4"
+    "sha256:afa9a7850c7231139c5b79025155674d1dbe8ad18582741fdac2dd686a9d789e"
 )
 
 
@@ -443,6 +443,12 @@ class DeathStarBenchImageLockTests(unittest.TestCase):
             QUALIFIED_IMAGE_LOCK_FINGERPRINT,
         )
         self.assertIs(lock["released"], False)
+        self.assertFalse(validated.load_driver.published)
+        self.assertEqual(validated.load_driver.context_sha256, "0" * 64)
+        self.assertEqual(
+            validated.load_driver.image,
+            "ghcr.io/tonymarkel/deathstarbench-load-driver@sha256:" + "0" * 64,
+        )
         references = [
             reference
             for platform in lock["platforms"].values()
@@ -485,8 +491,11 @@ class DeathStarBenchImageLockTests(unittest.TestCase):
                     "upstream_revision",
                     "released",
                     "platforms",
+                    "load_driver",
                 },
             )
+            self.assertEqual(lock["schema_version"], 2)
+            self.assertFalse(lock["load_driver"]["published"])
             self.assertEqual(
                 lock["workload_revision"], DISTRIBUTED_WORKLOAD_REVISION
             )
@@ -593,13 +602,19 @@ class DeathStarBenchImageWorkflowTests(unittest.TestCase):
         for reference in action_references:
             self.assertRegex(reference, r"^[0-9a-f]{40}$")
         self.assertIn("platforms: linux/amd64,linux/arm64", workflow)
+        self.assertIn("platforms: linux/amd64\n", workflow)
+        self.assertIn("provenance: mode=max", workflow)
+        self.assertIn("sbom: true", workflow)
+        self.assertIn("--merge-load-driver", workflow)
+        self.assertIn("--read-only", workflow)
+        self.assertIn("--network none", workflow)
         self.assertLess(
             workflow.index("Preflight support images and deployment lock schema"),
             workflow.index("Build and publish application candidate"),
         )
         self.assertIn("--third-party-preflight", workflow)
-        self.assertEqual(workflow.count("OCI_SOURCE_REPOSITORY="), 3)
-        self.assertEqual(workflow.count("OCI_SOURCE_REVISION="), 3)
+        self.assertEqual(workflow.count("OCI_SOURCE_REPOSITORY="), 4)
+        self.assertEqual(workflow.count("OCI_SOURCE_REVISION="), 4)
         self.assertIn(prepare.UPSTREAM_REVISION, workflow)
         self.assertIn("mongo:4.4.6", workflow + str(prepare.THIRD_PARTY_IMAGES))
         self.assertIn("redis:7.2.4", workflow + str(prepare.THIRD_PARTY_IMAGES))

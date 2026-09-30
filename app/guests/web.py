@@ -53,6 +53,11 @@ _DEATHSTARBENCH_LOADGEN_BASE_PACKAGES = frozenset({
     'time',
     'zlib-devel',
 })
+_DISTRIBUTED_DEATHSTARBENCH_LOADGEN_BASE_PACKAGES = frozenset({
+    'git',
+    'podman',
+    'python3',
+})
 _DEATHSTARBENCH_SPAL_PACKAGES = {
     'service': frozenset({'podman', 'python3-dotenv'}),
     'loadgen': frozenset({'luarocks', 'python3-aiohttp'}),
@@ -269,8 +274,15 @@ def amazon_linux_spal_prerequisite_command() -> str:
 def deathstarbench_install_steps(
     provider_value: Any,
     role_value: str,
+    *,
+    artifact_backed_loadgen: bool = False,
 ) -> tuple[InstallStep, ...]:
-    """Return the Podman service or x86 wrk2 guest installation steps."""
+    """Return service or load-generator guest installation steps.
+
+    Compact runs retain their historical native wrk2 toolchain. Distributed
+    runs select ``artifact_backed_loadgen`` and execute the digest-locked
+    driver through Podman without a guest compiler or LuaRocks resolver.
+    """
     provider = provider_id(provider_value)
     guest_os = guest_os_id(provider_value)
     role = _validated_role(role_value)
@@ -285,6 +297,8 @@ def deathstarbench_install_steps(
             provider,
             frozenset({'git', 'podman', 'python3', 'python3-pyyaml'}),
         )
+    elif artifact_backed_loadgen:
+        base_packages = _DISTRIBUTED_DEATHSTARBENCH_LOADGEN_BASE_PACKAGES
     else:
         base_packages = _DEATHSTARBENCH_LOADGEN_BASE_PACKAGES
     dnf_command = (
@@ -312,7 +326,11 @@ def deathstarbench_install_steps(
             InstallStep(
                 name=f'DeathStarBench {role} SPAL packages',
                 command=amazon_linux.dnf_install_command(
-                    _DEATHSTARBENCH_SPAL_PACKAGES[role]
+                    (
+                        {'python3-aiohttp'}
+                        if role == 'loadgen' and artifact_backed_loadgen
+                        else _DEATHSTARBENCH_SPAL_PACKAGES[role]
+                    )
                 ),
             ),
         ))
@@ -342,7 +360,11 @@ def deathstarbench_install_steps(
             InstallStep(
                 name=f'DeathStarBench {role} Oracle EPEL packages',
                 command=oracle_linux.dnf_install_command(
-                    _DEATHSTARBENCH_EPEL_PACKAGES[role]
+                    (
+                        {'python3-aiohttp'}
+                        if role == 'loadgen' and artifact_backed_loadgen
+                        else _DEATHSTARBENCH_EPEL_PACKAGES[role]
+                    )
                 ),
             ),
         ))
@@ -364,11 +386,27 @@ def deathstarbench_install_steps(
         InstallStep(
             name=f'DeathStarBench {role} EPEL packages',
             command=rocky_linux.dnf_install_command(
-                _DEATHSTARBENCH_EPEL_PACKAGES[role]
+                (
+                    {'python3-aiohttp'}
+                    if role == 'loadgen' and artifact_backed_loadgen
+                    else _DEATHSTARBENCH_EPEL_PACKAGES[role]
+                )
             ),
         ),
     ))
     return tuple(steps)
+
+
+def distributed_deathstarbench_loadgen_install_steps(
+    provider_value: Any,
+) -> tuple[InstallStep, ...]:
+    """Install the immutable distributed driver's minimal host runtime."""
+
+    return deathstarbench_install_steps(
+        provider_value,
+        'loadgen',
+        artifact_backed_loadgen=True,
+    )
 
 
 def podman_compose_path(provider_value: Any) -> str:

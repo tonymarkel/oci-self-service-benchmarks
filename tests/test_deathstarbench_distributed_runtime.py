@@ -109,6 +109,27 @@ def candidate_image_lock():
             }
             for platform in ('linux/amd64', 'linux/arm64')
         },
+        'load_driver': {
+            'architecture': 'x86_64',
+            'platform': 'linux/amd64',
+            'revision': 'wrk2-6ecb097-oci-amd64-v1',
+            'image': (
+                'ghcr.io/example/deathstarbench-load-driver@sha256:' + '1' * 64
+            ),
+            'published': True,
+            'upstream_revision': UPSTREAM_REVISION,
+            'context_sha256': '2' * 64,
+            'wrk_binary_sha256': '3' * 64,
+            'wrk2_tree_git_sha': 'ebb227ba3684e6b69166abbeefe8210ada396018',
+            'wrk2_source_sha256': '4' * 64,
+            'luajit_revision': '2090842410e0ba6f81fad310a77bf5432488249a',
+            'luasocket_source_sha256': (
+                'f4a207f50a3f99ad65def8e29c54ac9aac668b216476f7fae3fae92413398ed2'
+            ),
+            'request_script_sha256': (
+                'ab2cd04b6cffb53beaf27efd8dfb5eae7dcd6c8abecbb70623fda93139b3dd32'
+            ),
+        },
     }
 
 

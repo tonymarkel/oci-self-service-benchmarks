@@ -88,6 +88,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        '--ssh-env-file',
+        type=Path,
+        help=(
+            'Optional .env file containing benchmark SSH key paths. Useful '
+            'when the qualification script runs from an isolated worktree.'
+        ),
+    )
+    parser.add_argument(
         '--project-id',
         default=(
             os.getenv('GOOGLE_CLOUD_PROJECT')
@@ -273,6 +281,27 @@ def _require_resumable(
     *,
     measure: bool = False,
 ) -> None:
+    evidence = shared._read_interruption_evidence(str(job['id']))
+    if evidence is not None:
+        if evidence['subsequent_signal'] is None:
+            evidence_state = evidence['execution_state']
+            replay_decision = evidence['replay_decision']
+        else:
+            evidence_state = evidence['subsequent_signal_execution_state']
+            replay_decision = evidence['subsequent_signal_replay_decision']
+        current_state = shared._execution_state(job)
+        if replay_decision != 'resume_allowed':
+            raise QualificationError(
+                f'Qualification job {job["id"]} retained interruption '
+                'evidence requires cleanup-only recovery.'
+            )
+        if current_state != evidence_state:
+            raise QualificationError(
+                f'Qualification job {job["id"]} current measurement state '
+                f'{current_state!r} does not exactly match retained '
+                f'interruption evidence state {evidence_state!r}; use '
+                '--cleanup-only instead.'
+            )
     shared._require_resumable(
         job,
         provider_name='GCP',
@@ -349,7 +378,10 @@ def _cleanup(job: dict[str, Any]) -> bool:
 
 
 def _cleanup_only(job_id: str) -> int:
-    _load_candidate_job(job_id)
+    if not application.RUN_ID_PATTERN.fullmatch(job_id):
+        raise QualificationError(
+            'Qualification job IDs must be 12 lowercase hex digits.'
+        )
     with _exclusive_job_lock(job_id):
         job = _load_candidate_job(job_id)
         cleanup_complete = False
@@ -680,19 +712,42 @@ def _qualify(args: argparse.Namespace) -> int:
         False,
     )
     if args.resume:
-        preliminary = _load_candidate_job(args.resume)
-        job_id = str(preliminary['id'])
+        job_id = str(args.resume)
+        if not application.RUN_ID_PATTERN.fullmatch(job_id):
+            raise QualificationError(
+                'Qualification job IDs must be 12 lowercase hex digits.'
+            )
         print(f'GCP qualification job: {job_id}', flush=True)
         with _exclusive_job_lock(job_id):
-            job = _load_candidate_job(job_id)
+            try:
+                job = _load_candidate_job(job_id)
 
-            def resume_setup():
+                # Complete every resume check before entering the runner,
+                # whose finally block owns cleanup once cloud work starts. A
+                # refused recovery must preserve the graph for the operator's
+                # explicit --cleanup-only decision.
                 _require_resumable(job, measure=args.measure)
+                if (
+                    interrupt_at is not None
+                    and shared._read_interruption_evidence(job_id) is not None
+                ):
+                    raise QualificationError(
+                        'A recovery with retained interruption evidence cannot '
+                        'inject another checkpoint.'
+                    )
                 shared._require_resume_workload_settings(job, args)
-                ssh = shared._ssh_material()
+                ssh = shared._ssh_material(args.ssh_env_file)
                 _job, plan = shared._resume_job(job, ssh)
                 image_lock = shared._lock_for_run(args.image_lock, job)
                 shared._preflight_anonymous_ghcr_images(image_lock)
+            except QualificationError:
+                shared._update_interruption_evidence(
+                    {'id': job_id},
+                    recovery_outcome='resume_refused',
+                )
+                raise
+
+            def resume_setup():
                 return plan, ssh, image_lock
 
             return _run_qualification(
@@ -707,7 +762,7 @@ def _qualify(args: argparse.Namespace) -> int:
                 recovery_attempt=True,
             )
 
-    ssh = shared._ssh_material()
+    ssh = shared._ssh_material(args.ssh_env_file)
     image_lock = shared._read_image_lock(args.image_lock)
     shared._preflight_anonymous_ghcr_images(image_lock)
     plan = _plan(args, ssh)

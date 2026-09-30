@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from contextlib import nullcontext
 import os
 from pathlib import Path
@@ -28,6 +29,7 @@ class GcpDistributedQualificationTests(unittest.TestCase):
             'resume': None,
             'cleanup_only': None,
             'image_lock': Path('/candidate/lock.json'),
+            'ssh_env_file': None,
             'project_id': 'benchmark-project',
             'region': 'us-east1',
             'zone': 'us-east1-b',
@@ -238,6 +240,168 @@ class GcpDistributedQualificationTests(unittest.TestCase):
                     'not safe to resume',
                 ):
                     qualification._require_resumable(job, measure=True)
+
+    def test_retained_evidence_must_authorize_and_exactly_match_resume(self):
+        cases = (
+            (
+                'initialization_started',
+                'load_generator_ready',
+                'requires cleanup-only recovery',
+            ),
+            (
+                'load_generator_ready',
+                'preparing_load_generator',
+                'does not exactly match retained interruption evidence',
+            ),
+        )
+        for evidence_state, current_state, expected_error in cases:
+            with self.subTest(evidence_state=evidence_state), tempfile.TemporaryDirectory() as temporary:
+                runs = Path(temporary)
+                job = self.job()
+                (runs / job['id']).mkdir()
+                job['resources'] = {
+                    'provider': 'gcp',
+                    'gcp_distributed_candidate': True,
+                    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY: {
+                        'state': evidence_state,
+                    },
+                }
+                with mock.patch.object(qualification.application, 'RUNS', runs):
+                    qualification.shared._record_checkpoint_interruption(
+                        job,
+                        evidence_state,
+                        mode='hard',
+                    )
+                    job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY][
+                        'state'
+                    ] = current_state
+                    with self.assertRaisesRegex(
+                        qualification.QualificationError,
+                        expected_error,
+                    ):
+                        qualification._require_resumable(job, measure=True)
+
+    def test_latest_retained_signal_evidence_is_authoritative(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runs = Path(temporary)
+            job = self.job()
+            (runs / job['id']).mkdir()
+            job['resources'] = {
+                'provider': 'gcp',
+                'gcp_distributed_candidate': True,
+                DEATHSTARBENCH_EXECUTION_JOURNAL_KEY: {
+                    'state': 'load_generator_ready',
+                },
+            }
+            with mock.patch.object(qualification.application, 'RUNS', runs):
+                qualification.shared._record_checkpoint_interruption(
+                    job,
+                    'load_generator_ready',
+                    mode='hard',
+                )
+                job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY][
+                    'state'
+                ] = 'warmup_started'
+                qualification.shared._record_signal_interruption(
+                    job,
+                    signal.SIGTERM,
+                )
+                # A later journal regression cannot erase the unsafe signal.
+                job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY][
+                    'state'
+                ] = 'load_generator_ready'
+                with self.assertRaisesRegex(
+                    qualification.QualificationError,
+                    'requires cleanup-only recovery',
+                ):
+                    qualification._require_resumable(job, measure=True)
+
+    def test_unsafe_resume_is_refused_before_runner_or_cleanup(self):
+        immutable_fields = (
+            'source',
+            'mode',
+            'checkpoint',
+            'signal',
+            'execution_state',
+            'replay_decision',
+            'requested_at',
+            'cleanup_outcome',
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            runs = Path(temporary)
+            job = self.job()
+            (runs / job['id']).mkdir()
+            job['resources'] = {
+                'provider': 'gcp',
+                'gcp_distributed_candidate': True,
+                DEATHSTARBENCH_EXECUTION_JOURNAL_KEY: {
+                    'state': 'warmup_started',
+                },
+            }
+            with mock.patch.object(qualification.application, 'RUNS', runs):
+                qualification.shared._record_checkpoint_interruption(
+                    job,
+                    'warmup_started',
+                    mode='hard',
+                )
+                origin = qualification.shared._read_interruption_evidence(
+                    job['id']
+                )
+                resources_before = copy.deepcopy(job['resources'])
+                with (
+                    mock.patch.object(
+                        qualification,
+                        '_load_candidate_job',
+                        return_value=job,
+                    ) as load,
+                    mock.patch.object(
+                        qualification,
+                        '_exclusive_job_lock',
+                        return_value=nullcontext(),
+                    ),
+                    mock.patch.object(
+                        qualification,
+                        '_run_qualification',
+                        side_effect=AssertionError(
+                            'unsafe resume entered cleanup-owning runner'
+                        ),
+                    ) as run,
+                    mock.patch.object(
+                        qualification,
+                        '_cleanup',
+                        side_effect=AssertionError(
+                            'unsafe resume attempted cleanup'
+                        ),
+                    ) as cleanup,
+                    mock.patch.object(
+                        qualification.shared,
+                        '_require_resume_workload_settings',
+                        side_effect=AssertionError(
+                            'unsafe resume advanced beyond replay preflight'
+                        ),
+                    ) as workload_settings,
+                ):
+                    outcome = qualification.main([
+                        '--resume',
+                        job['id'],
+                        '--measure',
+                    ])
+                evidence = qualification.shared._read_interruption_evidence(
+                    job['id']
+                )
+
+        self.assertEqual(outcome, 2)
+        load.assert_called_once_with(job['id'])
+        run.assert_not_called()
+        cleanup.assert_not_called()
+        workload_settings.assert_not_called()
+        self.assertEqual(job['status'], 'queued')
+        self.assertEqual(job['resources'], resources_before)
+        self.assertNotIn('error', job)
+        self.assertNotIn('cleanup_error', job)
+        for field in immutable_fields:
+            self.assertEqual(evidence[field], origin[field])
+        self.assertEqual(evidence['recovery_outcome'], 'resume_refused')
 
     def test_main_gcp_hooks_remain_operator_only_and_provider_strict(self):
         plan = qualification._plan(self.args(), self.ssh())
@@ -704,7 +868,7 @@ raise AssertionError('hard exit unexpectedly returned')
                 )
 
         self.assertEqual(outcome, 0)
-        self.assertEqual(loader.call_count, 2)
+        loader.assert_called_once_with(job['id'])
         cleanup.assert_called_once_with(job)
         self.assertEqual(evidence['source'], 'checkpoint')
         self.assertEqual(evidence['checkpoint'], 'measurement_started')
@@ -809,7 +973,7 @@ raise AssertionError('hard exit unexpectedly returned')
                 self.assertEqual(outcome, 2)
                 self.assertLess(elapsed, 2)
                 self.assertFalse(interrupter.is_alive())
-                self.assertEqual(loader.call_count, 2)
+                loader.assert_called_once_with(job['id'])
                 cleanup.assert_called_once_with(job)
                 self.assertEqual(job['status'], 'cleanup_failed')
                 self.assertEqual(job['resources'], expected_resources)

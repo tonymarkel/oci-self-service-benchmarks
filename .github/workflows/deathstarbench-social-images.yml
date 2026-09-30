@@ -2,6 +2,15 @@ name: Publish DeathStarBench Social Network candidate images
 
 on:
   workflow_dispatch:
+    inputs:
+      publication:
+        description: Candidate artifact to publish
+        type: choice
+        required: true
+        default: load-driver
+        options:
+          - load-driver
+          - workload-images
 
 permissions:
   contents: read
@@ -15,8 +24,157 @@ env:
   UPSTREAM_REVISION: 6ecb09706140f8730b5385c08f1386c654c3c526
 
 jobs:
+  publish-load-driver:
+    name: Build, publish, attest, and lock amd64 load driver
+    if: github.event.inputs.publication == 'load-driver'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out benchmark application
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Check out exact DeathStarBench source and submodules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: delimitrou/DeathStarBench
+          ref: 6ecb09706140f8730b5385c08f1386c654c3c526
+          path: .build/upstream
+          fetch-depth: 1
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Fetch checksum-pinned LuaSocket source
+        run: |
+          set -euo pipefail
+          mkdir -p .build/sources
+          curl --proto '=https' --tlsv1.2 --fail --show-error --location \
+            --retry 5 --retry-delay 5 \
+            https://luarocks.org/manifests/lunarmodules/luasocket-3.1.0-1.src.rock \
+            --output .build/sources/luasocket-3.1.0-1.src.rock
+          echo 'f4a207f50a3f99ad65def8e29c54ac9aac668b216476f7fae3fae92413398ed2  .build/sources/luasocket-3.1.0-1.src.rock' \
+            | sha256sum --check --strict -
+
+      - name: Prepare drift-checked load-driver context
+        run: |
+          set -euo pipefail
+          python3 scripts/prepare_deathstarbench_load_driver.py \
+            --upstream .build/upstream \
+            --luasocket-rock .build/sources/luasocket-3.1.0-1.src.rock \
+            --output .build/load-driver
+          {
+            echo "LOAD_DRIVER_CONTEXT_SHA256=$(python3 -c 'import json; print(json.load(open(".build/load-driver/context-manifest.json"))["context_sha256"])')"
+            echo "WRK2_SOURCE_SHA256=$(python3 -c 'import json; print(json.load(open(".build/load-driver/context-manifest.json"))["wrk2_source_sha256"])')"
+          } >> "$GITHUB_ENV"
+
+      - name: Derive load-driver candidate name
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          RUN_IDENTIFIER: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          owner=$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          case "$owner" in
+            ''|*[!a-z0-9_.-]*)
+              echo "The GHCR owner is invalid after normalization." >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "LOAD_DRIVER_IMAGE=ghcr.io/${owner}/deathstarbench-load-driver"
+            echo "LOAD_DRIVER_TAG=wrk2-6ecb097-${RUN_IDENTIFIER}-${RUN_ATTEMPT}"
+          } >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Authenticate to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish amd64 load-driver candidate
+        id: build-load-driver
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .build/load-driver/context
+          file: .build/load-driver/context/Dockerfile
+          platforms: linux/amd64
+          pull: true
+          push: true
+          tags: ${{ env.LOAD_DRIVER_IMAGE }}:${{ env.LOAD_DRIVER_TAG }}
+          build-args: |
+            LOAD_DRIVER_CONTEXT_SHA256=${{ env.LOAD_DRIVER_CONTEXT_SHA256 }}
+            WRK2_SOURCE_SHA256=${{ env.WRK2_SOURCE_SHA256 }}
+            OCI_SOURCE_REPOSITORY=${{ github.server_url }}/${{ github.repository }}
+            OCI_SOURCE_REVISION=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Resolve and attest exact amd64 platform manifest
+        env:
+          LOAD_DRIVER_INDEX_DIGEST: ${{ steps.build-load-driver.outputs.digest }}
+        run: |
+          set -euo pipefail
+          load_driver_index="${LOAD_DRIVER_IMAGE}:${LOAD_DRIVER_TAG}@${LOAD_DRIVER_INDEX_DIGEST}"
+          python3 scripts/create_deathstarbench_image_lock.py \
+            --resolve-load-driver-image \
+            --load-driver-image "$load_driver_index" \
+            --output .build/load-driver-image.txt
+          load_driver_ref=$(tr -d '\n' < .build/load-driver-image.txt)
+          test -n "$load_driver_ref"
+          docker pull --platform linux/amd64 "$load_driver_ref"
+          docker run --rm --platform linux/amd64 --read-only \
+            --network none --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 128 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m \
+            "$load_driver_ref" attest \
+            > .build/load-driver-attestation.txt
+          python3 scripts/create_deathstarbench_image_lock.py \
+            --merge-load-driver \
+            --base-workload-lock docs/qualification/deathstarbench-social-network-images-v1.json \
+            --load-driver-context-manifest .build/load-driver/context-manifest.json \
+            --load-driver-image "$load_driver_index" \
+            --load-driver-attestation .build/load-driver-attestation.txt \
+            --output .build/deathstarbench-social-image-lock.json
+
+      - name: Upload immutable load-driver evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: deathstarbench-load-driver-lock-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .build/deathstarbench-social-image-lock.json
+            .build/load-driver/context-manifest.json
+            .build/load-driver-image.txt
+            .build/load-driver-attestation.txt
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Record load-driver publication limitations
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ## DeathStarBench amd64 load-driver candidate
+
+          The artifact lock binds the exact amd64 platform manifest, wrk2
+          binary, build context, upstream wrk2 tree, LuaJIT revision, LuaSocket
+          source, and Social Network request script. BuildKit provenance and an
+          SBOM are attached to the published index.
+
+          GHCR creates new packages as private by default. A package owner must
+          change `deathstarbench-load-driver` to **Public**, then independently
+          verify an anonymous pull of the exact platform digest before adopting
+          the candidate lock. The checked-in zero-digest placeholder is not a
+          released artifact and must be replaced before live use.
+          SUMMARY
+
   publish-candidate:
     name: Build, publish, and lock candidate images
+    if: github.event.inputs.publication == 'workload-images'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
@@ -145,6 +303,7 @@ jobs:
           python3 scripts/create_deathstarbench_image_lock.py \
             --context-manifest .build/contexts/context-manifest.json \
             --third-party-preflight .build/deathstarbench-social-support-preflight.json \
+            --base-workload-lock docs/qualification/deathstarbench-social-network-images-v1.json \
             --output .build/deathstarbench-social-image-lock.json \
             --app-image "${APP_IMAGE}:${IMAGE_TAG}@${APP_INDEX_DIGEST}" \
             --frontend-image "${FRONTEND_IMAGE}:${IMAGE_TAG}@${FRONTEND_INDEX_DIGEST}" \

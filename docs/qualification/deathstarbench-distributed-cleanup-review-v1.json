@@ -1,0 +1,313 @@
+{
+  "schema_version": 1,
+  "review_kind": "deathstarbench_distributed_cleanup",
+  "topology_id": "distributed_tiered_v1",
+  "runtime_id": "k3s_v1",
+  "reviewed_at": "2026-09-30T20:06:02Z",
+  "overall_gate_complete": false,
+  "providers": {
+    "aws": {
+      "representative_matrix": {
+        "required_scenarios": [
+          "safe_resume",
+          "initializer_response_loss",
+          "unsafe_cleanup_only"
+        ],
+        "evidenced_scenario_runs": {
+          "safe_resume": "3249984b8909",
+          "initializer_response_loss": "26c5d0701087",
+          "unsafe_cleanup_only": "4c2e0c6feafd"
+        },
+        "complete": true
+      },
+      "runs": {
+        "3249984b8909": {
+          "state_sha256": "sha256:8ebe1bea535815519f79c82acd1e7f7e39a1fa61126d70355dc6932e92cfe74d",
+          "interruption_evidence_sha256": "sha256:d86cc33189ad1f4c7789901f5c208236836c00b19fe5c757d50d0b1eec4630cd"
+        },
+        "26c5d0701087": {
+          "state_sha256": "sha256:51bc90be786fe50ad58ce3a34f0d4971173e780e3c55ddd716ef1152b933c997"
+        },
+        "4c2e0c6feafd": {
+          "state_sha256": "sha256:35b280f19ae3ef33de585672805e23f568cbd75cb1fa5eae8d8349cc0f87876b",
+          "interruption_evidence_sha256": "sha256:cf8b9fef3c40ce8a394dc3eb907f8cef9c789c90745cc2b5304fd9022059acb4"
+        }
+      },
+      "local_terminal_evidence": {
+        "sampled_run_ids": [
+          "3249984b8909",
+          "26c5d0701087",
+          "4c2e0c6feafd"
+        ],
+        "predicate": "app.providers.aws.distributed_deathstarbench_candidate_deleted",
+        "predicate_result": true,
+        "recoverable_resources": false,
+        "ownership_remaining": false,
+        "cleanup_error_present": false,
+        "retained_state": "Twenty-one deleted graph tombstones, deleted role inventory, and non-cloud runtime, workload, execution, and network evidence remain for audit."
+      },
+      "independent_cloud_inventory": {
+        "checked_at": "2026-09-30T20:06:02Z",
+        "method": "Fresh read-only exact graph recovery plus job-tag and VPC-child scans",
+        "scopes": [
+          {
+            "run_ids": [
+              "3249984b8909",
+              "4c2e0c6feafd"
+            ],
+            "scope": {
+              "account": "saved immutable launch account",
+              "region": "us-east-1",
+              "ownership": "exact saved IDs and benchmark-job tags"
+            },
+            "queries": [
+              {
+                "category": "saved_graph_entries",
+                "live_resource_count": 0,
+                "outcome": "absent"
+              },
+              {
+                "category": "tagged_boot_volumes_and_other_children",
+                "live_resource_count": 0,
+                "outcome": "absent"
+              },
+              {
+                "category": "vpc_child_inventory",
+                "live_resource_count": 0,
+                "outcome": "absent"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "azure": {
+      "representative_matrix": {
+        "required_scenarios": [
+          "safe_resume",
+          "initializer_response_loss",
+          "unsafe_cleanup_only"
+        ],
+        "evidenced_scenario_runs": {
+          "safe_resume": "f6131578cb93"
+        },
+        "complete": false
+      },
+      "runs": {
+        "f6131578cb93": {
+          "state_sha256": "sha256:4711d6faf3b63e659f07fc9a363a3a1517b0374a276aa791db23ac5f3a996710",
+          "interruption_evidence_sha256": "sha256:cb8d84ffb24859b63328b569654fdcea5f6f06918206cf1b0ce530a7c8be8977"
+        }
+      },
+      "local_terminal_evidence": {
+        "sampled_run_ids": [
+          "f6131578cb93"
+        ],
+        "predicate": "destroyed status, no cleanup error, no recoverable resources, and no Azure cleanup ownership key",
+        "predicate_result": true,
+        "recoverable_resources": false,
+        "ownership_remaining": false,
+        "cleanup_error_present": false,
+        "retained_state": "Only non-cloud benchmark summary and qualification evidence remain after the exact resource-group contract is cleared."
+      },
+      "independent_cloud_inventory": {
+        "checked_at": "2026-09-30T20:06:02Z",
+        "method": "Azure CLI exact resource-group existence lookup",
+        "scopes": [
+          {
+            "run_ids": [
+              "f6131578cb93"
+            ],
+            "scope": {
+              "subscription": "saved immutable launch subscription",
+              "resource_group": "benchmark-f6131578cb93"
+            },
+            "queries": [
+              {
+                "category": "resource_group",
+                "live_resource_count": 0,
+                "outcome": "absent"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "gcp": {
+      "representative_matrix": {
+        "required_scenarios": [
+          "safe_resume",
+          "initializer_response_loss",
+          "unsafe_cleanup_only"
+        ],
+        "evidenced_scenario_runs": {
+          "safe_resume": "c1cfa27160d6",
+          "initializer_response_loss": "dd9b5a1cae6f",
+          "unsafe_cleanup_only": "aafb628115c7"
+        },
+        "complete": true
+      },
+      "additional_failure_scenario_runs": {
+        "cleanup_interruption": "58fdb43c43fb",
+        "active_work_signal": "2f8c84b25bd4"
+      },
+      "runs": {
+        "c1cfa27160d6": {
+          "state_sha256": "sha256:153673d43bb3527264daf2f80e2e8276fba6f14563c6565dd1abf9c28b0bc854",
+          "interruption_evidence_sha256": "sha256:adf894d0391485759015979a0cbc4076c07d769884868e936e45060025d26a72"
+        },
+        "dd9b5a1cae6f": {
+          "state_sha256": "sha256:3116ab26459a2d16874a910c29deeb3e8866c5a35aaf204d6aee2f54caefef61"
+        },
+        "aafb628115c7": {
+          "state_sha256": "sha256:a4f3e250487aa2bbc9ce39955390022c84852ae264eb8041943fb32d5bf42758",
+          "interruption_evidence_sha256": "sha256:323047193817ffa4a22f3e32aa396ae32068530c4c858666904a7419d4882baf"
+        },
+        "58fdb43c43fb": {
+          "state_sha256": "sha256:8165913c8254e47c46439f513e6e3c3f490fd7759b60fb8a712206ccce6f799e",
+          "interruption_evidence_sha256": "sha256:93e71ed4d0240e3e04d858658d45d371ebf33b039916be36f0b455a68a32fb04"
+        },
+        "2f8c84b25bd4": {
+          "state_sha256": "sha256:73eca7c35da741e769bf0c9aad60d66fb90d38590d5a91dafe88621f7257b38d",
+          "interruption_evidence_sha256": "sha256:e4082222e0b23b6e78a2600437f6fe2c6800c79e942be2c02623b7198bd0677b"
+        }
+      },
+      "local_terminal_evidence": {
+        "sampled_run_ids": [
+          "c1cfa27160d6",
+          "dd9b5a1cae6f",
+          "aafb628115c7",
+          "58fdb43c43fb",
+          "2f8c84b25bd4"
+        ],
+        "predicate": "destroyed status, no cleanup error, no recoverable resources, no GCP ownership key, and no topology or runtime ownership journal",
+        "predicate_result": true,
+        "recoverable_resources": false,
+        "ownership_remaining": false,
+        "cleanup_error_present": false,
+        "retained_state": "Only non-cloud benchmark summary and qualification evidence remain after the twenty-resource deterministic graph is cleared."
+      },
+      "independent_cloud_inventory": {
+        "checked_at": "2026-09-30T20:06:02Z",
+        "method": "GCP CLI exact run-prefix inventory queries",
+        "scopes": [
+          {
+            "run_ids": [
+              "dd9b5a1cae6f",
+              "aafb628115c7"
+            ],
+            "scope": {
+              "project": "gcp-benchmarks-506115",
+              "regions": "global and us-east1",
+              "zones": "us-east1-b",
+              "name_prefixes": "benchmark-dd9b5a1cae6f-dsb and benchmark-aafb628115c7-dsb"
+            },
+            "queries": [
+              {
+                "category": "instances",
+                "live_resource_count": 0,
+                "outcome": "absent"
+              },
+              {
+                "category": "disks",
+                "live_resource_count": 0,
+                "outcome": "absent"
+              },
+              {
+                "category": "firewall_rules",
+                "live_resource_count": 0,
+                "outcome": "absent"
+              },
+              {
+                "category": "routers_and_cloud_nat",
+                "live_resource_count": 0,
+                "outcome": "absent"
+              },
+              {
+                "category": "subnetworks",
+                "live_resource_count": 0,
+                "outcome": "absent"
+              },
+              {
+                "category": "networks",
+                "live_resource_count": 0,
+                "outcome": "absent"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "oci": {
+      "representative_matrix": {
+        "required_scenarios": [
+          "safe_resume",
+          "initializer_response_loss",
+          "unsafe_cleanup_only"
+        ],
+        "evidenced_scenario_runs": {
+          "safe_resume": "327749bd33cb",
+          "initializer_response_loss": "327749bd33cb",
+          "unsafe_cleanup_only": "c69567748b43"
+        },
+        "complete": true
+      },
+      "runs": {
+        "327749bd33cb": {
+          "state_sha256": "sha256:e825e6559c1a8ec265d6b914ecde40c9060dc491d970eda8f8b0f4e910fad424",
+          "interruption_evidence_sha256": "sha256:faeaadc8d04de6a5f5a557d3150457c9ccd3fc0e4b8c090852fcae393193b690"
+        },
+        "c69567748b43": {
+          "state_sha256": "sha256:62544e1db4eb91d60d709bd8b10c0cb0b424649e2cdc5c3cc7a1a78e5b936077",
+          "interruption_evidence_sha256": "sha256:9872e73b56042b15295473e4cf132d0567d9bb011bf9569eef81394ee83729d7"
+        }
+      },
+      "local_terminal_evidence": {
+        "sampled_run_ids": [
+          "327749bd33cb",
+          "c69567748b43"
+        ],
+        "predicate": "app.providers.oci.distributed_candidate_is_deleted",
+        "predicate_result": true,
+        "recoverable_resources": false,
+        "ownership_remaining": false,
+        "cleanup_error_present": false,
+        "retained_state": "Twenty-one explicit deleted tombstones, captured implicit child identities, deleted role inventory, and non-cloud runtime, workload, execution, and network evidence remain for audit."
+      },
+      "independent_cloud_inventory": {
+        "checked_at": "2026-09-30T20:06:02Z",
+        "method": "Fresh read-only GET and compartment-scoped list attestation for every retained explicit and implicit identity",
+        "scopes": [
+          {
+            "run_ids": [
+              "327749bd33cb",
+              "c69567748b43"
+            ],
+            "scope": {
+              "compartment": "saved immutable launch compartment",
+              "region": "us-ashburn-1",
+              "availability_domain": "DfpY:US-ASHBURN-AD-1"
+            },
+            "queries": [
+              {
+                "category": "explicit_graph_entries",
+                "live_resource_count": 0,
+                "outcome": "no_live_resources"
+              },
+              {
+                "category": "implicit_vcn_children",
+                "live_resource_count": 0,
+                "outcome": "no_live_resources"
+              },
+              {
+                "category": "instance_vnics_boot_volumes_and_attachments",
+                "live_resource_count": 0,
+                "outcome": "no_live_resources"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

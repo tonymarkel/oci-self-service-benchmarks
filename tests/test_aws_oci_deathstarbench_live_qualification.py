@@ -635,7 +635,7 @@ class AwsOciDistributedQualificationTests(unittest.TestCase):
             result = qualification._cleanup_only(args)
 
         self.assertEqual(result, 0)
-        self.assertEqual(load.call_count, 2)
+        load.assert_called_once_with(job['id'], provider='aws')
         ssh.assert_not_called()
         image_lock.assert_not_called()
 
@@ -1695,7 +1695,7 @@ raise AssertionError('hard exit unexpectedly returned')
                     )
 
                 self.assertEqual(outcome, 0)
-                self.assertEqual(load.call_count, 2)
+                load.assert_called_once_with(job['id'], provider=provider)
                 if provider == 'oci':
                     oci_clients.assert_called_once_with(args, pin)
                     expected_clients = clients

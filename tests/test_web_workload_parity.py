@@ -204,6 +204,55 @@ class WebGuestContractTests(unittest.TestCase):
         self.assertNotIn(web.PODMAN_COMPOSE_URL, combined)
         self.assertEqual(web.podman_compose_path('gcp'), '/usr/bin/podman-compose')
 
+    def test_distributed_load_generator_uses_podman_without_build_toolchain(self):
+        for provider in ('aws', 'gcp', 'azure'):
+            with self.subTest(provider=provider):
+                steps = web.distributed_deathstarbench_loadgen_install_steps(
+                    provider
+                )
+                combined = '\n'.join(step.command for step in steps)
+                self.assertIn('podman', combined)
+                self.assertIn('python3-aiohttp', combined)
+                for forbidden in (
+                    ' gcc',
+                    ' make',
+                    'openssl-devel',
+                    'zlib-devel',
+                    'luarocks',
+                ):
+                    self.assertNotIn(forbidden, combined)
+                for step in steps:
+                    subprocess.run(
+                        ['bash', '-n'],
+                        input=step.command,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+
+        oracle = SimpleNamespace(
+            provider='oci',
+            guest_os='oracle_linux_9',
+            region='us-ashburn-1',
+        )
+        oracle_install = '\n'.join(
+            step.command
+            for step in web.distributed_deathstarbench_loadgen_install_steps(
+                oracle
+            )
+        )
+        self.assertIn('podman', oracle_install)
+        self.assertIn('python3-aiohttp', oracle_install)
+        self.assertNotIn('luarocks', oracle_install)
+
+    def test_compact_load_generator_keeps_native_wrk2_toolchain(self):
+        combined = '\n'.join(
+            step.command
+            for step in web.deathstarbench_install_steps('gcp', 'loadgen')
+        )
+        for package in ('gcc', 'make', 'openssl-devel', 'zlib-devel', 'luarocks'):
+            self.assertIn(package, combined)
+
     def test_runtime_metadata_uses_provider_vcpu_and_private_path_vocabulary(self):
         plan = shared_plan('aws', ['apachebench'])
         metadata = web.runtime_metadata(

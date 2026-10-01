@@ -35,8 +35,12 @@ DISTRIBUTED_RUNTIME_REVISION = 'k3s-v1.36.4-k3s1-tiered-runtime-v5'
 DISTRIBUTED_WORKLOAD_REVISION = 'social-network-6ecb097-workload-v1'
 DISTRIBUTED_IMAGE_SET_REVISION = 'social-network-images-v1'
 DISTRIBUTED_DATASET_REVISION = 'social-network-socfb-reed98-compose-seed1-v1'
-DISTRIBUTED_LOAD_DRIVER_REVISION = 'wrk2-6ecb097-native-v1'
-DISTRIBUTED_MEASUREMENT_REVISION = 'social-network-distributed-measurement-v1'
+LEGACY_DISTRIBUTED_LOAD_DRIVER_REVISION = 'wrk2-6ecb097-native-v1'
+LEGACY_DISTRIBUTED_MEASUREMENT_REVISION = (
+    'social-network-distributed-measurement-v1'
+)
+DISTRIBUTED_LOAD_DRIVER_REVISION = 'wrk2-6ecb097-oci-amd64-v1'
+DISTRIBUTED_MEASUREMENT_REVISION = 'social-network-distributed-measurement-v2'
 
 
 @dataclass(frozen=True)
@@ -142,13 +146,13 @@ def runtime_profile(
 
 
 def require_released_runtime(topology_id: str, runtime_id: str):
-    """Reject a modeled profile until its complete cloud lifecycle is ready."""
+    """Reject a modeled profile until its public product lifecycle is enabled."""
 
     profile = runtime_profile(topology_id, runtime_id)
     if not profile.released:
         raise ValueError(
             f'DeathStarBench {profile.label} is not released yet; its '
-            'multi-node provisioning and cleanup path is still being '
-            'qualified. Use Compact / single-host for runnable plans.'
+            'public plan, API, and lifecycle integration is not enabled. '
+            'Use Compact / single-host for runnable plans.'
         )
     return profile

@@ -322,6 +322,15 @@ def _preflight_anonymous_ghcr_images(
     except ValueError as exc:
         raise QualificationError(f'The candidate image lock is invalid: {exc}') from exc
     references: set[str] = set()
+    if not validated.load_driver.published:
+        raise QualificationError(
+            'The candidate load-driver artifact is not published.'
+        )
+    if not validated.load_driver.image.startswith(f'{GHCR_HOST}/'):
+        raise QualificationError(
+            f'The candidate load-driver image is not hosted on {GHCR_HOST}.'
+        )
+    references.add(validated.load_driver.image)
     for platform, images in validated.platforms.items():
         for image_key in GHCR_IMAGE_KEYS:
             reference = images[image_key]

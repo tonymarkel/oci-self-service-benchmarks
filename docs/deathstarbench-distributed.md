@@ -3,7 +3,12 @@
 Status: the provider-neutral foundation and operator-only five-node
 infrastructure, K3s, Social Network workload, network-policy qualification,
 cleanup, recovery, and measurement machinery now cover Azure, GCP, AWS, and
-OCI. All four providers have live measured results. AWS job `675d8b6ba5ae`
+OCI. The prerequisite operator-path release gates are complete: the shared
+immutable amd64 load-driver artifact is published and anonymously readable,
+Azure has the full representative failure-path matrix, and the reviewed
+cross-provider cleanup receipt proves terminal local state plus independent
+zero-live-resource inventory for every representative run. All four providers
+have live measured results. AWS job `675d8b6ba5ae`
 and OCI job `b610d368e781` first live-qualified provisioning, guest
 preparation, the exact K3s runtime, the digest-locked workload, required and
 forbidden network paths, and complete cloud cleanup; both deliberately omitted
@@ -11,15 +16,15 @@ forbidden network paths, and complete cloud cleanup; both deliberately omitted
 warm-up, measurement, result/report, and terminal-cleanup path, followed by AWS
 job `98a16f2c3e8a` on the same shared contract. GCP additionally has the
 representative crash, response-loss, cleanup, and signal evidence described
-below, and Azure has one safe pre-initialization hard-exit, reacquisition,
-resume, and cleanup qualification. AWS and OCI have now completed the
-representative checkpoint failure matrix described below.
+below. Azure, AWS, and OCI have now completed the representative checkpoint
+failure matrix described below.
 
 `distributed_tiered_v1` is still unreleased for normal cloud provisioning. The
 UI does not offer it, and the normal API/provider path rejects it before
-creating a run or making a cloud write. The remaining release gates are
-immutable load-driver publication or equivalent qualification, representative
-Azure failure paths, and final cross-provider review of the cleanup evidence.
+creating a run or making a cloud write. The remaining work is the separate
+public product-integration slice: plan/UI selection, normal API lifecycle
+dispatch, stop/restart/manual-destroy recovery, and a coordinated release-flag
+transition.
 
 ## Benchmark modes
 
@@ -53,12 +58,13 @@ Every result records:
 - provider-observed hardware and storage as provenance.
 
 The shared four-provider candidate pipeline additionally pins dataset revision
-`social-network-socfb-reed98-compose-seed1-v1`, load-driver revision
-`wrk2-6ecb097-native-v1`, and measurement revision
-`social-network-distributed-measurement-v1`. It records the exact hashes of
-the source graph, patched initializer, request script, built load-driver
-binary, compiler version, rendered workload, pod execution identity, raw
-output, and normalized metrics. Distributed comparison fails closed unless
+`social-network-socfb-reed98-compose-seed1-v1`, immutable load-driver revision
+`wrk2-6ecb097-oci-amd64-v1`, and measurement revision
+`social-network-distributed-measurement-v2`. It records the exact published
+platform-manifest digest plus hashes of the build context, upstream wrk2 tree,
+wrk2 source, built binary, LuaJIT revision, LuaSocket source, request script,
+source graph, patched initializer, rendered workload, pod execution identity,
+raw output, and normalized metrics. Distributed comparison fails closed unless
 all workload, image-lock, rendered-manifest, dataset, driver, measurement,
 initializer, graph-input, and request-script identities are present and
 valid; a changed identity creates a separate comparison cohort.
@@ -476,15 +482,32 @@ hook stops at `workload_ready`; it does not initialize data or emit a benchmark
 result.
 
 The manual `deathstarbench-social-images.yml` GitHub Actions workflow prepares
-drift-checked build contexts, builds the three custom Social Network images
-for `linux/amd64` and `linux/arm64`, resolves exact platform digests for those
-and the pinned supporting images, and uploads the candidate image lock as a
-workflow artifact. Workflow run 35257311111 published the three candidate
-indexes, produced the exact checked-in lock, and completed successfully. The
-three GHCR packages are public, and all six locked custom platform manifests
-were anonymously resolvable for the Azure qualification. Publication and
-public pulls are qualification evidence, not permission to open the UI release
-gate.
+drift-checked build contexts. Its workload-image mode builds the three custom
+Social Network images for `linux/amd64` and `linux/arm64`, resolves exact
+platform digests for those and the pinned supporting images, and uploads the
+candidate image lock as a workflow artifact. Workflow run 35257311111
+published the three candidate indexes and all six locked custom platform
+manifests remain anonymously resolvable.
+
+Its load-driver mode builds the non-root offline-runtime amd64 wrk2 artifact,
+attaches BuildKit provenance and an SBOM, executes the artifact attestation,
+resolves the exact direct amd64 manifest, and merges that identity into the
+same lock. Final workflow run
+[36784866914](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/36784866914)
+published the candidate used by live qualification. The checked-in lock is
+byte-for-byte that workflow artifact: file SHA-256
+`3754d05689836c07c10d21bb49fc562f6a2ba88f24e70e868bb4dfd2b32bb9ea`
+and validated fingerprint
+`sha256:f13825377ea076b26062a0672051c0c7e642062f376b0a4097b216f7cca65dad`.
+It binds driver manifest
+`sha256:5669318f8e955ccab71ecd768a31d0add0540c610e6abf0fc0ebf076330dab5d`,
+context SHA-256
+`4967715d0c23e40f01eb0acd0841e103e32b031b44c907d3dce5c233adc2785c`,
+and wrk2-binary SHA-256
+`524155ca43451170646de69b1d4e83a22b46c3950e5d0af56ae717bd3bae01a0`.
+Anonymous exact-digest resolution passed for the driver and all workload
+platform manifests. Publication and public pulls are qualification evidence,
+not permission to open the UI release gate.
 
 ## Internal dataset and measurement candidate
 
@@ -728,6 +751,21 @@ The first complete measured OCI qualification then passed on 2026-09-29 as job
   cleanup-only convergence; the later representative checkpoint evidence is
   recorded below.
 
+Fresh artifact-backed measurement-v2 job `931d33b4c243` passed on 2026-09-30
+with the final immutable driver. It completed all 5,994 requests at 99.889435
+requests/second with p50/p95/p99 latency of 3.077/4.983/6.235 ms, 100 percent
+completion, zero errors, and unchanged Pod identity. Measurement-evidence,
+normalized-metrics, and raw-output hashes are
+`sha256:3c6d152c594a00f23b2f4b860929c29d1f1f3871d30c6ca438ae4ef81e9ee35d`,
+`sha256:be2354c611627bd9075645ccbaf3ed6a62f3c7fd4191b34ab3dc069f34368f62`,
+and `sha256:587abfa82e911f8ebe152991734075880214eb78f4a50aeddfd20bf12fcf55b3`.
+Automatic cleanup passed. An independent exact-identity and compartment-scoped
+inventory at `2026-09-30T23:36:52.591609Z` checked this run and both formal OCI
+failure-matrix runs: 117 saved primary or implicit identities, plus matching
+compartment children, yielded zero live resources and zero query errors.
+Retained terminated instances and volumes and detached attachments are OCI
+terminal history, not live ownership.
+
 The immediately preceding AWS attempt, job `d7b5e018e6b1`, exposed a specific
 EC2 eventual-consistency boundary. `CreateInternetGateway` returned the accepted
 IGW identity, but the then-current controller discarded that response ID and an
@@ -760,6 +798,19 @@ The first complete measured AWS qualification then passed on 2026-09-29 as job
   cleanup-only run subsequently reloaded the persisted graph and passed its
   terminal absence audit. Final state is `destroyed` with no error or cleanup
   error.
+
+Fresh artifact-backed measurement-v2 job `46fa02564ca2` passed on 2026-09-30
+with the final immutable driver. It completed all 5,994 requests at 99.892941
+requests/second with p50/p95/p99 latency of 3.707/6.295/7.791 ms, 100 percent
+completion, zero errors, and unchanged Pod identity. Measurement-evidence,
+normalized-metrics, and raw-output hashes are
+`sha256:6f2aaf9620e73a2abd020f4dca9fa01bd68970e879ea65b03946e7b40a45a44d`,
+`sha256:aa2fd6342a6636fc87f0fa1787be44f8da941a12f97c05dddcfe56bac0ce682c`,
+and `sha256:26afe0b2e48ef10902e62b22f4b0a610ea401d50b1a290b26c249f32eaa80717`.
+Automatic cleanup passed; an independent tag-scoped inventory at
+`2026-09-30T23:20:44Z` found zero live resources for this run and every formal
+AWS failure-matrix run across instances, volumes, NAT gateways, VPCs, subnets,
+security groups, internet gateways, route tables, addresses, and keys.
 
 ### AWS and OCI representative checkpoint failure matrix
 
@@ -818,9 +869,8 @@ and projected no recoverable ownership.
 This is deliberately a representative checkpoint failure matrix. AWS and OCI
 do not claim live active-signal or cleanup-interruption coverage. Those paths
 remain synthetically covered, but they are not part of this live matrix. The
-broader remaining release gates are representative Azure failure paths,
-publication or equivalent qualification of an immutable load-driver artifact,
-and final cross-provider cleanup review.
+operator-path prerequisite gates are complete; public UI/API lifecycle
+integration remains separate.
 
 ## GCP operator qualification
 
@@ -974,6 +1024,19 @@ The first complete measured GCP qualification also passed on 2026-09-21:
   matching instances, disks, firewall rules, router or Cloud NAT, subnets, or
   VPC after cleanup.
 
+Fresh artifact-backed measurement-v2 job `4d3271788e6c` passed on 2026-09-30
+with the final immutable driver. It completed all 5,994 requests at 99.891183
+requests/second with p50/p95/p99 latency of 3.219/6.107/7.715 ms, 100 percent
+completion, zero errors, and unchanged Pod identity. Measurement-evidence,
+normalized-metrics, and raw-output hashes are
+`sha256:218a69d874f9a35773e5b9e2821d8e0b85e59fb6fedcde209a3721bdbfd4a216`,
+`sha256:86cddfb395a9726d88ffa4653f7437295521c14360c3149c5ef0e8fc57ca03e7`,
+and `sha256:09a4164a7fcf0a8cbb76f022fcce5975574b58e35b052b1f2a9ea5465b2689ef`.
+Automatic cleanup passed; independent prefix inventory at
+`2026-09-30T23:23:47Z` found zero instances, disks, firewall rules,
+routers/Cloud NATs, subnetworks, or networks for the new run and every retained
+GCP recovery/failure run.
+
 ### GCP recovery, network, and signal qualification
 
 The GCP failure-gate series completed on 2026-09-28. The implementation is
@@ -1046,11 +1109,13 @@ is deployment evidence, not a benchmark result.
   The custom images used candidate tag
   `dsb-6ecb09706140-35257311111-1` before the workflow resolved their exact
   per-platform manifests.
-- The checked-in lock is byte-for-byte the workflow artifact: file SHA-256
+- The schema-v1 lock used by that qualification was byte-for-byte the workflow
+  artifact: file SHA-256
   `663e0bfaefa3d7ae19eae2430e0cc5bdcf1ccfe6c858927c2b0d4b1f5ab472e5`
   and validated lock fingerprint
   `sha256:e5435057d7813e563f6c4f40e7d877660326d83a87ce1df805f9440e161487d4`.
-  Its `released` field remains `false`.
+  Its `released` field was `false`; the current schema-v2 lock also remains
+  unreleased.
 - Qualification job `25cad0331731` ran merged runtime-v5 commit
   `ecf5e03474c5b5df2541d9a21f5e2516da94923f` in Azure `eastus2`, zone 1.
   Control, cache, and load generator used `Standard_D2as_v7`; database used
@@ -1182,6 +1247,46 @@ The first complete safe-replay qualification passed on 2026-09-20:
   recoverable ownership, the lease was unheld, and an independent Azure lookup
   confirmed resource group `benchmark-f6131578cb93` was absent.
 
+The final immutable-driver and representative failure-path qualification
+passed on 2026-09-30:
+
+- Safe-recovery job `8643abe372ec` hard-exited with status 86 at
+  `load_generator_ready`, retained `resume_allowed`, and was reacquired by a
+  fresh process. The resumed process re-attested the existing five-node graph,
+  K3s cluster, workload, network controls, and exact load-driver manifest
+  `sha256:5669318f8e955ccab71ecd768a31d0add0540c610e6abf0fc0ebf076330dab5d`.
+  Injected loss of the initializer dispatch response was reconciled from the
+  durable systemd identity without replay.
+- The resumed run completed all 5,994 requests at 99.886981 requests/second,
+  with p50/p95/p99 latency of 4.523/16.023/24.143 ms, 100 percent completion,
+  zero HTTP or socket errors, and unchanged identity/zero restarts for all 27
+  Pods. Measurement evidence SHA-256 is
+  `sha256:426a19b10398d7b4966009c35cf7cb523f197c11351d7122635c5fedce19d80b`.
+  Final `state.json`, `results.json`, `report.html`, and interruption-evidence
+  SHA-256 values are respectively
+  `0fa83b8a8e1ec97c4a0cd1ce77c2797d634aef7cbaa54afd18f1a4c05efef6c6`,
+  `47dd57e52f392c49947223b4abb460db9d45ef7c0bfac4b214cc5c049d787cd1`,
+  `4497907c7db55ddcea9d535edac808be2316bee60cff491769fb26ff80c9e122`,
+  and `26ea3c2bd385ff8bcc14ae6a3b44c2aa5ba29ad28c127921e0059c3e938ae3a6`.
+  Automatic cleanup completed and an independent exact resource-group lookup
+  returned `false`.
+- Unsafe-recovery job `aa4137546cac` hard-exited with status 86 at
+  `warmup_started` and retained `cleanup_only_required`. Before the recovery
+  attempt, `state.json` SHA-256 was
+  `6f0bd4bf1c8b2907cf6d636bfd5b05adc3c66d6b392c4d66bd5c25a7a7f14d1e`.
+  A fresh `--resume` exited with status 2 and left that file, the plan, and the
+  image lock byte-for-byte unchanged; only interruption evidence advanced from
+  `pending` to `resume_refused`. Explicit `--cleanup-only` then finalized
+  `cleanup_completed`/`completed`. Final state and interruption-evidence hashes
+  are `ba8291a843f3d0c30990255726f584ca1a5a20d8b7006fab4eb264f97d9ccdf9`
+  and `88cc3a65cf4d8d7a02d3d55e31435ac736011938a0ef9bf6e7dcd23a7a367a34`;
+  the independent resource-group lookup again returned `false`.
+- Earlier live attempts exposed and then regression-tested three artifact
+  integration defects: a pipefail/SIGPIPE digest check, unbraced Bash
+  positional parameters above nine, and an EXIT trap that outlived a local
+  temp-directory variable. Every failed attempt completed exact Azure cleanup
+  before a replacement artifact or run was started.
+
 This qualification proves crash-boundary persistence, cross-process
 reacquisition, safe pre-initialization replay, strict result acceptance, and
 exact cleanup. It does not claim that a remote process was killed after a
@@ -1194,15 +1299,33 @@ independent SSH transport timeout during the measured wrk2 command, after
 initialization and warm-up. Both attempts failed closed, released their leases,
 completed cleanup, and had absent resource groups afterward.
 
+## Cross-provider cleanup review
+
+The checked-in
+[`deathstarbench-distributed-cleanup-review-v1.json`](qualification/deathstarbench-distributed-cleanup-review-v1.json)
+is the machine-readable release-prerequisite receipt. It retains the terminal
+state hash for every representative safe-resume, initializer-response-loss,
+and unsafe-cleanup-only run, plus the interruption-evidence hash wherever that
+artifact exists. For each provider it also records the local deletion predicate
+and a fresh, independently queried cloud inventory with zero live resources.
+
+`scripts/validate_deathstarbench_cleanup_review.py` fails closed unless all
+four providers are present, each representative scenario is evidenced, every
+evidenced run is covered by both terminal-state sampling and independent cloud
+inventory, all live-resource counts are exactly zero, and the overall result
+matches the conjunction of the provider matrices. One run may legitimately
+cover multiple scenarios, but it still has to be covered by both evidence
+classes. The reviewed receipt now validates as `complete`.
+
 The release and UI gates remain closed. GCP has representative forbidden
 paths, safe pre-initialization recovery, unsafe post-initialization cleanup-only,
 initializer response loss, cleanup interruption, and active-work signal
 evidence in addition to positive deployment and measurement. AWS and OCI have
 completed their representative checkpoint matrices. They do not claim live
-active-signal or cleanup-interruption coverage. The remaining release
-requirements are representative Azure paths, publication or equivalent
-qualification of an immutable load-driver artifact, and final cross-provider
-cleanup review.
+active-signal or cleanup-interruption coverage. Azure now has safe resume,
+initializer-response-loss, unsafe-resume-refusal, and cleanup-only evidence.
+The immutable load driver and cross-provider cleanup receipt are also
+qualified. The remaining release work is public UI/API lifecycle integration.
 
 ## Network and access policy
 
@@ -1292,10 +1415,11 @@ absence, while any ambiguity leaves the durable graph available to
 
 1. **Implemented:** versioned model, result fingerprint, immutable runtime
    profile, and generic role-node inventory.
-2. **In progress:** dual-write the existing compact lifecycle into the role
-   inventory and add failure-injection coverage. Azure compact dual-write is
-   implemented; the other providers remain.
-3. **In progress:** exercise an unreleased five-node lifecycle on Azure first,
+2. **Independent, non-gating maintenance:** dual-write the existing compact
+   lifecycle into the role inventory and add failure-injection coverage. Azure
+   compact dual-write is implemented; the other providers remain. This work is
+   not a prerequisite for releasing the separate distributed lifecycle.
+3. **Implemented:** exercise an unreleased five-node lifecycle on Azure first,
    using its run-owned resource group as the cleanup boundary, then qualify the
    same lifecycle on every provider. Azure synthetic coverage, positive live
    deployment and measurement, and the safe pre-initialization hard-exit,
@@ -1315,15 +1439,15 @@ absence, while any ambiguity leaves the durable graph available to
    uses the smallest valid NodePort range, normalizes only
    audited Kubernetes API round trips, and attests the runtime's exact public
    image identities.
-5. **In progress:** the checked-in, pinned Social Network manifest and
+5. **Implemented:** the checked-in, pinned Social Network manifest and
    component-policy bundle, MongoDB storage preparation, role- and
    architecture-aware image selection, phased retry journal, and exact live
    attestation are implemented with synthetic coverage. The manual GHCR image
    workflow published the candidate, the exact digest lock is checked in, and
    positive qualification on all four providers passed with the same renderer
-   and attestor. GCP, AWS, and OCI also passed the representative
-   required/forbidden cloud and Kubernetes policy probes. Equivalent Azure
-   network evidence remains. The release and UI gates stay closed.
+   and attestor. All four providers passed the representative
+   required/forbidden cloud and Kubernetes policy probes. The release and UI
+   gates stay closed.
 6. **Implemented and positively live-qualified on all four provider
    candidates:** deterministic Reed98 initialization, durable
    at-most-once dispatch and reconciliation, exact database cardinality checks,
@@ -1338,29 +1462,32 @@ absence, while any ambiguity leaves the durable graph available to
    post-initialization cleanup-only behavior, initializer response loss,
    cleanup interruption, and active-work SIGTERM have live evidence. AWS now
    has representative safe recovery, response-loss reconciliation, rejected
-   unsafe resume, and explicit cleanup-only evidence. OCI now has the same
-   representative evidence; the representative Azure paths still require live
-   qualification.
+   unsafe resume, and explicit cleanup-only evidence. OCI and Azure now have
+   the same representative evidence.
    Initialization is not resumable after partial dataset mutation: an
    interrupted initialization fails closed and requires fresh infrastructure
-   rather than continuing from an unknown database state. Those remaining
-   representative paths remain release gates.
-7. **Positive provider qualification complete; representative failure matrix
-   in progress:**
+   rather than continuing from an unknown database state.
+7. **Implemented:** positive provider qualification and the representative
+   failure matrix are complete.
    GCP recovery and representative negative-path evidence are retained above.
    AWS and OCI now have positive live infrastructure, K3s, workload, network,
    measured-result, report, and cleanup evidence. Both also have post-restart
    terminal cleanup-only proofs. Their representative checkpoint matrices are
-   complete. Neither provider claims live active-signal or cleanup-interruption
-   coverage from this matrix.
-8. **Planned:** per-role CPU, memory, network, disk, restart, and readiness
+   complete. Azure's corresponding safe and unsafe paths are also retained in
+   the reviewed cleanup receipt. Neither AWS nor OCI claims live active-signal
+   or cleanup-interruption coverage from this matrix.
+8. **Next release slice:** expose the topology in the plan model and UI, route
+   normal API create/run/report/stop/restart/manual-destroy operations through
+   the distributed lifecycle, prove those public paths, and transition the
+   coordinated runtime/workload release flags.
+9. **Planned:** per-role CPU, memory, network, disk, restart, and readiness
    telemetry.
-9. **Planned:** offered-load sweeps, repeated trials, and
+10. **Planned:** offered-load sweeps, repeated trials, and
    sustainable-throughput reporting.
-10. **Planned:** advanced per-role shape selection and later topology
+11. **Planned:** advanced per-role shape selection and later topology
    revisions.
 
-The UI exposes only released profiles. The remaining release gates are
-representative Azure paths, immutable load-driver publication or equivalent
-qualification, and final cross-provider cleanup review. Until those gates pass,
-the existing compact mode remains the only runnable option.
+The UI exposes only released profiles. The prerequisite operator-path gates
+are complete, but the public product-integration slice in step 8 has not been
+implemented or qualified. Until that coordinated release transition, the
+existing compact mode remains the only normal UI/API option.

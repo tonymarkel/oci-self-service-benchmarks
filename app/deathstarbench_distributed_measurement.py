@@ -46,10 +46,12 @@ from .deathstarbench_distributed import (
 )
 from .deathstarbench_k3s_workload import (
     EXPECTED_COMPONENTS,
+    LoadDriverImageLock,
     NAMESPACE as WORKLOAD_NAMESPACE,
     WorkloadBundleError,
     parse_workload_execution_attestation,
     render_social_network_bundle,
+    validate_image_lock,
     workload_readiness_command,
 )
 from .guests import web as web_guest
@@ -58,7 +60,7 @@ from .models import DeathStarBenchOptions
 
 
 EXECUTION_JOURNAL_KEY = DEATHSTARBENCH_EXECUTION_JOURNAL_KEY
-EXECUTION_JOURNAL_SCHEMA_VERSION = 1
+EXECUTION_JOURNAL_SCHEMA_VERSION = 2
 MAX_RESULT_OUTPUT_CHARS = 65_536
 INITIALIZER_MAX_RUNTIME_SECONDS = 2_160
 INITIALIZER_POLL_TIMEOUT_SECONDS = 2_400
@@ -116,10 +118,16 @@ _PREFIXED_SHA256_RE = re.compile(r'^sha256:[0-9a-f]{64}$')
 _JOB_ID_RE = re.compile(r'^[0-9a-f]{12}$')
 _REMOTE_USER_RE = re.compile(r'^[a-z_][a-z0-9_-]{0,31}$')
 
-_LOADGEN_MARKER_RE = re.compile(
-    r'^DISTRIBUTED_DSB_LOAD_GENERATOR_READY '
-    r'architecture=(x86_64) revision=([0-9a-f]{40}) '
-    r'wrk_sha256=([0-9a-f]{64}) compiler_version_sha256=([0-9a-f]{64})$',
+_LOAD_DRIVER_ARTIFACT_MARKER_RE = re.compile(
+    r'^DISTRIBUTED_DSB_LOAD_DRIVER_ARTIFACT '
+    r'architecture=(x86_64) platform=(linux/amd64) '
+    r'revision=([a-z0-9.-]+) upstream_revision=([0-9a-f]{40}) '
+    r'context_sha256=([0-9a-f]{64}) wrk_binary_sha256=([0-9a-f]{64}) '
+    r'wrk2_tree_git_sha=([0-9a-f]{40}) '
+    r'wrk2_source_sha256=([0-9a-f]{64}) '
+    r'luajit_revision=([0-9a-f]{40}) '
+    r'luasocket_source_sha256=([0-9a-f]{64}) '
+    r'request_script_sha256=([0-9a-f]{64})$',
     re.MULTILINE,
 )
 _FRONTEND_MARKER_RE = re.compile(
@@ -209,8 +217,32 @@ def _private_ipv4(value: Any, label: str) -> str:
     return str(parsed)
 
 
-def load_generator_attestation_command() -> str:
-    """Build wrk2 and attest every pinned load-generator input."""
+def _load_driver_artifact_marker(load_driver: LoadDriverImageLock) -> str:
+    return (
+        'DISTRIBUTED_DSB_LOAD_DRIVER_ARTIFACT '
+        f'architecture={load_driver.architecture} '
+        f'platform={load_driver.platform} '
+        f'revision={load_driver.revision} '
+        f'upstream_revision={load_driver.upstream_revision} '
+        f'context_sha256={load_driver.context_sha256} '
+        f'wrk_binary_sha256={load_driver.wrk_binary_sha256} '
+        f'wrk2_tree_git_sha={load_driver.wrk2_tree_git_sha} '
+        f'wrk2_source_sha256={load_driver.wrk2_source_sha256} '
+        f'luajit_revision={load_driver.luajit_revision} '
+        f'luasocket_source_sha256={load_driver.luasocket_source_sha256} '
+        f'request_script_sha256={load_driver.request_script_sha256}'
+    )
+
+
+def load_generator_attestation_command(
+    load_driver: LoadDriverImageLock,
+) -> str:
+    """Pull and attest the exact published load-driver artifact."""
+
+    if not load_driver.published:
+        raise DistributedMeasurementError(
+            'The distributed load-driver artifact is not published.'
+        )
 
     root = deathstarbench.REMOTE_ROOT
     social = f'{root}/socialNetwork'
@@ -224,8 +256,11 @@ def load_generator_attestation_command() -> str:
         f'{DATASET_GRAPH}.edges'
     )
     lua = f'{social}/wrk2/scripts/social-network/mixed-workload.lua'
-    prepare = deathstarbench.load_generator_prepare_command()
+    prepare = deathstarbench.pinned_clone_command(recursive=False)
+    image = shlex.quote(load_driver.image)
+    marker = shlex.quote(_load_driver_artifact_marker(load_driver))
     return (
+        'set -euo pipefail; '
         f'{prepare}; '
         'test "$(uname -m)" = x86_64; '
         f'test "$(git -C {root} rev-parse HEAD)" = '
@@ -238,36 +273,76 @@ def load_generator_attestation_command() -> str:
         f'"{REED98_EDGES_SHA256}"; '
         f'test "$(sha256sum {lua} | awk \'{{print $1}}\')" = '
         f'"{MIXED_WORKLOAD_LUA_SHA256}"; '
-        f'WRK_SHA256=$(sha256sum {root}/wrk2/wrk | awk \'{{print $1}}\'); '
-        'COMPILER_VERSION=$(cc --version | head -n 1); '
-        'test -n "$COMPILER_VERSION"; '
-        'COMPILER_VERSION_SHA256=$(printf %s "$COMPILER_VERSION" '
-        '| sha256sum | awk \'{print $1}\'); '
-        'echo "DISTRIBUTED_DSB_LOAD_GENERATOR_READY '
-        f'architecture=x86_64 revision={deathstarbench.REVISION} '
-        'wrk_sha256=$WRK_SHA256 '
-        'compiler_version_sha256=$COMPILER_VERSION_SHA256"'
+        f'IMAGE={image}; EXPECTED_MARKER={marker}; '
+        'sudo podman pull --quiet "$IMAGE" >/dev/null; '
+        'sudo podman image exists "$IMAGE"; '
+        'REPO_DIGESTS=$(sudo podman image inspect --format '
+        "'{{range .RepoDigests}}{{println .}}{{end}}' \"$IMAGE\"); "
+        'printf "%s\\n" "$REPO_DIGESTS" | grep -Fx "$IMAGE" >/dev/null; '
+        'ATTESTATION=$(sudo podman run --rm --pull=never --network=none '
+        '--read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m '
+        '--cap-drop=all --security-opt=no-new-privileges --pids-limit=64 '
+        '"$IMAGE" attest); '
+        'test "$ATTESTATION" = "$EXPECTED_MARKER"; '
+        'printf "%s\\n" "$ATTESTATION"'
     )
 
 
-def parse_load_generator_attestation(value: str | bytes) -> dict[str, Any]:
+def parse_load_generator_attestation(
+    value: str | bytes,
+    load_driver: LoadDriverImageLock,
+) -> dict[str, Any]:
     match = _exact_marker(
-        _LOADGEN_MARKER_RE,
+        _LOAD_DRIVER_ARTIFACT_MARKER_RE,
         value,
         'Load-generator attestation',
     )
-    architecture, revision, wrk_sha256, compiler_version_sha256 = match.groups()
-    if architecture != 'x86_64' or revision != deathstarbench.REVISION:
+    (
+        architecture,
+        platform,
+        revision,
+        upstream_revision,
+        context_sha256,
+        wrk_binary_sha256,
+        wrk2_tree_git_sha,
+        wrk2_source_sha256,
+        luajit_revision,
+        luasocket_source_sha256,
+        request_script_sha256,
+    ) = match.groups()
+    observed = {
+        'architecture': architecture,
+        'platform': platform,
+        'load_driver_revision': revision,
+        'upstream_revision': upstream_revision,
+        'context_sha256': context_sha256,
+        'wrk_binary_sha256': wrk_binary_sha256,
+        'wrk2_tree_git_sha': wrk2_tree_git_sha,
+        'wrk2_source_sha256': wrk2_source_sha256,
+        'luajit_revision': luajit_revision,
+        'luasocket_source_sha256': luasocket_source_sha256,
+        'request_script_sha256': request_script_sha256,
+        'image': load_driver.image,
+    }
+    expected = {
+        'architecture': load_driver.architecture,
+        'platform': load_driver.platform,
+        'load_driver_revision': load_driver.revision,
+        'upstream_revision': load_driver.upstream_revision,
+        'context_sha256': load_driver.context_sha256,
+        'wrk_binary_sha256': load_driver.wrk_binary_sha256,
+        'wrk2_tree_git_sha': load_driver.wrk2_tree_git_sha,
+        'wrk2_source_sha256': load_driver.wrk2_source_sha256,
+        'luajit_revision': load_driver.luajit_revision,
+        'luasocket_source_sha256': load_driver.luasocket_source_sha256,
+        'request_script_sha256': load_driver.request_script_sha256,
+        'image': load_driver.image,
+    }
+    if not load_driver.published or observed != expected:
         raise DistributedMeasurementError(
             'The load-generator attestation conflicts with the pinned driver.'
         )
-    return {
-        'architecture': architecture,
-        'upstream_revision': revision,
-        'load_driver_revision': DISTRIBUTED_LOAD_DRIVER_REVISION,
-        'wrk_binary_sha256': wrk_sha256,
-        'compiler_version_sha256': compiler_version_sha256,
-    }
+    return observed
 
 
 def non_mutating_frontend_probe_command(target_private_ip: str) -> str:
@@ -1037,25 +1112,73 @@ def _load_command(
     target_private_ip: str,
     options: DeathStarBenchOptions,
     duration_seconds: int,
+    *,
+    load_driver: LoadDriverImageLock,
+    job_id: str,
+    phase: str,
 ) -> str:
-    lua = (
-        f'{deathstarbench.REMOTE_ROOT}/socialNetwork/wrk2/scripts/'
-        'social-network/mixed-workload.lua'
-    )
-    command = deathstarbench.load_command(
-        'social_network',
-        target_private_ip,
-        options,
-        duration_seconds,
-    )
+    target = _private_ipv4(target_private_ip, 'Load target')
+    if not _JOB_ID_RE.fullmatch(job_id):
+        raise DistributedMeasurementError('The load-driver job ID is invalid.')
+    if phase not in {'warmup', 'measurement'}:
+        raise DistributedMeasurementError('The load-driver phase is invalid.')
+    if not load_driver.published:
+        raise DistributedMeasurementError(
+            'The distributed load-driver artifact is not published.'
+        )
     bounded_seconds = int(duration_seconds) + 240
+    required_nofile = int(options.connections) + 128
+    image = shlex.quote(load_driver.image)
+    expected_marker = shlex.quote(_load_driver_artifact_marker(load_driver))
+    container_name = shlex.quote(f'benchmark-dsb-{job_id}-{phase}')
     return (
         'set -euo pipefail; '
-        f'test "$(sha256sum {lua} | awk \'{{print $1}}\')" = '
-        f'"{MIXED_WORKLOAD_LUA_SHA256}"; '
-        f'export max_user_index={DATASET_USER_COUNT}; '
+        f'IMAGE={image}; EXPECTED_MARKER={expected_marker}; '
+        f'CONTAINER_NAME={container_name}; REQUIRED_NOFILE={required_nofile}; '
+        'cleanup_load_driver() { '
+        'REMOVE_STATUS=0; EXISTS_STATUS=0; '
+        'sudo podman rm --force "$CONTAINER_NAME" '
+        '>/dev/null 2>&1 || REMOVE_STATUS=$?; '
+        'sudo podman container exists "$CONTAINER_NAME" '
+        '>/dev/null 2>&1 || EXISTS_STATUS=$?; '
+        'case "$EXISTS_STATUS" in '
+        '1) return 0 ;; '
+        '0) echo "The load-driver container survived cleanup '
+        '(rm status $REMOVE_STATUS)." >&2; return 1 ;; '
+        '*) echo "Unable to prove load-driver container cleanup '
+        '(rm status $REMOVE_STATUS, exists status $EXISTS_STATUS)." >&2; '
+        'return "$EXISTS_STATUS" ;; '
+        'esac; '
+        '}; '
+        'trap cleanup_load_driver EXIT; '
+        "trap 'cleanup_load_driver; exit 130' HUP INT TERM; "
+        'cleanup_load_driver; '
+        'sudo podman image exists "$IMAGE"; '
+        'REPO_DIGESTS=$(sudo podman image inspect --format '
+        "'{{range .RepoDigests}}{{println .}}{{end}}' \"$IMAGE\"); "
+        'printf "%s\\n" "$REPO_DIGESTS" | grep -Fx "$IMAGE" >/dev/null; '
+        'ATTESTATION=$(sudo podman run --rm --pull=never --network=none '
+        '--read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m '
+        '--cap-drop=all --security-opt=no-new-privileges --pids-limit=64 '
+        '"$IMAGE" attest); '
+        'test "$ATTESTATION" = "$EXPECTED_MARKER"; '
+        'STATUS=0; '
         f'timeout --signal=TERM --kill-after=30s {bounded_seconds}s '
-        f'bash -lc {shlex.quote(command)}'
+        'sudo podman run --name "$CONTAINER_NAME" --rm --pull=never '
+        '--network=host --read-only '
+        '--tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m '
+        '--cap-drop=all --security-opt=no-new-privileges --pids-limit=128 '
+        '--ulimit "nofile=$REQUIRED_NOFILE:$REQUIRED_NOFILE" '
+        '"$IMAGE" run '
+        f'--target {target} --port {FRONTEND_PORT} '
+        f'--threads {int(options.threads)} '
+        f'--connections {int(options.connections)} '
+        f'--rate {int(options.request_rate)} '
+        f'--duration {int(duration_seconds)} '
+        f'--max-user-index {DATASET_USER_COUNT} || STATUS=$?; '
+        'cleanup_load_driver; '
+        'trap - EXIT HUP INT TERM; '
+        'exit "$STATUS"'
     )
 
 
@@ -1178,6 +1301,7 @@ def _journal_identity(
     plan: DistributedK3sCandidatePlan,
     bundle: Any,
     options: DeathStarBenchOptions,
+    load_driver: LoadDriverImageLock,
 ) -> dict[str, Any]:
     load_generator = plan.load_generator
     return {
@@ -1191,6 +1315,18 @@ def _journal_identity(
         'image_lock_fingerprint': bundle.image_lock_fingerprint,
         'dataset_revision': DISTRIBUTED_DATASET_REVISION,
         'load_driver_revision': DISTRIBUTED_LOAD_DRIVER_REVISION,
+        'load_driver_image': load_driver.image,
+        'load_driver_context_sha256': load_driver.context_sha256,
+        'load_driver_wrk_binary_sha256': load_driver.wrk_binary_sha256,
+        'load_driver_wrk2_tree_git_sha': load_driver.wrk2_tree_git_sha,
+        'load_driver_wrk2_source_sha256': load_driver.wrk2_source_sha256,
+        'load_driver_luajit_revision': load_driver.luajit_revision,
+        'load_driver_luasocket_source_sha256': (
+            load_driver.luasocket_source_sha256
+        ),
+        'load_driver_request_script_sha256': (
+            load_driver.request_script_sha256
+        ),
         'measurement_revision': DISTRIBUTED_MEASUREMENT_REVISION,
         'application_private_ip': plan.host('application').private_ip,
         'load_generator_private_ip': load_generator.private_ip,
@@ -1459,28 +1595,29 @@ def _validate_execution_journal(
             )
         return
     load_generator_attestation = journal['load_generator_attestation']
-    if not isinstance(load_generator_attestation, Mapping) or any(
-        not isinstance(load_generator_attestation.get(field), str)
-        or not _SHA256_RE.fullmatch(load_generator_attestation[field])
-        for field in ('wrk_binary_sha256', 'compiler_version_sha256')
-    ):
-        raise DistributedMeasurementError(
-            'The load-generator build attestation is invalid.'
-        )
     _exact_mapping(
         load_generator_attestation,
         {
             'architecture': 'x86_64',
+            'platform': 'linux/amd64',
             'upstream_revision': deathstarbench.REVISION,
             'load_driver_revision': DISTRIBUTED_LOAD_DRIVER_REVISION,
-            'wrk_binary_sha256': load_generator_attestation[
-                'wrk_binary_sha256'
+            'context_sha256': identity['load_driver_context_sha256'],
+            'wrk_binary_sha256': identity['load_driver_wrk_binary_sha256'],
+            'wrk2_tree_git_sha': identity['load_driver_wrk2_tree_git_sha'],
+            'wrk2_source_sha256': identity[
+                'load_driver_wrk2_source_sha256'
             ],
-            'compiler_version_sha256': load_generator_attestation[
-                'compiler_version_sha256'
+            'luajit_revision': identity['load_driver_luajit_revision'],
+            'luasocket_source_sha256': identity[
+                'load_driver_luasocket_source_sha256'
             ],
+            'request_script_sha256': identity[
+                'load_driver_request_script_sha256'
+            ],
+            'image': identity['load_driver_image'],
         },
-        'Load-generator journal attestation',
+        'Load-driver artifact journal attestation',
     )
     if state_index == 1:
         if any(
@@ -1905,6 +2042,12 @@ def _run_distributed_social_network_measurement(
             raise DistributedMeasurementError(
                 'The exact K3s runtime must be cluster_ready before measurement.'
             )
+        validated_image_lock = validate_image_lock(image_lock)
+        load_driver = validated_image_lock.load_driver
+        if not load_driver.published:
+            raise DistributedMeasurementError(
+                'The distributed load-driver artifact is not published.'
+            )
         bundle = render_social_network_bundle(
             image_lock,
             plan.host('application').architecture,
@@ -1935,7 +2078,12 @@ def _run_distributed_social_network_measurement(
         raise DistributedMeasurementError(
             'The distributed load generator must attest x86_64 architecture.'
         )
-    identity = _journal_identity(plan, bundle, validated_options)
+    identity = _journal_identity(
+        plan,
+        bundle,
+        validated_options,
+        load_driver,
+    )
     existing = resources.get(EXECUTION_JOURNAL_KEY)
     if existing is not None:
         _validate_execution_journal(existing, identity=identity)
@@ -1971,9 +2119,8 @@ def _run_distributed_social_network_measurement(
         ),
         timeout=900,
     )
-    for step in web_guest.deathstarbench_install_steps(
+    for step in web_guest.distributed_deathstarbench_loadgen_install_steps(
         plan,
-        'loadgen',
     ):
         _execute(
             execute,
@@ -1986,26 +2133,37 @@ def _run_distributed_social_network_measurement(
         execute,
         job,
         load_generator,
-        load_generator_attestation_command(),
+        load_generator_attestation_command(load_driver),
         timeout=1_800,
     )
-    loadgen_attestation = parse_load_generator_attestation(loadgen_output)
-    _write_journal(
-        job,
-        identity,
-        state='load_generator_ready',
-        load_generator_attestation=loadgen_attestation,
-        frontend_attestation=None,
-        dataset_attestation=None,
-        warmup_metrics=None,
-        measurement_attestation=None,
-        persist=persist,
+    loadgen_attestation = parse_load_generator_attestation(
+        loadgen_output,
+        load_driver,
     )
-    _qualification_checkpoint(
-        qualification_checkpoint,
-        job,
-        'load_generator_ready',
-    )
+    if existing is not None and existing['state'] == 'load_generator_ready':
+        if dict(existing['load_generator_attestation']) != loadgen_attestation:
+            raise DistributedMeasurementError(
+                'The resumed load-driver artifact attestation changed.'
+            )
+        # Readiness is immutable once durable. Do not rewrite its journal or
+        # replay the qualification checkpoint during a safe recovery.
+    else:
+        _write_journal(
+            job,
+            identity,
+            state='load_generator_ready',
+            load_generator_attestation=loadgen_attestation,
+            frontend_attestation=None,
+            dataset_attestation=None,
+            warmup_metrics=None,
+            measurement_attestation=None,
+            persist=persist,
+        )
+        _qualification_checkpoint(
+            qualification_checkpoint,
+            job,
+            'load_generator_ready',
+        )
 
     application = plan.host('application')
     control = plan.host('control')
@@ -2140,6 +2298,9 @@ def _run_distributed_social_network_measurement(
                 target_ip,
                 validated_options,
                 validated_options.warmup_seconds,
+                load_driver=load_driver,
+                job_id=str(job['id']),
+                phase='warmup',
             ),
             timeout=validated_options.warmup_seconds + 300,
             transport_attempts=1,
@@ -2165,6 +2326,9 @@ def _run_distributed_social_network_measurement(
         target_ip,
         validated_options,
         validated_options.duration_seconds,
+        load_driver=load_driver,
+        job_id=str(job['id']),
+        phase='measurement',
     )
     _write_journal(
         job,
@@ -2276,11 +2440,10 @@ def _run_distributed_social_network_measurement(
         'dataset_edges_sha256': REED98_EDGES_SHA256,
         'load_driver_lua_sha256': MIXED_WORKLOAD_LUA_SHA256,
         'load_script_sha256': MIXED_WORKLOAD_LUA_SHA256,
+        'load_driver_image': load_driver.image,
+        'load_driver_context_sha256': load_driver.context_sha256,
         'load_generator_wrk_binary_sha256': loadgen_attestation[
             'wrk_binary_sha256'
-        ],
-        'load_generator_compiler_version_sha256': loadgen_attestation[
-            'compiler_version_sha256'
         ],
         'workload_execution_attestation_sha256': _sha256_json(pre_execution),
         # The execution journal is an infrastructure-ownership record and is

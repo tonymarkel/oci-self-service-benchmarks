@@ -670,9 +670,13 @@ def _cleanup(
 
 
 def _cleanup_only(args: argparse.Namespace) -> int:
-    _load_candidate_job(args.cleanup_only, provider=args.provider)
-    with shared._exclusive_job_lock(args.cleanup_only):
-        job = _load_candidate_job(args.cleanup_only, provider=args.provider)
+    job_id = str(args.cleanup_only)
+    if not application.RUN_ID_PATTERN.fullmatch(job_id):
+        raise QualificationError(
+            'Qualification job IDs must be 12 lowercase hex digits.'
+        )
+    with shared._exclusive_job_lock(job_id):
+        job = _load_candidate_job(job_id, provider=args.provider)
         pin = _read_provider_pin(job)
         _assert_resume_overrides(args, pin)
         clients = _oci_clients(args, pin) if args.provider == 'oci' else None

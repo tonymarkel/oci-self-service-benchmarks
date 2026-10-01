@@ -134,6 +134,15 @@ result, comparison, `results.json`, and report gates passed. Exact cleanup
 deleted the full graph, and a post-restart cleanup-only audit also passed with
 final `destroyed` state and no error or cleanup error.
 
+Fresh artifact-backed measurement-v2 job `46fa02564ca2` passed on 2026-09-30
+with the final published driver. It completed all 5,994 requests at 99.892941
+requests/second with p50/p95/p99 latency of 3.707/6.295/7.791 ms, 100 percent
+completion, zero errors, and unchanged Pod identity. Automatic cleanup passed.
+Independent tag-scoped inventory at `2026-09-30T23:20:44Z` covered the new run
+and all three formal AWS failure-matrix runs and found zero live resources in
+every graph category. EC2's retained `terminated` instance and `deleted` NAT
+records are terminal provider history, not live ownership.
+
 The representative checkpoint failure matrix passed on 2026-09-30:
 
 - Safe pre-initialization job `3249984b8909` hard-exited with status 86 after
@@ -170,6 +179,6 @@ matrix.
 Operator execution must use
 `scripts/qualify_aws_oci_deathstarbench_distributed.py`; the provider helpers
 do not create or manage a process lease themselves. The candidate remains
-unreleased. The broader remaining release gates are representative Azure
-failure paths, publication or equivalent qualification of an immutable load
-driver, and final cross-provider cleanup review.
+unreleased. The operator-path prerequisite gates are complete; public UI/API
+lifecycle integration and the coordinated release-flag transition remain a
+separate slice.

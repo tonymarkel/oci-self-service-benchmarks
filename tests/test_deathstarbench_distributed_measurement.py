@@ -1,6 +1,8 @@
 import base64
 import copy
 import hashlib
+import json
+import os
 import subprocess
 import unittest
 from unittest import mock
@@ -34,6 +36,9 @@ from app.deathstarbench_distributed_measurement import (
     durable_initializer_dispatch_command,
     durable_initializer_status_command,
     initializer_execution_identity,
+    _load_command,
+    _load_driver_artifact_marker,
+    load_generator_attestation_command,
     non_mutating_frontend_probe_command,
     parse_dataset_attestation,
     parse_dataset_database_attestation,
@@ -43,7 +48,11 @@ from app.deathstarbench_distributed_measurement import (
     run_gcp_distributed_social_network_measurement,
     social_network_initialization_command,
 )
-from app.deathstarbench_k3s_workload import EXPECTED_COMPONENTS, UPSTREAM_REVISION
+from app.deathstarbench_k3s_workload import (
+    EXPECTED_COMPONENTS,
+    UPSTREAM_REVISION,
+    validate_image_lock,
+)
 from app.models import DeathStarBenchOptions
 from tests.test_deathstarbench_distributed_runtime import (
     FakeRemoteExecutor,
@@ -57,10 +66,6 @@ from tests.test_deathstarbench_distributed_runtime import (
 
 APPLICATION_PRIVATE_IP = '10.240.1.13'
 LOAD_GENERATOR_HOST_KEY = 'azure_dsb_load_generator_public_ip'
-WRK_BINARY_SHA256 = 'a' * 64
-COMPILER_VERSION_SHA256 = 'b' * 64
-
-
 def measurement_options(**overrides):
     values = {
         'topology_id': DISTRIBUTED_TIERED_TOPOLOGY_ID,
@@ -216,16 +221,21 @@ class MeasurementExecutor:
         fail_on=None,
         measurement_prefix='',
         initializer_statuses=None,
+        load_driver=None,
     ):
         self.calls = []
         self.fail_on = fail_on
         self.measurement_prefix = measurement_prefix
         self.database_attestations = 0
         self.initializer_statuses = list(initializer_statuses or ())
+        self.load_driver = load_driver
 
     @staticmethod
     def stage(command):
-        if 'DISTRIBUTED_DSB_LOAD_GENERATOR_READY' in command:
+        if (
+            'DISTRIBUTED_DSB_LOAD_DRIVER_ARTIFACT' in command
+            and 'sudo podman pull --quiet' in command
+        ):
             return 'load_generator'
         if 'DISTRIBUTED_DSB_FRONTEND_READY' in command:
             return 'frontend_probe'
@@ -237,10 +247,10 @@ class MeasurementExecutor:
             return 'database_attestation'
         if 'deployments.apps,services,persistentvolumes' in command:
             return 'workload_snapshot'
-        if '/wrk2/wrk -D exp' in command:
-            if ' -d 5s ' in command:
+        if '"$IMAGE" run ' in command:
+            if '--duration 5 ' in command:
                 return 'warmup'
-            if ' -d 10s ' in command:
+            if '--duration 10 ' in command:
                 return 'measurement'
         return None
 
@@ -250,12 +260,9 @@ class MeasurementExecutor:
         if self.fail_on is not None and stage == self.fail_on:
             raise RuntimeError(f'injected {stage} failure')
         if stage == 'load_generator':
-            return (
-                'DISTRIBUTED_DSB_LOAD_GENERATOR_READY '
-                f'architecture=x86_64 revision={UPSTREAM_REVISION} '
-                f'wrk_sha256={WRK_BINARY_SHA256} '
-                f'compiler_version_sha256={COMPILER_VERSION_SHA256}\n'
-            )
+            if self.load_driver is None:
+                raise AssertionError('test load driver was not configured')
+            return _load_driver_artifact_marker(self.load_driver) + '\n'
         if stage == 'frontend_probe':
             return (
                 'DISTRIBUTED_DSB_FRONTEND_READY '
@@ -314,6 +321,106 @@ class MeasurementExecutor:
 
 
 class DistributedDatasetContractTests(unittest.TestCase):
+    def test_load_driver_digest_check_does_not_short_read_under_pipefail(self):
+        load_driver = validate_image_lock(candidate_image_lock()).load_driver
+        commands = (
+            load_generator_attestation_command(load_driver),
+            _load_command(
+                APPLICATION_PRIVATE_IP,
+                measurement_options(),
+                10,
+                load_driver=load_driver,
+                job_id='abc123def456',
+                phase='measurement',
+            ),
+        )
+        for command in commands:
+            with self.subTest(command=command[:80]):
+                subprocess.run(
+                    ['bash', '-n'],
+                    input=command,
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+                self.assertIn('REPO_DIGESTS=$(', command)
+                self.assertIn('grep -Fx "$IMAGE"', command)
+                self.assertNotIn('grep -Fqx', command)
+
+    def test_load_driver_cleanup_accepts_only_proven_absence(self):
+        load_driver = validate_image_lock(candidate_image_lock()).load_driver
+        command = _load_command(
+            APPLICATION_PRIVATE_IP,
+            measurement_options(),
+            10,
+            load_driver=load_driver,
+            job_id='abc123def456',
+            phase='measurement',
+        )
+        harness = r'''
+EXISTS_CALLS=0
+RM_CALLS=0
+sudo() {
+  test "$1" = podman || return 126
+  shift
+  case "$1:$2" in
+    rm:--force)
+      RM_CALLS=$((RM_CALLS + 1))
+      if test "$RM_CALLS" -gt 1; then
+        return "$FINAL_REMOVE_STATUS"
+      fi
+      return 0
+      ;;
+    container:exists)
+      EXISTS_CALLS=$((EXISTS_CALLS + 1))
+      if test "$EXISTS_CALLS" -eq 1; then
+        return 1
+      fi
+      return "$FINAL_EXISTS_STATUS"
+      ;;
+    image:exists)
+      return 0
+      ;;
+    image:inspect)
+      printf '%s\n' "$IMAGE"
+      return 0
+      ;;
+    run:--rm)
+      printf '%s\n' "$EXPECTED_MARKER"
+      return 0
+      ;;
+  esac
+  return 126
+}
+timeout() {
+  printf '%s\n' 'simulated successful wrk2 execution'
+  return 0
+}
+'''
+
+        cases = (
+            ('rm failure with proven absence', 17, 1, 0, ''),
+            ('container survived', 0, 0, 1, 'survived cleanup'),
+            ('Podman proof failed', 0, 125, 125, 'Unable to prove'),
+        )
+        for label, remove_status, exists_status, expected, stderr in cases:
+            with self.subTest(label=label):
+                environment = {
+                    **os.environ,
+                    'FINAL_REMOVE_STATUS': str(remove_status),
+                    'FINAL_EXISTS_STATUS': str(exists_status),
+                }
+                completed = subprocess.run(
+                    ['bash', '-c', harness + command],
+                    text=True,
+                    capture_output=True,
+                    env=environment,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, expected)
+                if stderr:
+                    self.assertIn(stderr, completed.stderr)
+
     def test_dataset_parser_requires_the_exact_reference_counts(self):
         output = (
             'initializer diagnostics\n'
@@ -686,6 +793,9 @@ class DistributedMeasurementOrchestrationTests(unittest.TestCase):
         }
 
     def run_measurement(self, executor, **kwargs):
+        executor.load_driver = validate_image_lock(
+            self.image_lock
+        ).load_driver
         execution_identity = {
             'schema_version': 1,
             'workload_revision': DISTRIBUTED_WORKLOAD_REVISION,
@@ -808,12 +918,22 @@ class DistributedMeasurementOrchestrationTests(unittest.TestCase):
             result['metadata']['load_script_sha256'], r'^[0-9a-f]{64}$'
         )
         evidence = result['metadata']['measurement_evidence']
+        load_driver = validate_image_lock(self.image_lock).load_driver
         expected_loadgen = {
-            'architecture': 'x86_64',
-            'upstream_revision': UPSTREAM_REVISION,
-            'load_driver_revision': DISTRIBUTED_LOAD_DRIVER_REVISION,
-            'wrk_binary_sha256': WRK_BINARY_SHA256,
-            'compiler_version_sha256': COMPILER_VERSION_SHA256,
+            'architecture': load_driver.architecture,
+            'platform': load_driver.platform,
+            'upstream_revision': load_driver.upstream_revision,
+            'load_driver_revision': load_driver.revision,
+            'context_sha256': load_driver.context_sha256,
+            'wrk_binary_sha256': load_driver.wrk_binary_sha256,
+            'wrk2_tree_git_sha': load_driver.wrk2_tree_git_sha,
+            'wrk2_source_sha256': load_driver.wrk2_source_sha256,
+            'luajit_revision': load_driver.luajit_revision,
+            'luasocket_source_sha256': (
+                load_driver.luasocket_source_sha256
+            ),
+            'request_script_sha256': load_driver.request_script_sha256,
+            'image': load_driver.image,
         }
         self.assertEqual(evidence['schema_version'], 1)
         self.assertEqual(
@@ -854,14 +974,28 @@ class DistributedMeasurementOrchestrationTests(unittest.TestCase):
         )
         self.assertEqual(
             result['metadata']['load_generator_wrk_binary_sha256'],
-            WRK_BINARY_SHA256,
+            load_driver.wrk_binary_sha256,
         )
         self.assertEqual(
-            result['metadata']['load_generator_compiler_version_sha256'],
-            COMPILER_VERSION_SHA256,
+            result['metadata']['load_driver_image'],
+            load_driver.image,
         )
-        self.assertIn('export max_user_index=962', result['command'])
+        self.assertEqual(
+            result['metadata']['load_driver_context_sha256'],
+            load_driver.context_sha256,
+        )
+        self.assertNotIn(
+            'load_generator_compiler_version_sha256',
+            result['metadata'],
+        )
+        self.assertIn('--max-user-index 962', result['command'])
         self.assertIn('timeout --signal=TERM --kill-after=30s', result['command'])
+        self.assertIn('--pull=never', result['command'])
+        self.assertIn('--network=host', result['command'])
+        self.assertIn('--read-only', result['command'])
+        self.assertIn('--cap-drop=all', result['command'])
+        self.assertIn('--security-opt=no-new-privileges', result['command'])
+        self.assertNotIn(' -v ', result['command'])
         artifact = comparison.build_results_artifact({
             **self.job,
             'status': 'reporting',
@@ -1489,6 +1623,117 @@ class DistributedMeasurementOrchestrationTests(unittest.TestCase):
             self.run_measurement(changed_identity)
         self.assertEqual(changed_identity.calls, [])
 
+    def test_safe_resume_reattests_exact_driver_without_replaying_ready_boundary(
+        self,
+    ):
+        first_checkpoints = []
+        first = MeasurementExecutor(fail_on='frontend_probe')
+        with self.assertRaisesRegex(RuntimeError, 'frontend_probe failure'):
+            self.run_measurement(
+                first,
+                persist=lambda _job: None,
+                qualification_checkpoint=(
+                    lambda _job, state: first_checkpoints.append(state)
+                ),
+            )
+        self.assertEqual(first_checkpoints, ['load_generator_ready'])
+        ready_journal = copy.deepcopy(
+            self.job['resources'][EXECUTION_JOURNAL_KEY]
+        )
+
+        persisted = []
+        resumed_checkpoints = []
+        resumed = MeasurementExecutor()
+        self.run_measurement(
+            resumed,
+            persist=lambda current: persisted.append(
+                copy.deepcopy(current['resources'][EXECUTION_JOURNAL_KEY])
+            ),
+            qualification_checkpoint=(
+                lambda _job, state: resumed_checkpoints.append(state)
+            ),
+        )
+
+        self.assertEqual(resumed.stages[0], 'load_generator')
+        self.assertEqual(resumed.stages.count('load_generator'), 1)
+        load_driver = validate_image_lock(self.image_lock).load_driver
+        loadgen_command = next(
+            command
+            for stage, command, _kwargs in resumed.calls
+            if stage == 'load_generator'
+        )
+        self.assertIn(load_driver.image, loadgen_command)
+        self.assertIn(_load_driver_artifact_marker(load_driver), loadgen_command)
+        self.assertIn('sudo podman pull --quiet "$IMAGE"', loadgen_command)
+        self.assertEqual(
+            ready_journal['load_generator_attestation'],
+            self.job['resources'][EXECUTION_JOURNAL_KEY][
+                'load_generator_attestation'
+            ],
+        )
+        self.assertNotIn(
+            'load_generator_ready',
+            [entry['state'] for entry in persisted],
+        )
+        self.assertNotIn('load_generator_ready', resumed_checkpoints)
+        self.assertEqual(
+            resumed_checkpoints,
+            ['initialization_started', 'warmup_started', 'measurement_started'],
+        )
+
+    def test_safe_resume_rejects_changed_driver_attestation_without_mutation(self):
+        first = MeasurementExecutor(fail_on='frontend_probe')
+        with self.assertRaisesRegex(RuntimeError, 'frontend_probe failure'):
+            self.run_measurement(first)
+        journal = self.job['resources'][EXECUTION_JOURNAL_KEY]
+        journal_bytes = json.dumps(
+            journal,
+            sort_keys=True,
+            separators=(',', ':'),
+        ).encode('utf-8')
+
+        class ChangedAttestationExecutor(MeasurementExecutor):
+            def __call__(self, job, command, **kwargs):
+                stage = self.stage(command)
+                if stage == 'load_generator':
+                    self.calls.append((stage, command, kwargs))
+                    marker = _load_driver_artifact_marker(self.load_driver)
+                    return marker.replace(
+                        f'context_sha256={self.load_driver.context_sha256}',
+                        f'context_sha256={"9" * 64}',
+                    ) + '\n'
+                return super().__call__(job, command, **kwargs)
+
+        persisted = []
+        checkpoints = []
+        changed = ChangedAttestationExecutor()
+        with self.assertRaisesRegex(
+            DistributedMeasurementError,
+            'attestation conflicts with the pinned driver',
+        ):
+            self.run_measurement(
+                changed,
+                persist=lambda current: persisted.append(copy.deepcopy(
+                    current['resources'][EXECUTION_JOURNAL_KEY]
+                )),
+                qualification_checkpoint=(
+                    lambda _job, state: checkpoints.append(state)
+                ),
+            )
+
+        self.assertEqual(changed.stages, ['load_generator'])
+        self.assertNotIn('frontend_probe', changed.stages)
+        self.assertEqual(persisted, [])
+        self.assertEqual(checkpoints, [])
+        self.assertEqual(
+            json.dumps(
+                self.job['resources'][EXECUTION_JOURNAL_KEY],
+                sort_keys=True,
+                separators=(',', ':'),
+            ).encode('utf-8'),
+            journal_bytes,
+        )
+
     def test_completed_result_is_idempotent_and_raw_output_is_bounded(self):
         executor = MeasurementExecutor(
             measurement_prefix='x' * (MAX_RESULT_OUTPUT_CHARS * 2),
@@ -1547,7 +1792,9 @@ class GcpDistributedMeasurementOrchestrationTests(unittest.TestCase):
                 for index, component in enumerate(sorted(EXPECTED_COMPONENTS))
             ],
         }
-        executor = MeasurementExecutor()
+        executor = MeasurementExecutor(
+            load_driver=validate_image_lock(image_lock).load_driver
+        )
         ticks = iter((100.0, 110.0))
 
         with mock.patch(

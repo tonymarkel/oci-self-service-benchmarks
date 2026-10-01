@@ -26,6 +26,7 @@ from typing import Any
 from .catalog import PHORONIX_PROFILES
 from .deathstarbench_contract import (
     DISTRIBUTED_TIERED_TOPOLOGY_ID,
+    LEGACY_DISTRIBUTED_LOAD_DRIVER_REVISION,
     SINGLE_HOST_RUNTIME_REVISION,
     runtime_profile,
 )
@@ -494,6 +495,7 @@ _SAFE_ATTESTATION_KEYS = frozenset({
     # not executable source.  Preserve this exact key while continuing to
     # reject arbitrary script-bearing metadata.
     'load_script_sha256',
+    'request_script_sha256',
 })
 
 
@@ -879,6 +881,50 @@ def _deathstarbench_execution_context(
             } and not re.fullmatch(r'[0-9a-f]{64}', value):
                 issues.append(
                     'DeathStarBench distributed execution identity has an '
+                    f'invalid SHA-256: {key}.'
+                )
+
+        load_driver_revision = distributed_identity.get(
+            'load_driver_revision'
+        )
+        if load_driver_revision == LEGACY_DISTRIBUTED_LOAD_DRIVER_REVISION:
+            driver_identity_keys = (
+                'load_generator_wrk_binary_sha256',
+                'load_generator_compiler_version_sha256',
+            )
+        else:
+            driver_identity_keys = (
+                'load_driver_image',
+                'load_generator_wrk_binary_sha256',
+                'load_driver_context_sha256',
+            )
+        for key in driver_identity_keys:
+            raw = metadata.get(key)
+            value = (
+                _clean_text(raw, 512).strip()
+                if isinstance(raw, str)
+                else ''
+            )
+            distributed_identity[key] = value or None
+            if not value:
+                issues.append(
+                    'DeathStarBench distributed load-driver identity is '
+                    f'missing or invalid: {key}.'
+                )
+                continue
+            if key == 'load_driver_image':
+                if not re.fullmatch(
+                    r'ghcr\.io/[a-z0-9]+(?:[._/-][a-z0-9]+)*'
+                    r'@sha256:[0-9a-f]{64}',
+                    value,
+                ):
+                    issues.append(
+                        'DeathStarBench distributed load-driver identity has '
+                        'an invalid immutable GHCR image reference.'
+                    )
+            elif not re.fullmatch(r'[0-9a-f]{64}', value):
+                issues.append(
+                    'DeathStarBench distributed load-driver identity has an '
                     f'invalid SHA-256: {key}.'
                 )
 

@@ -8,6 +8,8 @@ from app.deathstarbench_contract import (
     DISTRIBUTED_MEASUREMENT_REVISION,
     DISTRIBUTED_TIERED_PROFILE,
     DISTRIBUTED_WORKLOAD_REVISION,
+    LEGACY_DISTRIBUTED_LOAD_DRIVER_REVISION,
+    LEGACY_DISTRIBUTED_MEASUREMENT_REVISION,
     SINGLE_HOST_PROFILE,
     runtime_profile,
 )
@@ -34,6 +36,12 @@ DATASET_EDGES_SHA256 = (
 LOAD_SCRIPT_SHA256 = (
     'ab2cd04b6cffb53beaf27efd8dfb5eae7dcd6c8abecbb70623fda93139b3dd32'
 )
+LOAD_DRIVER_IMAGE = 'ghcr.io/tonymarkel/deathstarbench-load-driver@sha256:' + (
+    '5' * 64
+)
+LOAD_DRIVER_BINARY_SHA256 = '6' * 64
+LOAD_DRIVER_CONTEXT_SHA256 = '7' * 64
+LEGACY_COMPILER_SHA256 = '8' * 64
 
 
 def plan(*, distributed=False):
@@ -80,9 +88,13 @@ def metadata(
     dataset_nodes_sha256=DATASET_NODES_SHA256,
     dataset_edges_sha256=DATASET_EDGES_SHA256,
     load_script_sha256=LOAD_SCRIPT_SHA256,
+    load_driver_image=LOAD_DRIVER_IMAGE,
+    load_generator_wrk_binary_sha256=LOAD_DRIVER_BINARY_SHA256,
+    load_driver_context_sha256=LOAD_DRIVER_CONTEXT_SHA256,
+    load_generator_compiler_version_sha256=None,
 ):
     profile = runtime_profile(topology_id, runtime_id)
-    return {
+    value = {
         'upstream_revision': UPSTREAM_REVISION,
         'topology_id': topology_id,
         'topology_revision': (
@@ -104,7 +116,18 @@ def metadata(
         'dataset_nodes_sha256': dataset_nodes_sha256,
         'dataset_edges_sha256': dataset_edges_sha256,
         'load_script_sha256': load_script_sha256,
+        'load_generator_wrk_binary_sha256': (
+            load_generator_wrk_binary_sha256
+        ),
     }
+    if load_driver_revision == LEGACY_DISTRIBUTED_LOAD_DRIVER_REVISION:
+        value['load_generator_compiler_version_sha256'] = (
+            load_generator_compiler_version_sha256 or LEGACY_COMPILER_SHA256
+        )
+    else:
+        value['load_driver_image'] = load_driver_image
+        value['load_driver_context_sha256'] = load_driver_context_sha256
+    return value
 
 
 def document(
@@ -400,6 +423,9 @@ class DeathStarBenchComparisonContractTests(unittest.TestCase):
             ('image_set_revision', 'social-network-other-images-v1'),
             ('image_lock_fingerprint', 'sha256:' + ('3' * 64)),
             ('rendered_manifest_sha256', 'sha256:' + ('4' * 64)),
+            ('load_driver_image', 'ghcr.io/tonymarkel/other@sha256:' + ('9' * 64)),
+            ('load_generator_wrk_binary_sha256', 'a' * 64),
+            ('load_driver_context_sha256', 'b' * 64),
         )
 
         for field, changed_value in cases:
@@ -428,6 +454,57 @@ class DeathStarBenchComparisonContractTests(unittest.TestCase):
                     {item['run_id'] for item in payload['excluded']},
                     {'run-a', 'run-b'},
                 )
+
+    def test_legacy_native_driver_binary_and_compiler_define_its_cohort(self):
+        legacy = {
+            'load_driver_revision': LEGACY_DISTRIBUTED_LOAD_DRIVER_REVISION,
+            'measurement_revision': LEGACY_DISTRIBUTED_MEASUREMENT_REVISION,
+            'load_generator_wrk_binary_sha256': 'c' * 64,
+            'load_generator_compiler_version_sha256': 'd' * 64,
+        }
+        matching = comparison.build_comparison_payload([
+            document('run-a', metadata_overrides=legacy),
+            document('run-b', metadata_overrides=legacy),
+        ])
+        self.assertEqual(len(matching['charts']), 1)
+        self.assertEqual(matching['excluded'], [])
+
+        changed = comparison.build_comparison_payload([
+            document('run-a', metadata_overrides=legacy),
+            document(
+                'run-b',
+                metadata_overrides={
+                    **legacy,
+                    'load_generator_wrk_binary_sha256': 'e' * 64,
+                },
+            ),
+        ])
+        self.assertEqual(changed['charts'], [])
+        self.assertEqual(
+            {
+                difference['path']
+                for difference in changed['mismatches'][0]['differences']
+            },
+            {'settings.load_generator_wrk_binary_sha256'},
+        )
+
+    def test_image_backed_driver_requires_exact_artifact_identity(self):
+        for field in (
+            'load_driver_image',
+            'load_generator_wrk_binary_sha256',
+            'load_driver_context_sha256',
+        ):
+            with self.subTest(field=field):
+                artifact = document(
+                    'run-a',
+                    metadata_overrides={field: None},
+                )
+                result = artifact['results'][0]
+                self.assertTrue(result['comparison']['contract_unknown'])
+                self.assertTrue(any(
+                    field in issue
+                    for issue in result['comparison']['issues']
+                ))
 
 
 if __name__ == '__main__':

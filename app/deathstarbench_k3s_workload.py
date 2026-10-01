@@ -27,6 +27,7 @@ from typing import Any
 
 from .deathstarbench_contract import (
     DISTRIBUTED_IMAGE_SET_REVISION,
+    DISTRIBUTED_LOAD_DRIVER_REVISION,
     DISTRIBUTED_WORKLOAD_REVISION,
 )
 from .k3s_runtime import K3S_BINARY
@@ -34,7 +35,7 @@ from .k3s_runtime import K3S_BINARY
 
 NAMESPACE = 'deathstarbench-social'
 UPSTREAM_REVISION = '6ecb09706140f8730b5385c08f1386c654c3c526'
-IMAGE_LOCK_SCHEMA_VERSION = 1
+IMAGE_LOCK_SCHEMA_VERSION = 2
 WORKLOAD_ASSET_SCHEMA_VERSION = 1
 WORKLOAD_LABEL = 'social-network-v1'
 DATABASE_ROOT = '/var/lib/deathstarbench/database/mongodb'
@@ -42,6 +43,16 @@ LEGACY_STORAGE_CLASS_ANNOTATION = 'volume.beta.kubernetes.io/storage-class'
 FRONTEND_COMPONENT = 'nginx-thrift'
 FRONTEND_NODE_PORT = 8080
 READINESS_TIMEOUT_SECONDS = 900
+LOAD_DRIVER_PLATFORM = 'linux/amd64'
+LOAD_DRIVER_ARCHITECTURE = 'x86_64'
+LOAD_DRIVER_WRK2_TREE_GIT_SHA = 'ebb227ba3684e6b69166abbeefe8210ada396018'
+LOAD_DRIVER_LUAJIT_REVISION = '2090842410e0ba6f81fad310a77bf5432488249a'
+LOAD_DRIVER_LUASOCKET_SOURCE_SHA256 = (
+    'f4a207f50a3f99ad65def8e29c54ac9aac668b216476f7fae3fae92413398ed2'
+)
+LOAD_DRIVER_REQUEST_SCRIPT_SHA256 = (
+    'ab2cd04b6cffb53beaf27efd8dfb5eae7dcd6c8abecbb70623fda93139b3dd32'
+)
 
 ASSET_DIRECTORY = (
     Path(__file__).resolve().parent
@@ -171,6 +182,7 @@ _IMAGE_REFERENCE_RE = re.compile(
 _DNS_LABEL_RE = re.compile(
     r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
 )
+_SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
 
 
 class WorkloadBundleError(ValueError):
@@ -258,10 +270,30 @@ def _immutable_image_reference(value: Any, label: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class LoadDriverImageLock:
+    """Exact published artifact and source identity for the x86 load driver."""
+
+    architecture: str
+    platform: str
+    revision: str
+    image: str
+    published: bool
+    upstream_revision: str
+    context_sha256: str
+    wrk_binary_sha256: str
+    wrk2_tree_git_sha: str
+    wrk2_source_sha256: str
+    luajit_revision: str
+    luasocket_source_sha256: str
+    request_script_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class WorkloadImageLock:
     """Validated, immutable image references for both supported platforms."""
 
     platforms: Mapping[str, Mapping[str, str]]
+    load_driver: LoadDriverImageLock
     fingerprint: str
 
     def image(self, architecture: str, image_key: str) -> str:
@@ -289,6 +321,7 @@ def validate_image_lock(value: Mapping[str, Any]) -> WorkloadImageLock:
         'upstream_revision',
         'released',
         'platforms',
+        'load_driver',
     }
     _exact_fields(lock, expected_fields, 'Workload image lock')
     if lock['schema_version'] != IMAGE_LOCK_SCHEMA_VERSION:
@@ -303,6 +336,94 @@ def validate_image_lock(value: Mapping[str, Any]) -> WorkloadImageLock:
         raise WorkloadBundleError(
             'The distributed workload image set is still an unreleased candidate.'
         )
+
+    raw_load_driver = _mapping(lock['load_driver'], 'Load-driver image lock')
+    load_driver_fields = {
+        'architecture',
+        'platform',
+        'revision',
+        'image',
+        'published',
+        'upstream_revision',
+        'context_sha256',
+        'wrk_binary_sha256',
+        'wrk2_tree_git_sha',
+        'wrk2_source_sha256',
+        'luajit_revision',
+        'luasocket_source_sha256',
+        'request_script_sha256',
+    }
+    _exact_fields(raw_load_driver, load_driver_fields, 'Load-driver image lock')
+    if raw_load_driver['architecture'] != LOAD_DRIVER_ARCHITECTURE:
+        raise WorkloadBundleError('The load driver must be x86_64.')
+    if raw_load_driver['platform'] != LOAD_DRIVER_PLATFORM:
+        raise WorkloadBundleError('The load driver must use linux/amd64.')
+    if raw_load_driver['revision'] != DISTRIBUTED_LOAD_DRIVER_REVISION:
+        raise WorkloadBundleError('The load driver has the wrong revision.')
+    image = _immutable_image_reference(
+        raw_load_driver['image'],
+        'Load-driver image',
+    )
+    if raw_load_driver['upstream_revision'] != UPSTREAM_REVISION:
+        raise WorkloadBundleError('The load driver has the wrong upstream commit.')
+    if raw_load_driver['wrk2_tree_git_sha'] != LOAD_DRIVER_WRK2_TREE_GIT_SHA:
+        raise WorkloadBundleError('The load driver has the wrong wrk2 tree.')
+    if raw_load_driver['luajit_revision'] != LOAD_DRIVER_LUAJIT_REVISION:
+        raise WorkloadBundleError('The load driver has the wrong LuaJIT revision.')
+    if (
+        raw_load_driver['luasocket_source_sha256']
+        != LOAD_DRIVER_LUASOCKET_SOURCE_SHA256
+    ):
+        raise WorkloadBundleError('The load driver has the wrong LuaSocket source.')
+    if (
+        raw_load_driver['request_script_sha256']
+        != LOAD_DRIVER_REQUEST_SCRIPT_SHA256
+    ):
+        raise WorkloadBundleError('The load driver has the wrong request script.')
+    published = raw_load_driver['published']
+    if type(published) is not bool:
+        raise WorkloadBundleError('Load-driver published must be a boolean.')
+    artifact_hash_fields = (
+        'context_sha256',
+        'wrk_binary_sha256',
+        'wrk2_source_sha256',
+    )
+    for field in artifact_hash_fields:
+        if (
+            not isinstance(raw_load_driver[field], str)
+            or not _SHA256_RE.fullmatch(raw_load_driver[field])
+        ):
+            raise WorkloadBundleError(
+                f'Load-driver {field} must be a lower-case SHA-256 digest.'
+            )
+    image_digest = image.rsplit('@sha256:', 1)[1]
+    placeholder_values = {
+        image_digest,
+        *(raw_load_driver[field] for field in artifact_hash_fields),
+    }
+    if published and '0' * 64 in placeholder_values:
+        raise WorkloadBundleError(
+            'A published load driver cannot contain placeholder digests.'
+        )
+    if not published and placeholder_values != {'0' * 64}:
+        raise WorkloadBundleError(
+            'An unpublished load driver must use only explicit zero placeholders.'
+        )
+    load_driver = LoadDriverImageLock(
+        architecture=LOAD_DRIVER_ARCHITECTURE,
+        platform=LOAD_DRIVER_PLATFORM,
+        revision=DISTRIBUTED_LOAD_DRIVER_REVISION,
+        image=image,
+        published=published,
+        upstream_revision=UPSTREAM_REVISION,
+        context_sha256=raw_load_driver['context_sha256'],
+        wrk_binary_sha256=raw_load_driver['wrk_binary_sha256'],
+        wrk2_tree_git_sha=LOAD_DRIVER_WRK2_TREE_GIT_SHA,
+        wrk2_source_sha256=raw_load_driver['wrk2_source_sha256'],
+        luajit_revision=LOAD_DRIVER_LUAJIT_REVISION,
+        luasocket_source_sha256=LOAD_DRIVER_LUASOCKET_SOURCE_SHA256,
+        request_script_sha256=LOAD_DRIVER_REQUEST_SCRIPT_SHA256,
+    )
 
     platform_values = _mapping(lock['platforms'], 'Image-lock platforms')
     required_platforms = {'linux/amd64', 'linux/arm64'}
@@ -351,6 +472,7 @@ def validate_image_lock(value: Mapping[str, Any]) -> WorkloadImageLock:
     fingerprint = 'sha256:' + hashlib.sha256(canonical.encode('utf-8')).hexdigest()
     return WorkloadImageLock(
         platforms=MappingProxyType(normalized),
+        load_driver=load_driver,
         fingerprint=fingerprint,
     )
 

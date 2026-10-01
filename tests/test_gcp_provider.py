@@ -295,6 +295,24 @@ def plan(**overrides):
     return value
 
 
+def network_create_arguments(clients, job_id='abc12345'):
+    name = f'benchmark-{job_id}'
+    expected = gcp._network_resource(clients, job_id, name)
+    return name, expected, {
+        'prefix': 'gcp_network',
+        'name': name,
+        'client': clients['networks'],
+        'clients': clients,
+        'insert_request_type': 'InsertNetworkRequest',
+        'insert_values': {
+            'project': 'p',
+            'network_resource': expected,
+        },
+        'get_request_type': 'GetNetworkRequest',
+        'get_values': {'project': 'p', 'network': name},
+    }
+
+
 class GcpDiscoveryTests(unittest.TestCase):
     def test_machine_types_filter_non_pd_and_high_risk_variants(self):
         items = [
@@ -1181,6 +1199,109 @@ class GcpProvisionTests(unittest.TestCase):
         self.assertTrue(job['resources']['gcp_network_create_ambiguous'])
         self.assertIn('gcp_network_request_id', job['resources'])
         self.assertNotIn('gcp_network_id', job['resources'])
+
+    def test_409_reconciliation_rejects_same_name_replacement_identity(self):
+        clients, _ = clients_and_timeline()
+        name, expected, arguments = network_create_arguments(clients)
+        service = clients['networks']
+        self_link = service._self_link({'project': 'p'}, name)
+        service.items[name] = {
+            **copy.deepcopy(expected),
+            'id': 'replacement-id',
+            'self_link': self_link,
+        }
+        job = {
+            'id': 'abc12345',
+            'resources': {
+                'gcp_network_name': name,
+                'gcp_network_id': 'original-id',
+                'gcp_network_self_link': self_link,
+                'gcp_network_request_id': (
+                    '11111111-1111-4111-8111-111111111111'
+                ),
+                'gcp_network_create_ambiguous': True,
+            },
+        }
+
+        with self.assertRaisesRegex(RuntimeError, 'numeric ID'):
+            gcp._create_named_resource(job, None, **arguments)
+
+        self.assertEqual(job['resources']['gcp_network_id'], 'original-id')
+        self.assertEqual(
+            job['resources']['gcp_network_self_link'], self_link
+        )
+        self.assertTrue(job['resources']['gcp_network_create_ambiguous'])
+
+    def test_terminal_error_reconciliation_rejects_replacement_identity(self):
+        clients, timeline = clients_and_timeline()
+        name, expected, arguments = network_create_arguments(clients)
+        service = clients['networks']
+        original_link = service._self_link({'project': 'p'}, name)
+        service.items[name] = {
+            **copy.deepcopy(expected),
+            'id': 'original-id',
+            'self_link': original_link + '-replacement',
+        }
+
+        def failed_insert(request):
+            timeline.append(('insert', 'network', copy.deepcopy(request)))
+            return Operation(ApiError(
+                400,
+                'terminal operation failure',
+                reason='INVALID_ARGUMENT',
+            ))
+
+        service.insert = failed_insert
+        job = {
+            'id': 'abc12345',
+            'resources': {
+                'gcp_network_name': name,
+                'gcp_network_id': 'original-id',
+                'gcp_network_self_link': original_link,
+                'gcp_network_request_id': (
+                    '11111111-1111-4111-8111-111111111111'
+                ),
+                'gcp_network_create_ambiguous': True,
+            },
+        }
+
+        with self.assertRaisesRegex(RuntimeError, 'different selfLink'):
+            gcp._create_named_resource(job, None, **arguments)
+
+        self.assertEqual(job['resources']['gcp_network_id'], 'original-id')
+        self.assertEqual(
+            job['resources']['gcp_network_self_link'], original_link
+        )
+        self.assertTrue(job['resources']['gcp_network_create_ambiguous'])
+
+    def test_post_wait_reconciliation_rejects_same_name_replacement_identity(self):
+        clients, _ = clients_and_timeline()
+        name, _, arguments = network_create_arguments(clients)
+        service = clients['networks']
+        self_link = service._self_link({'project': 'p'}, name)
+        job = {
+            'id': 'abc12345',
+            'resources': {
+                'gcp_network_name': name,
+                'gcp_network_id': 'deleted-original-id',
+                'gcp_network_self_link': self_link,
+                'gcp_network_request_id': (
+                    '11111111-1111-4111-8111-111111111111'
+                ),
+                'gcp_network_create_ambiguous': True,
+            },
+        }
+
+        with self.assertRaisesRegex(RuntimeError, 'numeric ID'):
+            gcp._create_named_resource(job, None, **arguments)
+
+        self.assertEqual(
+            job['resources']['gcp_network_id'], 'deleted-original-id'
+        )
+        self.assertEqual(
+            job['resources']['gcp_network_self_link'], self_link
+        )
+        self.assertTrue(job['resources']['gcp_network_create_ambiguous'])
 
     def test_completed_insert_error_clears_consumed_request_id(self):
         timeline = []

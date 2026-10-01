@@ -1,9 +1,9 @@
 # Distributed DeathStarBench design
 
-Status: the provider-neutral foundation and operator-only five-node
-infrastructure, K3s, Social Network workload, network-policy qualification,
-cleanup, recovery, and measurement machinery now cover Azure, GCP, AWS, and
-OCI. The prerequisite operator-path release gates are complete: the shared
+Status: the provider-neutral five-node infrastructure, K3s, Social Network
+workload, network-policy qualification, cleanup, recovery, measurement, and
+normal UI/API lifecycle now cover Azure, GCP, AWS, and OCI. The prerequisite
+operator-path release gates are complete: the shared
 immutable amd64 load-driver artifact is published and anonymously readable,
 Azure has the full representative failure-path matrix, and the reviewed
 cross-provider cleanup receipt proves terminal local state plus independent
@@ -19,12 +19,31 @@ representative crash, response-loss, cleanup, and signal evidence described
 below. Azure, AWS, and OCI have now completed the representative checkpoint
 failure matrix described below.
 
-`distributed_tiered_v1` is still unreleased for normal cloud provisioning. The
-UI does not offer it, and the normal API/provider path rejects it before
-creating a run or making a cloud write. The remaining work is the separate
-public product-integration slice: plan/UI selection, normal API lifecycle
-dispatch, stop/restart/manual-destroy recovery, and a coordinated release-flag
-transition.
+`distributed_tiered_v1` is released for normal cloud provisioning. The plan
+model and UI expose the exact Social Network/K3s contract, and the normal
+API lifecycle routes create, run, stop/restart cleanup, and manual destroy
+through the distributed controllers. Public preflight requires the runtime
+profile, image lock, published immutable load driver, component asset, and
+NetworkPolicy asset to be released as one coherent bundle; a mixed transition
+fails before SSH validation, run-directory creation, or any cloud write.
+
+## Public lifecycle qualification
+
+On 2026-10-01, fresh runs through the normal `create_job` lifecycle completed
+the released five-node topology on every provider. Each run generated both the
+HTML report and structured results, then completed automatic cleanup with a
+fresh-process terminal check reporting no recoverable resources.
+
+| Provider | Run | Application shape | Successful requests | Throughput | Cleanup result |
+| --- | --- | --- | ---: | ---: | --- |
+| AWS | `e51500185779` | `m7i.xlarge` | 218/218 | 21.792527 req/s | All 21 graph resources absent |
+| Azure | `31911e3e7675` | `Standard_D8ps_v6` | 218/218 | 21.791227 req/s | Resource group independently absent |
+| GCP | `f9420fd31e48` | `c4a-standard-8` | 218/218 | 21.794488 req/s | Full resource graph independently absent |
+| OCI | `4b1a54e82fc3` | `VM.Standard.E5.Flex` | 218/218 | 21.794872 req/s | Full resource graph independently absent |
+
+All four measurements reported 100% completion with zero HTTP, socket, or
+uncompleted-request errors. Azure and GCP additionally persisted the exact
+run-bound provider terminal marker, which validated in a separate process.
 
 ## Benchmark modes
 
@@ -32,7 +51,7 @@ transition.
 selected compute shape as a consolidated Podman host while a separate fixed
 x86 load generator sends private-network traffic.
 
-`distributed_tiered_v1` will use this fixed five-node graph:
+`distributed_tiered_v1` uses this fixed five-node graph:
 
 ```text
 load_generator -> application/frontend -> cache
@@ -75,16 +94,16 @@ released until its binary checksums, images, manifests, CNI configuration, and
 component versions are pinned and qualified. Runtime revisions form separate
 automatic comparison cohorts.
 
-The current candidate pins K3s `v1.36.4+k3s1`, its architecture-specific
+The released profile pins K3s `v1.36.4+k3s1`, its architecture-specific
 binary, and its matching architecture-specific air-gap system-image bundle by
 SHA-256. The independent EL9 `k3s-selinux` 1.6-1 RPM is downloaded from its
 exact release URL and verified against a source-recorded SHA-256. Workload
 revision `social-network-6ecb097-workload-v1` is generated from checked-in
 component and policy assets audited against DeathStarBench commit
 `6ecb09706140f8730b5385c08f1386c654c3c526`. Its image-lock schema requires an
-exact per-platform digest for every custom and supporting image; the candidate
-lock was published and has been exercised by all four provider candidates, but
-deliberately remains marked unreleased. The exact candidate is checked in at
+exact per-platform digest for every custom and supporting image. The lock was
+published, exercised by all four providers, and released in coordination with
+the runtime, component, and NetworkPolicy assets. The exact lock is checked in at
 `docs/qualification/deathstarbench-social-network-images-v1.json`.
 Provider guest preparation is an explicit qualification item: SELinux must be
 enforcing with the expected policies and labels, cgroup v2 and swap state must
@@ -127,11 +146,10 @@ cannot lose the plan it is cleaning up.
 
 ## Azure synthetic infrastructure pilot
 
-Azure is the first provider with an internal, unreleased five-node
-infrastructure candidate. It is deliberately separate from the normal UI and
-API provisioning route. The infrastructure hook stops after creating and
-attesting the cloud boundary; separate internal hooks bootstrap K3s and deploy
-the workload from the persisted inventory. The existing compact Azure
+Azure was the first provider with an internal five-node infrastructure
+candidate. That infrastructure hook still stops after creating and attesting
+the cloud boundary; the released public lifecycle composes it with the shared
+K3s, workload, measurement, and cleanup controllers. The existing compact Azure
 DeathStarBench path now dual-writes its runner and load-generator state to both
 the legacy flat fields and the versioned role inventory before its first
 resource-group write.
@@ -177,10 +195,10 @@ internal live Azure qualification described below.
 
 ## GCP synthetic infrastructure candidate
 
-GCP now has an internal, unreleased five-node Compute Engine candidate. Like
-the Azure pilot, it is callable only from the operator qualification harness
-and internal hooks; the normal UI, API, and provider dispatcher remain closed.
-It persists the provider-neutral topology manifest, fingerprint, role-node
+GCP's five-node Compute Engine adapter originated as an internal qualification
+candidate. The released public lifecycle now calls the same guarded adapter;
+direct calls through the compact provider entrypoint remain rejected so they
+cannot bypass the coordinated bundle gate. It persists the provider-neutral topology manifest, fingerprint, role-node
 inventory, deterministic resource names, request UUIDs, and pinned Rocky Linux
 9 image identities before the corresponding cloud writes. The same topology,
 K3s runtime, rendered Social Network workload, dataset, measurement, and result
@@ -258,9 +276,9 @@ only after independent lookups prove every expected resource absent.
 
 ## AWS operator candidate
 
-AWS now has the same internal, unreleased five-node lifecycle and shared
-runtime/workload hooks. It remains reachable only through the operator
-qualification wrapper. One selected availability zone contains a dedicated
+AWS has the same five-node lifecycle and shared runtime/workload hooks. The
+operator qualification wrapper remains available, while the released public
+lifecycle invokes the adapter through the normal distributed dispatcher. One selected availability zone contains a dedicated
 `10.240.0.0/16` VPC with management, load-generator, and private data subnets.
 Control, application, and load generator have public addresses; database and
 cache do not. An internet gateway serves the public subnets, a run-owned zonal
@@ -304,8 +322,9 @@ than being guessed away.
 
 ## OCI operator candidate
 
-OCI now has an equivalent internal, unreleased five-node lifecycle and shared
-runtime/workload hooks. All resources occupy one selected availability domain
+OCI has an equivalent five-node lifecycle and shared runtime/workload hooks.
+The operator wrapper and released public dispatcher share the same guarded
+adapter. All resources occupy one selected availability domain
 inside a dedicated `10.240.0.0/16` VCN. The public management and load-generator
 subnets use an internet gateway; the private data subnet uses a NAT gateway.
 Each role has an exact NSG allowlist, and an explicitly empty managed security
@@ -495,10 +514,11 @@ resolves the exact direct amd64 manifest, and merges that identity into the
 same lock. Final workflow run
 [36784866914](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/36784866914)
 published the candidate used by live qualification. The checked-in lock is
-byte-for-byte that workflow artifact: file SHA-256
-`3754d05689836c07c10d21bb49fc562f6a2ba88f24e70e868bb4dfd2b32bb9ea`
+the reviewed release copy of that artifact: only its Boolean release marker
+changed after qualification. The released file has SHA-256
+`44340d363e947af580ef195a35cdb693897ff671831192ceaa74aac7c1aa9c1a`
 and validated fingerprint
-`sha256:f13825377ea076b26062a0672051c0c7e642062f376b0a4097b216f7cca65dad`.
+`sha256:2b8d63fdae1105c25b9e5e8f0ac7a3f192062ae8c37a83a57eb7048f88bc15c4`.
 It binds driver manifest
 `sha256:5669318f8e955ccab71ecd768a31d0add0540c610e6abf0fc0ebf076330dab5d`,
 context SHA-256
@@ -506,15 +526,17 @@ context SHA-256
 and wrk2-binary SHA-256
 `524155ca43451170646de69b1d4e83a22b46c3950e5d0af56ae717bd3bae01a0`.
 Anonymous exact-digest resolution passed for the driver and all workload
-platform manifests. Publication and public pulls are qualification evidence,
-not permission to open the UI release gate.
+platform manifests. Publication and public pulls remain qualification
+evidence; public selection additionally requires the coherent five-part
+release bundle described above.
 
-## Internal dataset and measurement candidate
+## Shared dataset and measurement lifecycle
 
-All four provider candidates expose the same provider-neutral operator-only
-execution hook outside the normal run path. Provider adapters supply only the
-validated inventory and SSH routes; the initialization, warm-up, wrk2 command,
-parsing, evidence, result, and comparison logic is shared. Its cleanup-owned
+All four providers expose the same provider-neutral execution hook to both the
+operator qualification wrapper and the normal run path. Provider adapters
+supply only the validated inventory and SSH routes; the initialization,
+warm-up, wrk2 command, parsing, evidence, result, and comparison logic is
+shared. Its cleanup-owned
 journal advances monotonically through
 `preparing_load_generator`, `load_generator_ready`,
 `initialization_started`, `dataset_ready`, `warmup_started`,
@@ -601,8 +623,9 @@ the normal web-run, destroy, and history-deletion ownership races.
 
 ## AWS and OCI operator qualification
 
-`scripts/qualify_aws_oci_deathstarbench_distributed.py` is the only supported
-entrypoint for the unreleased AWS and OCI candidates. It takes an explicit
+`scripts/qualify_aws_oci_deathstarbench_distributed.py` is the supported
+standalone operator-qualification entrypoint for the AWS and OCI distributed
+adapters. It takes an explicit
 `--provider aws|oci`, acquires the shared per-run lease, persists the plan,
 image-lock copy, and immutable `distributed-provider-pin.json` before the first
 cloud write, and then uses only that saved identity for resume and cleanup. The
@@ -869,8 +892,9 @@ and projected no recoverable ownership.
 This is deliberately a representative checkpoint failure matrix. AWS and OCI
 do not claim live active-signal or cleanup-interruption coverage. Those paths
 remain synthetically covered, but they are not part of this live matrix. The
-operator-path prerequisite gates are complete; public UI/API lifecycle
-integration remains separate.
+operator-path prerequisite gates are complete. The normal UI/API lifecycle now
+uses the same contracts and keeps these operator runs as independent recovery
+and failure-path evidence.
 
 ## GCP operator qualification
 
@@ -1114,8 +1138,8 @@ is deployment evidence, not a benchmark result.
   `663e0bfaefa3d7ae19eae2430e0cc5bdcf1ccfe6c858927c2b0d4b1f5ab472e5`
   and validated lock fingerprint
   `sha256:e5435057d7813e563f6c4f40e7d877660326d83a87ce1df805f9440e161487d4`.
-  Its `released` field was `false`; the current schema-v2 lock also remains
-  unreleased.
+  Its `released` field was `false`; that historical qualification identity is
+  retained, while the current schema-v2 lock is released.
 - Qualification job `25cad0331731` ran merged runtime-v5 commit
   `ecf5e03474c5b5df2541d9a21f5e2516da94923f` in Azure `eastus2`, zone 1.
   Control, cache, and load generator used `Standard_D2as_v7`; database used
@@ -1317,7 +1341,7 @@ matches the conjunction of the provider matrices. One run may legitimately
 cover multiple scenarios, but it still has to be covered by both evidence
 classes. The reviewed receipt now validates as `complete`.
 
-The release and UI gates remain closed. GCP has representative forbidden
+The prerequisite release gates are complete. GCP has representative forbidden
 paths, safe pre-initialization recovery, unsafe post-initialization cleanup-only,
 initializer response loss, cleanup interruption, and active-work signal
 evidence in addition to positive deployment and measurement. AWS and OCI have
@@ -1325,7 +1349,9 @@ completed their representative checkpoint matrices. They do not claim live
 active-signal or cleanup-interruption coverage. Azure now has safe resume,
 initializer-response-loss, unsafe-resume-refusal, and cleanup-only evidence.
 The immutable load driver and cross-provider cleanup receipt are also
-qualified. The remaining release work is public UI/API lifecycle integration.
+qualified. Public UI/API lifecycle integration and the coordinated release
+transition are implemented; the public gate still fails closed if any one of
+the five checked-in release signals diverges.
 
 ## Network and access policy
 
@@ -1395,6 +1421,15 @@ order and performs fresh absence lookups across the complete graph before
 forgetting any ownership metadata. Partial deletion leaves the remaining
 contract recoverable by `--cleanup-only`.
 
+Azure and GCP replace their cleared provider contract and persist
+`distributed_provider_terminal_v1` in one state transition only after that
+independent absence proof succeeds. The marker is bound to the provider, run
+ID, topology, and runtime; copying, truncating, or adding unknown state makes
+the run recoverable and blocks history deletion. An empty saved resource map
+is never terminal evidence after restart. The separate no-cloud-mutation
+preflight marker is likewise run-bound and can be created only by the live job
+that still holds its non-persisted preflight proof.
+
 For AWS, cleanup reconstructs the exact tagged resource graph in the saved
 account, region, and availability zone. It refuses drift in routes, security
 groups, ENIs, public-address policy, key material, EBS attachments, boot-volume
@@ -1446,8 +1481,8 @@ absence, while any ambiguity leaves the durable graph available to
    workflow published the candidate, the exact digest lock is checked in, and
    positive qualification on all four providers passed with the same renderer
    and attestor. All four providers passed the representative
-   required/forbidden cloud and Kubernetes policy probes. The release and UI
-   gates stay closed.
+   required/forbidden cloud and Kubernetes policy probes. The five exact
+   runtime/workload release signals are now released as one fail-closed bundle.
 6. **Implemented and positively live-qualified on all four provider
    candidates:** deterministic Reed98 initialization, durable
    at-most-once dispatch and reconciliation, exact database cardinality checks,
@@ -1476,10 +1511,11 @@ absence, while any ambiguity leaves the durable graph available to
    complete. Azure's corresponding safe and unsafe paths are also retained in
    the reviewed cleanup receipt. Neither AWS nor OCI claims live active-signal
    or cleanup-interruption coverage from this matrix.
-8. **Next release slice:** expose the topology in the plan model and UI, route
-   normal API create/run/report/stop/restart/manual-destroy operations through
-   the distributed lifecycle, prove those public paths, and transition the
-   coordinated runtime/workload release flags.
+8. **Implemented:** expose the topology in the plan model and UI, route normal
+   API create/run/report/stop/restart/manual-destroy operations through the
+   distributed lifecycle, prove those public paths, and transition the
+   coordinated runtime/workload release flags. The five flags must all be true
+   for public preflight, and every run snapshots the validated image lock.
 9. **Planned:** per-role CPU, memory, network, disk, restart, and readiness
    telemetry.
 10. **Planned:** offered-load sweeps, repeated trials, and
@@ -1487,7 +1523,7 @@ absence, while any ambiguity leaves the durable graph available to
 11. **Planned:** advanced per-role shape selection and later topology
    revisions.
 
-The UI exposes only released profiles. The prerequisite operator-path gates
-are complete, but the public product-integration slice in step 8 has not been
-implemented or qualified. Until that coordinated release transition, the
-existing compact mode remains the only normal UI/API option.
+The UI exposes only released profiles. Both compact mode and the exact
+five-node distributed Social Network/K3s profile are normal UI/API options;
+unknown topology/runtime pairs and partially transitioned release bundles
+continue to fail closed.

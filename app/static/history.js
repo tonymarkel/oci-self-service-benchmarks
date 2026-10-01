@@ -44,6 +44,10 @@ const providerNames = {
     gcp: 'GCP',
     azure: 'Azure',
 };
+const deathstarTopologyNames = {
+    single_host_v1: 'Compact / single-host',
+    distributed_tiered_v1: 'Distributed tiered / K3s (5 VMs)',
+};
 let allRuns = [];
 let selectedRunIds = new Set();
 let comparisonData = null;
@@ -74,6 +78,37 @@ function architectureFor(run) {
         || '—';
 }
 
+function hasDeathstarbench(run) {
+    const resultEvidence = Array.isArray(run?.results)
+        ? run.results.flatMap(result => [result?.id, result?.name])
+        : [];
+    const evidence = [
+        ...(Array.isArray(run?.benchmarks) ? run.benchmarks : []),
+        ...(Array.isArray(run?.plan?.benchmarks) ? run.plan.benchmarks : []),
+        ...(Array.isArray(run?.comparison_result_ids)
+            ? run.comparison_result_ids
+            : []),
+        ...resultEvidence,
+    ];
+    return evidence.some(value => (
+        String(value || '').toLowerCase().includes('deathstarbench')
+    ));
+}
+
+function deathstarTopologyIdFor(run) {
+    if (!hasDeathstarbench(run)) return null;
+    const options = runField(run, 'deathstarbench');
+    return runField(run, 'deathstarbench_topology_id')
+        || options?.topology_id
+        || 'single_host_v1';
+}
+
+function deathstarTopologyLabelFor(run) {
+    const topologyId = deathstarTopologyIdFor(run);
+    if (!topologyId) return null;
+    return deathstarTopologyNames[topologyId] || topologyId;
+}
+
 function comparisonResultIds(run) {
     const ids = run?.comparison_result_ids;
     return Array.isArray(ids) ? ids.map(String).filter(Boolean) : [];
@@ -99,6 +134,8 @@ function searchableText(run) {
         runField(run, 'gcp_zone'),
         runField(run, 'shape'),
         architectureFor(run),
+        deathstarTopologyIdFor(run),
+        deathstarTopologyLabelFor(run),
         ...(run?.benchmarks || []),
     ].filter(Boolean).join(' ').toLowerCase();
 }
@@ -371,6 +408,8 @@ function renderRun(run) {
     addMeta(meta, shapeLabel, run.shape);
     addMeta(meta, fixedCapacity ? 'vCPUs' : 'OCPUs', run.ocpus);
     addMeta(meta, 'Memory', run.memory_gb === null || run.memory_gb === undefined ? null : `${run.memory_gb} GB`);
+    const topologyLabel = deathstarTopologyLabelFor(run);
+    if (topologyLabel) addMeta(meta, 'Topology', topologyLabel);
     addMeta(meta, 'Benchmarks', (run.benchmarks || []).join(', ') || '—');
 
     const actions = document.createElement('div');
@@ -751,6 +790,8 @@ if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
         comparisonDomain,
         comparisonResultIds,
+        deathstarTopologyIdFor,
+        deathstarTopologyLabelFor,
         isCompletedRun,
         matchesFilters,
         percentFromBaseline,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the unreleased distributed DeathStarBench GCP qualification safely.
+"""Run the distributed DeathStarBench GCP qualification safely.
 
 The harness creates the exact five-role Compute Engine candidate, installs the
 same pinned K3s runtime and immutable Social Network bundle used by Azure, and

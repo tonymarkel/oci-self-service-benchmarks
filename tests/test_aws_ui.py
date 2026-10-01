@@ -222,7 +222,7 @@ class AwsUiTests(unittest.TestCase):
         self.assertIn('hidden', parser.elements['destroyInterrupted'][1])
         self.assertIn('function renderJobProgress(job)', JAVASCRIPT)
         self.assertIn('recordedResourceEntries(job)', JAVASCRIPT)
-        self.assertIn("['interrupted', 'cleanup_failed'].includes(job.status)", JAVASCRIPT)
+        self.assertIn('canDestroyRecoverableJob(job)', JAVASCRIPT)
         resume_start = JAVASCRIPT.index('async function resumeLastJob()')
         resume_end = JAVASCRIPT.index('function leaveReport()', resume_start)
         self.assertIn('renderJobProgress(job);', JAVASCRIPT[resume_start:resume_end])
@@ -234,7 +234,7 @@ class AwsUiTests(unittest.TestCase):
         scripts = re.findall(r'/static/app\.js\?v=(\d+)', INDEX)
 
         self.assertEqual(styles, ['19'])
-        self.assertEqual(scripts, ['33'])
+        self.assertEqual(scripts, ['35'])
 
     def test_hidden_provider_controls_cannot_be_overridden_by_label_layout(self):
         styles = (ROOT / 'app/static/styles.css').read_text()

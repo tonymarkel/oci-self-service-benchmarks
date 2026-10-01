@@ -1,5 +1,11 @@
+from .deathstarbench_contract import (
+    DISTRIBUTED_TIERED_PROFILE,
+    SINGLE_HOST_PROFILE,
+)
+
+
 BENCHMARKS = [
-    {"id": "deathstarbench", "category": "Comprehensive", "name": "DeathStarBench", "description": "Runs a selectable cloud-microservices workload with native Podman and a separate load-generator VM.", "requires_data": False},
+    {"id": "deathstarbench", "category": "Comprehensive", "name": "DeathStarBench", "description": "Runs a selectable cloud-microservices workload in a compact two-VM Podman deployment or a released five-VM K3s tiered topology.", "requires_data": False},
     {"id": "apachebench", "category": "Comprehensive", "name": "ApacheBench", "description": "Measures Apache HTTP Server throughput and latency over the private VCN from a separate load-generator VM.", "requires_data": False},
     {"id": "sysbench", "category": "Comprehensive", "name": "Sysbench", "description": "Runs one or more selectable CPU, memory, and file I/O workloads."},
     {"id": "phoronix", "category": "Comprehensive", "name": "Phoronix Test Suite", "description": "Runs one or more selectable, pinned OpenBenchmarking CPU and memory profiles.", "requires_data": False},
@@ -116,4 +122,43 @@ DEATHSTARBENCH_WORKLOADS = [
         "name": "Social Network",
         "description": "Mixed post composition and timeline reads across the social-network service graph.",
     },
+]
+
+
+def _deathstarbench_topology(profile, *, description, workloads):
+    """Return public, serializable topology metadata for the plan UI."""
+
+    return {
+        "topology_id": profile.topology_id,
+        "runtime_id": profile.runtime_id,
+        "name": profile.label,
+        "description": description,
+        "node_count": profile.node_count,
+        "roles": list(profile.roles),
+        "workloads": list(workloads),
+        "released": profile.released,
+    }
+
+
+DEATHSTARBENCH_TOPOLOGIES = [
+    _deathstarbench_topology(
+        SINGLE_HOST_PROFILE,
+        description=(
+            "Runs the selected service graph on one benchmark VM with native "
+            "Podman and uses a separate load-generator VM."
+        ),
+        workloads=(
+            "media_microservices",
+            "hotel_reservation",
+            "social_network",
+        ),
+    ),
+    _deathstarbench_topology(
+        DISTRIBUTED_TIERED_PROFILE,
+        description=(
+            "Runs Social Network across application, database, cache, and "
+            "control VMs with K3s, plus a separate load-generator VM."
+        ),
+        workloads=("social_network",),
+    ),
 ]

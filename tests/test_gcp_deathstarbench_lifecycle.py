@@ -3,8 +3,11 @@ import unittest
 from unittest.mock import patch
 
 from app.deathstarbench_contract import (
+    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+    DISTRIBUTED_PROVIDER_TERMINAL_KEY,
     DISTRIBUTED_TIERED_TOPOLOGY_ID,
     K3S_RUNTIME_ID,
+    distributed_provider_terminal_marker,
 )
 from app.deathstarbench_distributed import gcp_k3s_candidate_plan
 from app.providers import gcp
@@ -85,7 +88,18 @@ class DistributedResourceService(ResourceService):
                 }
             attached.append(actual)
         body['disks'] = attached
+        body['status'] = 'RUNNING'
         self.items[name] = body
+        return Operation()
+
+    def stop(self, request):
+        if self.kind != 'instance':
+            raise AssertionError(f'Unexpected {self.kind} stop')
+        name = request['instance']
+        self.timeline.append(('stop', self.kind, name, copy.deepcopy(request)))
+        if name not in self.items:
+            raise NotFound(name)
+        self.items[name]['status'] = 'TERMINATED'
         return Operation()
 
     def patch(self, request):
@@ -408,6 +422,7 @@ class GcpDistributedDeathStarBenchLifecycleTests(unittest.TestCase):
     def test_cleanup_is_verified_complete_and_idempotent(self):
         clients, timeline = candidate_clients()
         job = {'id': 'gcpdsb02', 'resources': {}}
+        persisted_resources = []
         gcp.provision_distributed_deathstarbench_candidate(
             job,
             candidate_plan(),
@@ -417,8 +432,14 @@ class GcpDistributedDeathStarBenchLifecycleTests(unittest.TestCase):
         timeline.clear()
 
         with patch.object(gcp, 'RECONCILIATION_DELAY_SECONDS', 0):
-            gcp.destroy_resources(job, clients=clients)
-            gcp.destroy_resources(job, clients=clients)
+            for _ in range(2):
+                gcp.destroy_resources(
+                    job,
+                    clients=clients,
+                    persist=lambda current: persisted_resources.append(
+                        copy.deepcopy(current['resources'])
+                    ),
+                )
 
         self.assertEqual(job['status'], 'destroyed')
         self.assertFalse(clients['instances'].items)
@@ -431,9 +452,111 @@ class GcpDistributedDeathStarBenchLifecycleTests(unittest.TestCase):
         self.assertFalse(any(
             key.startswith('gcp_') for key in job['resources']
         ))
+        expected_terminal = distributed_provider_terminal_marker(
+            'gcp',
+            job['id'],
+        )
+        self.assertEqual(
+            job['resources'][DISTRIBUTED_PROVIDER_TERMINAL_KEY],
+            expected_terminal,
+        )
+        cleared_contract_states = [
+            resources for resources in persisted_resources
+            if 'gcp_distributed_candidate' not in resources
+        ]
+        self.assertTrue(cleared_contract_states)
+        self.assertTrue(all(
+            resources.get(DISTRIBUTED_PROVIDER_TERMINAL_KEY)
+            == expected_terminal
+            for resources in cleared_contract_states
+        ))
         delete_kinds = [event[1] for event in timeline if event[0] == 'delete']
         self.assertEqual(delete_kinds[:5], ['instance'] * 5)
         self.assertEqual(delete_kinds[-1], 'network')
+
+    def test_load_generator_is_stopped_before_foreign_graph_refusal(self):
+        clients, timeline = candidate_clients()
+        job = {'id': 'gcpdsb11', 'resources': {}}
+        gcp.provision_distributed_deathstarbench_candidate(
+            job,
+            candidate_plan(),
+            public_key=PUBLIC_KEY,
+            clients=clients,
+        )
+        job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
+            'state': 'measurement_started',
+        }
+        firewall = clients['firewalls'].items[
+            'benchmark-gcpdsb11-dsb-benchmark'
+        ]
+        firewall['target_tags'].append('foreign-target')
+        timeline.clear()
+
+        with self.assertRaisesRegex(RuntimeError, 'target_tags differs'):
+            gcp.destroy_resources(job, clients=clients)
+
+        mutations = [event[0] for event in timeline if event[0] in {'stop', 'delete'}]
+        self.assertEqual(mutations, ['stop'])
+        loadgen = clients['instances'].items[
+            'benchmark-gcpdsb11-dsb-load-generator'
+        ]
+        self.assertEqual(loadgen['status'], 'TERMINATED')
+        self.assertIn(
+            DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+            job['resources'],
+        )
+
+    def test_load_generator_stop_is_replay_safe(self):
+        clients, timeline = candidate_clients()
+        job = {'id': 'gcpdsb12', 'resources': {}}
+        gcp.provision_distributed_deathstarbench_candidate(
+            job,
+            candidate_plan(),
+            public_key=PUBLIC_KEY,
+            clients=clients,
+        )
+        job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
+            'state': 'measurement_started',
+        }
+        timeline.clear()
+
+        self.assertTrue(
+            gcp.quiesce_distributed_deathstarbench_load_generator(
+                job, clients=clients,
+            )
+        )
+        self.assertFalse(
+            gcp.quiesce_distributed_deathstarbench_load_generator(
+                job, clients=clients,
+            )
+        )
+        self.assertEqual(
+            sum(event[0] == 'stop' for event in timeline),
+            1,
+        )
+
+    def test_load_generator_stop_rejects_changed_identity(self):
+        clients, timeline = candidate_clients()
+        job = {'id': 'gcpdsb13', 'resources': {}}
+        gcp.provision_distributed_deathstarbench_candidate(
+            job,
+            candidate_plan(),
+            public_key=PUBLIC_KEY,
+            clients=clients,
+        )
+        job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
+            'state': 'measurement_started',
+        }
+        name = 'benchmark-gcpdsb13-dsb-load-generator'
+        clients['instances'].items[name]['id'] = '999999'
+        timeline.clear()
+
+        with self.assertRaisesRegex(RuntimeError, 'not recorded ID'):
+            gcp.quiesce_distributed_deathstarbench_load_generator(
+                job, clients=clients,
+            )
+
+        self.assertFalse(any(event[0] == 'stop' for event in timeline))
 
     def test_resume_rejects_same_name_resource_with_new_numeric_id(self):
         clients, _ = candidate_clients()
@@ -569,11 +692,11 @@ class GcpDistributedDeathStarBenchLifecycleTests(unittest.TestCase):
 
         self.assertFalse(any(event[0] == 'delete' for event in timeline))
 
-    def test_ordinary_provider_rejects_unreleased_distributed_runtime(self):
+    def test_compact_provider_rejects_distributed_runtime(self):
         clients, timeline = candidate_clients()
         job = {'id': 'gcpdsb05', 'resources': {}}
 
-        with self.assertRaisesRegex(ValueError, 'not released'):
+        with self.assertRaisesRegex(ValueError, 'public distributed lifecycle'):
             gcp.provision(
                 job,
                 candidate_plan(),

@@ -12,6 +12,7 @@ from app.deathstarbench_contract import (
 from app.deathstarbench_k3s_workload import (
     ASSET_DIRECTORY,
     AUDITED_COMPONENT_EDGES,
+    COMPONENT_ASSET,
     CPP_ENTRYPOINTS,
     DATABASE_ROOT,
     EXPECTED_COMPONENTS,
@@ -23,6 +24,7 @@ from app.deathstarbench_k3s_workload import (
     MEMCACHED_COMPONENTS,
     MONGODB_COMPONENTS,
     NAMESPACE,
+    NETWORK_POLICY_ASSET,
     REDIS_COMPONENTS,
     REQUIRED_IMAGE_KEYS,
     UPSTREAM_REVISION,
@@ -30,6 +32,8 @@ from app.deathstarbench_k3s_workload import (
     WorkloadBundleError,
     parse_workload_execution_attestation,
     parse_workload_attestation,
+    distributed_bundle_release_flags,
+    require_released_distributed_bundle,
     render_social_network_bundle,
     render_workload_bundle,
     render_workload_documents,
@@ -193,9 +197,9 @@ class ImageLockTests(unittest.TestCase):
         extra['channel'] = 'stable'
         cases.append(extra)
 
-        released = image_lock()
-        released['released'] = True
-        cases.append(released)
+        invalid_release_flag = image_lock()
+        invalid_release_flag['released'] = 'true'
+        cases.append(invalid_release_flag)
 
         placeholder_marked_published = image_lock()
         placeholder_marked_published['load_driver']['image'] = (
@@ -211,6 +215,73 @@ class ImageLockTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(WorkloadBundleError):
                     validate_image_lock(value)
+
+    def test_boolean_candidate_and_release_states_are_both_valid(self):
+        candidate = validate_image_lock(image_lock())
+        released = image_lock()
+        released['released'] = True
+        released = validate_image_lock(released)
+
+        self.assertIs(candidate.released, False)
+        self.assertIs(released.released, True)
+
+    def test_checked_in_release_bundle_is_coherently_released(self):
+        lock_path = (
+            Path(__file__).resolve().parents[1]
+            / 'docs'
+            / 'qualification'
+            / 'deathstarbench-social-network-images-v1.json'
+        )
+        lock = json.loads(lock_path.read_text())
+
+        self.assertEqual(
+            dict(distributed_bundle_release_flags(lock)),
+            {
+                'runtime_profile': True,
+                'image_lock': True,
+                'load_driver': True,
+                'component_asset': True,
+                'network_policy_asset': True,
+            },
+        )
+        self.assertIs(require_released_distributed_bundle(lock).released, True)
+
+        candidate = copy.deepcopy(lock)
+        candidate['released'] = False
+        with self.assertRaisesRegex(
+            WorkloadBundleError,
+            'image_lock=false',
+        ):
+            require_released_distributed_bundle(candidate)
+
+    def test_unpublished_placeholder_load_driver_fails_release_gate(self):
+        lock_path = (
+            Path(__file__).resolve().parents[1]
+            / 'docs'
+            / 'qualification'
+            / 'deathstarbench-social-network-images-v1.json'
+        )
+        candidate = json.loads(lock_path.read_text())
+        candidate['load_driver'].update({
+            'image': (
+                'ghcr.io/example/deathstarbench-load-driver@sha256:'
+                + '0' * 64
+            ),
+            'published': False,
+            'context_sha256': '0' * 64,
+            'wrk_binary_sha256': '0' * 64,
+            'wrk2_source_sha256': '0' * 64,
+        })
+
+        self.assertFalse(validate_image_lock(candidate).load_driver.published)
+        self.assertFalse(
+            distributed_bundle_release_flags(candidate)['load_driver']
+        )
+        with self.assertRaisesRegex(
+            WorkloadBundleError,
+            'load_driver=false',
+        ):
+            require_released_distributed_bundle(candidate)
 
     def test_platforms_require_same_repository_and_distinct_references(self):
         mismatch = image_lock()
@@ -237,7 +308,7 @@ class WorkloadRenderTests(unittest.TestCase):
             '10.240.2.10',
         )
 
-    def test_checked_in_assets_are_unreleased_and_contain_no_image_digests(self):
+    def test_checked_in_assets_are_released_and_contain_no_image_digests(self):
         self.assertEqual(
             {path.name for path in ASSET_DIRECTORY.iterdir()},
             {'components.json', 'network-policies.json'},
@@ -247,7 +318,11 @@ class WorkloadRenderTests(unittest.TestCase):
             for path in sorted(ASSET_DIRECTORY.iterdir())
             if path.is_file()
         )
-        self.assertIn('"released": false', combined)
+        self.assertIs(json.loads(COMPONENT_ASSET.read_text())['released'], True)
+        self.assertIs(
+            json.loads(NETWORK_POLICY_ASSET.read_text())['released'],
+            True,
+        )
         self.assertNotIn('@sha256:', combined)
         self.assertNotIn(':latest', combined)
         self.assertNotIn('server.key', combined)

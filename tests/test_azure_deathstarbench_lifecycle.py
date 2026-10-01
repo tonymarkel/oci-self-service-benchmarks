@@ -4,11 +4,13 @@ import unittest
 from app.deathstarbench_contract import (
     DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
     DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
+    DISTRIBUTED_PROVIDER_TERMINAL_KEY,
     DISTRIBUTED_TIERED_TOPOLOGY_ID,
     K3S_RUNTIME_ID,
     K3S_RUNTIME_JOURNAL_KEY,
     PODMAN_COMPOSE_RUNTIME_ID,
     SINGLE_HOST_TOPOLOGY_ID,
+    distributed_provider_terminal_marker,
 )
 from app.providers import azure
 from app.deathstarbench_distributed import azure_k3s_candidate_plan
@@ -347,6 +349,7 @@ class AzureDeathStarBenchLifecycleTests(unittest.TestCase):
 
     def test_distributed_candidate_cleanup_clears_nested_contract_state(self):
         clients, job = self._provision_distributed('dsbcleanup')
+        persisted_resources = []
         job['resources'][K3S_RUNTIME_JOURNAL_KEY] = {
             'state': 'cluster_ready',
         }
@@ -374,7 +377,13 @@ class AzureDeathStarBenchLifecycleTests(unittest.TestCase):
 
         clients['resource_groups'].begin_delete = begin_delete
 
-        azure.destroy_resources(job, clients=clients)
+        azure.destroy_resources(
+            job,
+            clients=clients,
+            persist=lambda current: persisted_resources.append(
+                copy.deepcopy(current['resources'])
+            ),
+        )
 
         self.assertEqual(
             virtual_machines.deallocate_calls,
@@ -414,6 +423,24 @@ class AzureDeathStarBenchLifecycleTests(unittest.TestCase):
         )
         self.assertFalse(any(
             key.startswith('azure_') for key in job['resources']
+        ))
+        expected_terminal = distributed_provider_terminal_marker(
+            'azure',
+            job['id'],
+        )
+        self.assertEqual(
+            job['resources'][DISTRIBUTED_PROVIDER_TERMINAL_KEY],
+            expected_terminal,
+        )
+        cleared_contract_states = [
+            resources for resources in persisted_resources
+            if 'azure_distributed_candidate' not in resources
+        ]
+        self.assertTrue(cleared_contract_states)
+        self.assertTrue(all(
+            resources.get(DISTRIBUTED_PROVIDER_TERMINAL_KEY)
+            == expected_terminal
+            for resources in cleared_contract_states
         ))
         for key in (
             'instance_id',
@@ -1224,11 +1251,11 @@ class AzureDeathStarBenchLifecycleTests(unittest.TestCase):
                         f'{model_class.__name__} did not preserve {body!r}',
                     )
 
-    def test_normal_provision_rejects_unreleased_distributed_contract(self):
+    def test_compact_provision_rejects_distributed_contract(self):
         clients = self._distributed_clients()
         job = {'id': 'dsbgate', 'resources': {}}
 
-        with self.assertRaisesRegex(ValueError, 'not released yet'):
+        with self.assertRaisesRegex(ValueError, 'public distributed lifecycle'):
             azure.provision(
                 job,
                 self._distributed_plan(),

@@ -161,7 +161,7 @@ def _validate_inputs(inputs):
     if set(inputs) != expected:
         raise LifecycleError('OCI candidate requires an exact explicit input contract.')
     for key in ('compartment_id', 'application_image_id', 'support_image_id'):
-        prefix = 'compartment' if key == 'compartment_id' else 'image'
+        prefix = '(?:compartment|tenancy)' if key == 'compartment_id' else 'image'
         if not re.fullmatch(rf'ocid1\.{prefix}\.[a-zA-Z0-9._-]+', str(inputs[key])):
             raise LifecycleError(f'Invalid pinned {key}.')
     for key in ('availability_domain', 'region', 'shape'):
@@ -1260,6 +1260,64 @@ def _verify_graph(contract, clients):
             raise LifecycleError('Subnet contains an untracked private IP or VNIC.')
 
 
+def quiesce_distributed_deathstarbench_load_generator(job, *, clients):
+    """Stop only the exact owned load generator before whole-graph cleanup.
+
+    The execution journal is durable evidence that the remote load unit may
+    still be active.  Validate the candidate and the load generator's complete
+    instance/VNIC/boot boundary, while deliberately leaving unrelated graph
+    validation to the stricter deletion gate that follows.
+    """
+    resources = job.get('resources', {})
+    if DEATHSTARBENCH_EXECUTION_JOURNAL_KEY not in resources:
+        return False
+    contract = validate_distributed_deathstarbench_candidate(job)
+    for name in ('compute', 'network', 'block'):
+        client = clients.get(name) if isinstance(clients, dict) else None
+        if client is None or getattr(client, '_config', {}).get('region') != (
+            contract['inputs']['region']
+        ):
+            raise LifecycleError(
+                'OCI load-generator stop client region differs from the '
+                'saved contract.'
+            )
+    entry = contract['entries']['load-generator']
+    if entry['status'] in {'planned', 'deleted'} or not entry.get('id'):
+        return False
+    observed = _verify(entry, contract, clients)
+    if observed is None:
+        return False
+    # This reuses the existing instance child validator, including exact VNIC,
+    # boot-volume, and attachment identities.  It mutates only this detached
+    # contract copy and never discards persisted recovery evidence.
+    _implicit(entry, contract, clients)
+    state, etag = observed[0].get('lifecycle_state'), observed[1]
+    quiet_states = {'STOPPING', 'STOPPED', 'TERMINATING', 'TERMINATED'}
+    if state in quiet_states:
+        return False
+    if state != 'RUNNING':
+        raise LifecycleError(
+            'OCI load-generator lifecycle state is unsupported for stop: '
+            f'{state or "missing"}.'
+        )
+    try:
+        clients['compute'].instance_action(
+            entry['id'],
+            'STOP',
+            if_match=etag,
+            retry_strategy=sdk.retry.NoneRetryStrategy(),
+        )
+    except Exception:
+        refreshed = _verify(entry, contract, clients)
+        if refreshed is None or refreshed[0].get('lifecycle_state') in quiet_states:
+            return True
+        raise
+    refreshed = _verify(entry, contract, clients)
+    if refreshed is not None and refreshed[0].get('lifecycle_state') not in quiet_states:
+        raise LifecycleError('OCI load-generator stop was not confirmed.')
+    return True
+
+
 def destroy_distributed_deathstarbench_candidate(job, *, clients, persist, emit=None):
     """Delete only the fully verified candidate graph, retaining recovery state."""
     if not callable(persist):
@@ -1272,6 +1330,7 @@ def destroy_distributed_deathstarbench_candidate(job, *, clients, persist, emit=
         if not distributed_candidate_is_deleted(job):
             raise LifecycleError('OCI deleted marker lacks complete, consistent cleanup evidence.')
         return
+    quiesce_distributed_deathstarbench_load_generator(job, clients=clients)
     for entry in contract['entries'].values():
         if not entry.get('id') and entry['status'] != 'planned':
             entry['id'] = _recover(entry, contract, clients)

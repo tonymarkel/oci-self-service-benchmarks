@@ -1,9 +1,10 @@
 # AWS distributed DeathStarBench infrastructure candidate
 
-This is an **operator-only infrastructure candidate**, not a released
-benchmark. The normal provider entrypoint still rejects the unreleased
-`distributed_tiered_v1/k3s_v1` profile, and there is no new UI or public API.
-The separate operator wrapper now connects this infrastructure adapter to the
+This document describes the **operator qualification surface** for the
+released `distributed_tiered_v1/k3s_v1` benchmark. The compact provider
+entrypoint still rejects direct distributed calls so callers cannot bypass the
+coordinated public lifecycle gate; the normal UI/API uses that guarded public
+dispatcher. The separate operator wrapper connects this infrastructure adapter to the
 shared K3s bootstrap, Social Network workload, network qualification, optional
 measurement path, resume, and cleanup-only machinery. See
 `docs/deathstarbench-distributed.md` for the complete current contract and live
@@ -178,7 +179,6 @@ matrix.
 
 Operator execution must use
 `scripts/qualify_aws_oci_deathstarbench_distributed.py`; the provider helpers
-do not create or manage a process lease themselves. The candidate remains
-unreleased. The operator-path prerequisite gates are complete; public UI/API
-lifecycle integration and the coordinated release-flag transition remain a
-separate slice.
+do not create or manage a process lease themselves. The operator-path
+prerequisite gates, public UI/API lifecycle integration, and coordinated
+release-flag transition are complete.

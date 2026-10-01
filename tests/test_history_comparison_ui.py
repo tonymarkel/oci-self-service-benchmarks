@@ -247,7 +247,7 @@ process.stdout.write(JSON.stringify({
 
     def test_changed_assets_are_cache_busted_everywhere(self):
         self.assertIn('/static/comparison-view.js?v=1', HISTORY_HTML)
-        self.assertIn('/static/history.js?v=17', HISTORY_HTML)
+        self.assertIn('/static/history.js?v=18', HISTORY_HTML)
         self.assertIn('/static/styles.css?v=19', HISTORY_HTML)
         self.assertIn('/static/styles.css?v=19', INDEX_HTML)
 

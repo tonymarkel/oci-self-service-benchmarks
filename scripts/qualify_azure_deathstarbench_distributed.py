@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the unreleased distributed DeathStarBench Azure qualification safely.
+"""Run the distributed DeathStarBench Azure qualification safely.
 
 This is an operator-only harness.  It persists the complete ownership
 contract before Azure writes, deploys the candidate topology/runtime, and by

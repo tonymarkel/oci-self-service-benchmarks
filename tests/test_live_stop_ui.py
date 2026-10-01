@@ -3,6 +3,9 @@ import unittest
 from html.parser import HTMLParser
 from pathlib import Path
 
+from app import main
+from app.providers import aws, oci
+
 
 ROOT = Path(__file__).resolve().parents[1]
 INDEX = (ROOT / 'app/static/index.html').read_text()
@@ -24,6 +27,29 @@ class ElementIndex(HTMLParser):
 
 
 class LiveStopUiTests(unittest.TestCase):
+    @staticmethod
+    def partial_distributed_job(provider, status):
+        ownership_key = (
+            aws.AWS_DSB_GRAPH_KEY
+            if provider == 'aws'
+            else oci.CONTRACT_KEY
+        )
+        return {
+            'id': '123456789abc',
+            'status': status,
+            'plan': {
+                'provider': provider,
+                'benchmarks': ['deathstarbench'],
+                'llm_benchmarks': [],
+                'deathstarbench': {
+                    'topology_id': 'distributed_tiered_v1',
+                    'runtime_id': 'k3s_v1',
+                    'workload': 'social_network',
+                },
+            },
+            'resources': {ownership_key: {}},
+        }
+
     def test_live_stop_action_is_shared_prominent_and_accessible(self):
         parser = ElementIndex()
         parser.feed(INDEX)
@@ -84,6 +110,22 @@ class LiveStopUiTests(unittest.TestCase):
             JAVASCRIPT,
         )
 
+    def test_rejected_destroy_keeps_retry_action_and_surfaces_api_detail(self):
+        start = JAVASCRIPT.index('async function destroyCurrentJob(button)')
+        end = JAVASCRIPT.index(
+            "$('#stopAndDestroy').addEventListener",
+            start,
+        )
+        destroy = JAVASCRIPT[start:end]
+        self.assertIn('button.disabled = true;', destroy)
+        self.assertIn('} catch (error) {', destroy)
+        self.assertIn('button.hidden = false;', destroy)
+        self.assertIn('button.disabled = false;', destroy)
+        self.assertIn(
+            '`Unable to destroy infrastructure: ${error.message}`',
+            destroy,
+        )
+
     def test_cancel_state_keeps_polling_through_cleanup(self):
         self.assertIn("status: response.status || 'cancelling'", JAVASCRIPT)
         self.assertIn("status: 'cancelling'", JAVASCRIPT)
@@ -97,27 +139,79 @@ class LiveStopUiTests(unittest.TestCase):
         self.assertIn("'destroyed'", JAVASCRIPT)
         self.assertIn("'cleanup_failed'", JAVASCRIPT)
 
-    def test_interrupted_recovery_destroy_action_is_preserved(self):
+    def test_recoverable_terminal_run_destroy_action_is_preserved(self):
         parser = ElementIndex()
         parser.feed(INDEX)
 
         self.assertEqual(parser.elements['destroyInterrupted'][0], 'button')
         self.assertIn(
-            "['interrupted', 'cleanup_failed'].includes(job.status)",
+            "const recoverableDestroyStatuses = ['complete', 'failed', "
+            "'cleanup_failed', 'interrupted'];",
             JAVASCRIPT,
         )
         self.assertIn(
-            'const recoverable = job.recoverable === true || (',
+            'function canDestroyRecoverableJob(job)',
             JAVASCRIPT,
         )
         self.assertIn(
-            "resources.some(([key]) => key.endsWith('_id'))",
+            'return job.recoverable === true',
+            JAVASCRIPT,
+        )
+        self.assertIn(
+            "recoverableDestroyStatuses.includes(job.status)",
             JAVASCRIPT,
         )
         self.assertIn(
             "destroyCurrentJob($('#destroyInterrupted'))",
             JAVASCRIPT,
         )
+
+    def test_failed_partial_distributed_contract_uses_backend_recovery_gate(self):
+        progress_start = JAVASCRIPT.index('function renderJobProgress(job)')
+        progress_end = JAVASCRIPT.index('function retainedConnections(job)', progress_start)
+        report_start = JAVASCRIPT.index('function showReport(job)')
+        report_end = JAVASCRIPT.index('async function poll()', report_start)
+        progress = JAVASCRIPT[progress_start:progress_end]
+        report = JAVASCRIPT[report_start:report_end]
+
+        # Partial AWS and OCI distributed identities live inside their durable
+        # provider contracts until runtime aliases are published. The backend's
+        # recoverable projection understands both graphs; the UI must not
+        # require a flat top-level resource ID before offering cleanup.
+        self.assertIn(
+            "$('#destroyInterrupted').hidden = !canDestroyRecoverableJob(job);",
+            progress,
+        )
+        self.assertIn(
+            'const canDestroy = canDestroyRecoverableJob(job);',
+            report,
+        )
+        self.assertNotIn('managedResourcesRemain', report)
+        self.assertNotIn("resources.some(([key]) => key.endsWith('_id'))", progress)
+        for provider in ('aws', 'oci'):
+            with self.subTest(provider=provider):
+                self.assertTrue(main.has_recoverable_resources(
+                    self.partial_distributed_job(provider, 'failed')
+                ))
+
+    def test_completed_retained_run_uses_the_same_backend_recovery_gate(self):
+        self.assertIn("'complete'", re.search(
+            r'const recoverableDestroyStatuses = \[(.*?)\];',
+            JAVASCRIPT,
+        ).group(1))
+        report_start = JAVASCRIPT.index('function showReport(job)')
+        report_end = JAVASCRIPT.index('async function poll()', report_start)
+        report = JAVASCRIPT[report_start:report_end]
+        self.assertIn('explicitlyRetained', report)
+        self.assertIn(
+            'const canDestroy = canDestroyRecoverableJob(job);',
+            report,
+        )
+        for provider in ('aws', 'oci'):
+            with self.subTest(provider=provider):
+                self.assertTrue(main.has_recoverable_resources(
+                    self.partial_distributed_job(provider, 'complete')
+                ))
 
     def test_reset_copy_explicitly_does_not_stop_a_run(self):
         normalized_index = ' '.join(INDEX.split())
@@ -138,7 +232,7 @@ class LiveStopUiTests(unittest.TestCase):
     def test_changed_assets_are_cache_busted(self):
         self.assertIn('/static/styles.css?v=19', INDEX)
         self.assertIn('/static/styles.css?v=19', HISTORY_INDEX)
-        self.assertIn('/static/app.js?v=33', INDEX)
+        self.assertIn('/static/app.js?v=35', INDEX)
 
 
 if __name__ == '__main__':

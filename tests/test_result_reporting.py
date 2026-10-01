@@ -357,7 +357,7 @@ class SavedResultReportingTests(unittest.TestCase):
 
                 self.assertTrue(status['recoverable'])
                 self.assertTrue(summary['recoverable'])
-                self.assertGreaterEqual(terminal.call_count, 2)
+                terminal.assert_not_called()
 
     def test_frontend_does_not_present_noncomplete_outcomes_as_success(self):
         root = Path(__file__).resolve().parents[1]

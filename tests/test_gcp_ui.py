@@ -82,7 +82,7 @@ class GcpUiTests(unittest.TestCase):
         ):
             self.assertIn(f"'{metadata_key}'", JAVASCRIPT)
         self.assertIn(
-            'const managedResourcesRemain = recordedResourceEntries(job)',
+            'const canDestroy = canDestroyRecoverableJob(job);',
             JAVASCRIPT,
         )
 

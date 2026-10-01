@@ -30,6 +30,7 @@ def distributed_plan():
         memory_gb=32,
         ssh_private_key='private-key',
         ssh_public_key='ssh-rsa public-key',
+        storage={'additional_volume': False},
         benchmarks=['deathstarbench'],
         deathstarbench={
             'topology_id': 'distributed_tiered_v1',
@@ -59,7 +60,7 @@ class DeathStarBenchRuntimeContractTests(unittest.TestCase):
         profile = runtime_profile('distributed_tiered_v1', 'k3s_v1')
 
         self.assertIs(profile, DISTRIBUTED_TIERED_PROFILE)
-        self.assertFalse(profile.released)
+        self.assertTrue(profile.released)
         self.assertRegex(K3S_VERSION, r'^v\d+\.\d+\.\d+\+k3s\d+$')
         self.assertIn(K3S_VERSION.removeprefix('v').replace('+', '-'), DISTRIBUTED_RUNTIME_REVISION)
         self.assertTrue(DISTRIBUTED_RUNTIME_REVISION.endswith('-v5'))
@@ -80,11 +81,14 @@ class DeathStarBenchRuntimeContractTests(unittest.TestCase):
             ('control', 'database', 'cache', 'application', 'load_generator'),
         )
 
-    def test_unknown_or_unreleased_profiles_fail_closed(self):
+    def test_unknown_profiles_fail_closed_and_released_profiles_resolve(self):
         with self.assertRaisesRegex(ValueError, 'Unsupported'):
             runtime_profile('single_host_v2', 'podman_compose_v1')
-        with self.assertRaisesRegex(ValueError, 'not released yet'):
-            require_released_runtime('distributed_tiered_v1', 'k3s_v1')
+
+        self.assertIs(
+            require_released_runtime('distributed_tiered_v1', 'k3s_v1'),
+            DISTRIBUTED_TIERED_PROFILE,
+        )
 
         self.assertIs(
             require_released_runtime('single_host_v1', 'podman_compose_v1'),
@@ -99,14 +103,32 @@ class DeathStarBenchRuntimeContractTests(unittest.TestCase):
                 SINGLE_HOST_PROFILE
             )
 
-    def test_unreleased_runtime_is_rejected_before_cloud_dispatch(self):
+    def test_released_runtime_routes_to_public_distributed_dispatch(self):
         plan = distributed_plan()
 
-        with patch.object(main, 'dispatch_provider_operation') as dispatch:
-            with self.assertRaisesRegex(ValueError, 'not released yet'):
-                main.provision({'resources': {}}, plan)
+        with (
+            patch.object(
+                main,
+                'load_run_distributed_image_lock',
+                return_value={'released': True},
+            ),
+            patch.object(
+                main,
+                'provision_public_distributed_deathstarbench',
+                return_value='distributed',
+            ) as distributed,
+            patch.object(main, 'dispatch_provider_operation') as dispatch,
+        ):
+            self.assertEqual(
+                main.provision(
+                    {'id': '123456789abc', 'resources': {}},
+                    plan,
+                ),
+                'distributed',
+            )
 
         dispatch.assert_not_called()
+        distributed.assert_called_once()
 
     def test_direct_legacy_plan_defaults_to_the_released_compact_contract(self):
         plan = SimpleNamespace(
@@ -127,15 +149,28 @@ class DeathStarBenchRuntimeContractTests(unittest.TestCase):
 
         dispatch.assert_called_once()
 
-    def test_job_api_rejects_unreleased_runtime_before_creating_a_run(self):
+    def test_job_api_checks_coordinated_bundle_before_key_validation(self):
         plan = distributed_plan()
 
-        with patch.object(main, 'derive_public_key') as derive:
+        with (
+            patch.object(
+                main,
+                'preflight_distributed_deathstarbench_release',
+                side_effect=main.PublicDistributedLifecycleError(
+                    'coordinated release marker',
+                ),
+            ) as preflight,
+            patch.object(main, 'derive_public_key') as derive,
+        ):
             with self.assertRaises(HTTPException) as raised:
                 asyncio.run(main.create_job(plan))
 
         self.assertEqual(raised.exception.status_code, 422)
-        self.assertIn('not released yet', raised.exception.detail)
+        self.assertEqual(
+            raised.exception.detail,
+            'coordinated release marker',
+        )
+        preflight.assert_called_once_with()
         derive.assert_not_called()
 
 

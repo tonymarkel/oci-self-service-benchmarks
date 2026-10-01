@@ -29,11 +29,13 @@ from typing import Any
 from ..deathstarbench_contract import (
     DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
     DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
+    DISTRIBUTED_PROVIDER_TERMINAL_KEY,
     DISTRIBUTED_TIERED_TOPOLOGY_ID,
     K3S_RUNTIME_ID,
     K3S_RUNTIME_JOURNAL_KEY,
     PODMAN_COMPOSE_RUNTIME_ID,
     SINGLE_HOST_TOPOLOGY_ID,
+    distributed_provider_terminal_marker,
     require_released_runtime,
 )
 from ..deathstarbench_topology import (
@@ -3081,9 +3083,15 @@ def provision(
     benchmarks = tuple(_value(plan, 'benchmarks', ()) or ())
     if 'deathstarbench' in benchmarks:
         topology_id, runtime_id = _deathstarbench_contract_ids(plan)
-        # The ordinary provider entry point mirrors the API release gate.
-        # The Azure-only synthetic lifecycle below has a separate explicit
-        # entry point and cannot accidentally execute benchmark work.
+        if (
+            topology_id == DISTRIBUTED_TIERED_TOPOLOGY_ID
+            and runtime_id == K3S_RUNTIME_ID
+        ):
+            raise ValueError(
+                'The compact Azure provision entry point cannot create '
+                'distributed DeathStarBench; use the public distributed '
+                'lifecycle.'
+            )
         require_released_runtime(topology_id, runtime_id)
     subscription_id = _plan_subscription(plan)
     if not subscription_id:
@@ -4447,6 +4455,7 @@ def destroy_resources(
 ):
     """Delete one exact owned resource group after fail-closed verification."""
     resources = job.setdefault('resources', {})
+    distributed_candidate = resources.get('azure_distributed_candidate') is True
     group_name = str(resources.get('azure_resource_group_name') or '')
     has_azure_contract = (
         any(key.startswith('azure_') for key in resources)
@@ -4598,7 +4607,19 @@ def destroy_resources(
             group = None
     if group is None:
         keys = _azure_contract_keys(resources)
-        _forget(job, persist, *keys)
+        for key in keys:
+            resources.pop(key, None)
+        if distributed_candidate:
+            resources[DISTRIBUTED_PROVIDER_TERMINAL_KEY] = (
+                distributed_provider_terminal_marker(
+                    'azure',
+                    str(job.get('id') or ''),
+                )
+            )
+        # Clear the ownership contract and durably record terminal proof in
+        # one persisted state transition. A crash must never leave a saved
+        # empty graph that can be mistaken for deletion evidence.
+        _persist(job, persist)
     if not preserve_status:
         job['status'] = 'destroyed'
         job['cleanup_error'] = None

@@ -19,6 +19,7 @@ K3S_RUNTIME_ID = 'k3s_v1'
 K3S_RUNTIME_JOURNAL_KEY = 'k3s_runtime_state_v1'
 DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY = 'deathstarbench_workload_state_v1'
 DEATHSTARBENCH_EXECUTION_JOURNAL_KEY = 'deathstarbench_execution_state_v1'
+DISTRIBUTED_PROVIDER_TERMINAL_KEY = 'distributed_provider_terminal_v1'
 
 # The current Podman implementation intentionally uses provider-packaged
 # Podman on Oracle/Rocky Linux and a separately qualified package set on Amazon
@@ -26,10 +27,10 @@ DEATHSTARBENCH_EXECUTION_JOURNAL_KEY = 'deathstarbench_execution_state_v1'
 # pretending those provider packages are one identical binary build.
 SINGLE_HOST_RUNTIME_REVISION = 'legacy-podman-compose-runtime-v1'
 
-# Candidate distributed runtime.  It is deliberately exact and is not
-# selected through K3s's moving ``stable`` channel.  ``released=False`` keeps
-# it out of cloud provisioning until the multi-node lifecycle is complete and
-# qualified on every provider.
+# Released distributed runtime. It is deliberately exact and is never
+# selected through K3s's moving ``stable`` channel. The public lifecycle also
+# requires the image lock, component asset, and NetworkPolicy asset to be
+# released as the same coordinated bundle.
 K3S_VERSION = 'v1.36.4+k3s1'
 DISTRIBUTED_RUNTIME_REVISION = 'k3s-v1.36.4-k3s1-tiered-runtime-v5'
 DISTRIBUTED_WORKLOAD_REVISION = 'social-network-6ecb097-workload-v1'
@@ -41,6 +42,22 @@ LEGACY_DISTRIBUTED_MEASUREMENT_REVISION = (
 )
 DISTRIBUTED_LOAD_DRIVER_REVISION = 'wrk2-6ecb097-oci-amd64-v1'
 DISTRIBUTED_MEASUREMENT_REVISION = 'social-network-distributed-measurement-v2'
+
+
+def distributed_provider_terminal_marker(
+    provider: str,
+    job_id: str,
+) -> dict[str, object]:
+    """Return the exact run-bound proof written after verified cloud deletion."""
+
+    return {
+        'schema_version': 1,
+        'provider': provider,
+        'job_id': job_id,
+        'topology_id': DISTRIBUTED_TIERED_TOPOLOGY_ID,
+        'runtime_id': K3S_RUNTIME_ID,
+        'cloud_cleanup_completed': True,
+    }
 
 
 @dataclass(frozen=True)
@@ -121,7 +138,7 @@ DISTRIBUTED_TIERED_PROFILE = DeathStarBenchRuntimeProfile(
     orchestrator='K3s/containerd',
     orchestrator_version=K3S_VERSION,
     placement_revision='frontend-app-cache-database-v1',
-    released=False,
+    released=True,
 )
 
 RUNTIME_PROFILES = MappingProxyType({

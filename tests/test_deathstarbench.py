@@ -186,7 +186,7 @@ class DeathStarBenchOptionsTests(unittest.TestCase):
                     values.update(override)
                     valid_plan(**values)
 
-    def test_distributed_oci_rejects_unsupported_shapes_and_invalid_tags(self):
+    def test_distributed_oci_accepts_standard_ax_shapes_and_rejects_nonstandard_shapes(self):
         options = DeathStarBenchOptions(
             topology_id='distributed_tiered_v1',
             runtime_id='k3s_v1',
@@ -197,8 +197,27 @@ class DeathStarBenchOptionsTests(unittest.TestCase):
             'deathstarbench': options,
             'storage': {'additional_volume': False},
         }
-        with self.assertRaisesRegex(ValidationError, 'supported Standard'):
+        for shape in (
+            'VM.Standard4.Ax.Flex',
+            'VM.Standard.E6.Ax.Flex',
+            'VM.Standard.A4.Ax.Flex',
+        ):
+            with self.subTest(shape=shape):
+                self.assertEqual(valid_plan(shape=shape, **common).shape, shape)
+        with self.assertRaisesRegex(ValidationError, 'Standard Flex'):
             valid_plan(shape='BM.DenseIO.E5.128', **common)
+
+    def test_distributed_oci_rejects_invalid_tags(self):
+        options = DeathStarBenchOptions(
+            topology_id='distributed_tiered_v1',
+            runtime_id='k3s_v1',
+            workload='social_network',
+            connections=4,
+        )
+        common = {
+            'deathstarbench': options,
+            'storage': {'additional_volume': False},
+        }
         with self.assertRaisesRegex(ValidationError, 'invalid namespace'):
             valid_plan(
                 oci_defined_tags={'bad.namespace': {'Department': 'Test'}},

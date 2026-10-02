@@ -42,6 +42,15 @@ The five nodes occupy one AD in a dedicated `10.240.0.0/16` VCN:
 | Database | `10.240.3.11` | E5 Flex, 2 OCPU / 16 GiB | No |
 | Cache | `10.240.3.12` | E5 Flex, 1 OCPU / 8 GiB | No |
 
+The application shape is not limited to a fixed generation list. Every OCI
+Standard Flex shape returned for the selected availability domain, including
+the Standard4.Ax, Standard.E6.Ax, and Standard.A4.Ax variants, proceeds to the
+same read-only flexibility, capacity, platform-image, and image/shape
+compatibility gates. The compatible pinned Oracle Linux 9 image determines
+whether the application is x86_64 or Arm64; `Ax` itself is not an architecture
+marker. Launch options remain unset so OCI can apply the Ax-compatible
+AcceleratedPV default.
+
 Public management/load-generator subnets use an internet gateway. The private
 data subnet uses a NAT gateway. Each subnet explicitly uses the empty managed
 security list and the VCN's captured default DHCP options. Five role NSGs derive

@@ -112,6 +112,10 @@ from .models import (
     ClearSavedRunsRequest,
     canonicalize_benchmark_plan,
 )
+from .oci_shapes import (
+    is_standard_flex_shape,
+    oracle_linux_9_image_architecture,
+)
 from .guests import amazon_linux, rocky_linux, web as web_guest
 from . import llama_cpp, storage_target
 from .iperf3 import parse_output as parse_iperf3_output
@@ -3107,6 +3111,11 @@ def distributed_oci_provisioning_context(plan, public_key):
             )
         availability_domain = str(domains[0].name or '').strip()
     shape = str(plan_value('shape', '') or '').strip()
+    if not is_standard_flex_shape(shape):
+        raise RuntimeError(
+            'OCI distributed DeathStarBench requires a Standard Flex '
+            'application shape.'
+        )
     application_image = latest_oracle_linux_image(
         compute,
         compartment,
@@ -3128,6 +3137,12 @@ def distributed_oci_provisioning_context(plan, public_key):
             'OCI did not return immutable platform image IDs for all '
             'distributed DeathStarBench roles.'
         )
+    try:
+        application_architecture = oracle_linux_9_image_architecture(
+            getattr(application_image, 'display_name', None)
+        )
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
     return {
         'clients': {
             'compute': compute,
@@ -3139,7 +3154,7 @@ def distributed_oci_provisioning_context(plan, public_key):
             'availability_domain': availability_domain,
             'region': region,
             'shape': shape,
-            'architecture': 'arm64' if '.A' in shape else 'x86_64',
+            'architecture': application_architecture,
             'ocpus': plan_value('ocpus'),
             'memory_gb': plan_value('memory_gb'),
             'application_image_id': application_image_id,

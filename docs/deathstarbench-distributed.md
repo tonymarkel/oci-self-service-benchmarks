@@ -45,6 +45,12 @@ All four measurements reported 100% completion with zero HTTP, socket, or
 uncompleted-request errors. Azure and GCP additionally persisted the exact
 run-bound provider terminal marker, which validated in a separate process.
 
+On 2026-10-02, OCI job `979bfb6f477d` additionally qualified the Ax path
+through the same public lifecycle. Its application node used
+`VM.Standard4.Ax.Flex` at 4 OCPUs/32 GiB, completed 218/218 requests at
+21.794734 requests/second with zero errors, generated the report and structured
+results, and passed terminal whole-graph deletion with no recoverable resources.
+
 ## Benchmark modes
 
 `single_host_v1` remains the backward-compatible default. It measures the
@@ -332,6 +338,17 @@ list prevents inherited broad ingress. The fixed support shape is
 `VM.Standard.E5.Flex`: control uses 1 OCPU/4 GiB, database 2 OCPUs/16 GiB, and
 cache and load generator 1 OCPU/8 GiB. The application uses the selected
 supported Standard Flex shape and capacity.
+
+The application selector accepts current and future OCI Standard Flex
+generations rather than maintaining a processor-generation allowlist. This
+includes `VM.Standard4.Ax.Flex`, `VM.Standard.E6.Ax.Flex`, and
+`VM.Standard.A4.Ax.Flex` when OCI returns them in the selected availability
+domain. The exact shape must still be flexible, satisfy the requested OCPU and
+memory ranges, and support the pinned Oracle Linux 9 image. Architecture is
+derived from that compatible platform image instead of the `A` or `Ax` tokens:
+Standard4.Ax and Standard.E6.Ax are x86_64, while Standard.A4.Ax is Arm64. The
+distributed adapter leaves launch options at OCI's shape-compatible default,
+which permits the AcceleratedPV-only Ax variants.
 
 OCI support and application images are explicit Oracle Linux 9 platform-image
 OCIDs checked for lifecycle state, architecture, and shape compatibility before

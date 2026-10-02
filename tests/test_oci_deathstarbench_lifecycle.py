@@ -155,10 +155,22 @@ class Client:
         return response([{'shape': shape, 'is_flexible': True,
                           'ocpu_options': {'min': 1, 'max': 94},
                           'memory_options': {'min_in_g_bs': 1, 'max_in_g_bs': 1024, 'min_per_ocpu_in_gbs': 1, 'max_per_ocpu_in_gbs': 64}}
-                         for shape in (oci.SUPPORT_SHAPE, 'VM.Standard.A2.Flex')])
+                         for shape in (
+                             oci.SUPPORT_SHAPE,
+                             'VM.Standard.A2.Flex',
+                             'VM.Standard4.Ax.Flex',
+                             'VM.Standard.E6.Ax.Flex',
+                             'VM.Standard.A4.Ax.Flex',
+                         )])
 
     def list_image_shape_compatibility_entries(self, **kwargs):
-        return response([{'shape': oci.SUPPORT_SHAPE}, {'shape': 'VM.Standard.A2.Flex'}])
+        return response([{'shape': shape} for shape in (
+            oci.SUPPORT_SHAPE,
+            'VM.Standard.A2.Flex',
+            'VM.Standard4.Ax.Flex',
+            'VM.Standard.E6.Ax.Flex',
+            'VM.Standard.A4.Ax.Flex',
+        )])
 
     def add_network_security_group_security_rules(self, identity, details, **kwargs):
         self.cloud.calls.append(('add_network_security_group_security_rules', kwargs))
@@ -854,6 +866,25 @@ class OCIDistributedLifecycleTests(unittest.TestCase):
             self.destroy()
         self.assertEqual(before, len(self.cloud.calls))
 
+    def test_tampered_architecture_refuses_cleanup_before_cloud_mutation(self):
+        self.provision()
+        self.contract['inputs']['architecture'] = 'arm64'
+        self.contract['manifest'] = oci._manifest(
+            self.contract['inputs']
+        ).as_dict()
+        self.job['resources']['role_node_inventory'] = oci._inventory(
+            self.contract
+        ).as_dict()
+        before = len(self.cloud.calls)
+
+        with self.assertRaisesRegex(
+            oci.LifecycleError,
+            'pinned platform-image evidence conflicts',
+        ):
+            self.destroy()
+
+        self.assertEqual(before, len(self.cloud.calls))
+
     def test_ownership_tag_mismatch_refuses_all_cleanup(self):
         self.provision()
         self.cloud.items['volume'][self.contract['entries']['database-data']['id']]['freeform_tags']['benchmark-job'] = 'other'
@@ -912,11 +943,55 @@ class OCIDistributedLifecycleTests(unittest.TestCase):
         arm_image = 'ocid1.image.oc1.iad.oraclelinux9aarch64'
         self.cloud.put('image', {**self.cloud.items['image'][IMAGE], 'id': arm_image,
                                 'display_name': 'Oracle-Linux-9.6-aarch64-2026.09.01-0'})
-        self.inputs.update(shape='VM.Standard.A2.Flex', architecture='arm64', application_image_id=arm_image)
+        self.inputs.update(shape='VM.Standard.A4.Ax.Flex', architecture='arm64', application_image_id=arm_image)
         inventory = self.provision()
         self.assertEqual(inventory.node('application').architecture, 'arm64')
         self.assertEqual(inventory.node('database').architecture, 'x86_64')
         self.destroy()
+
+    def test_x86_ax_applications_pass_full_preflight_and_lifecycle(self):
+        for shape in ('VM.Standard4.Ax.Flex', 'VM.Standard.E6.Ax.Flex'):
+            with self.subTest(shape=shape):
+                cloud = Cloud()
+                job = {'id': 'fedcba654321', 'resources': {}}
+                inputs = {**copy.deepcopy(INPUTS), 'shape': shape}
+                snapshots = []
+
+                def persist(saved_job):
+                    snapshots.append(json.loads(json.dumps(saved_job)))
+
+                inventory = oci.provision_distributed_deathstarbench_candidate(
+                    job,
+                    inputs=inputs,
+                    clients=cloud.clients,
+                    persist=persist,
+                )
+                self.assertEqual(
+                    inventory.node('application').architecture,
+                    'x86_64',
+                )
+                oci.destroy_distributed_deathstarbench_candidate(
+                    job,
+                    clients=cloud.clients,
+                    persist=persist,
+                )
+                self.assertTrue(oci.distributed_candidate_is_deleted(job))
+                self.assertTrue(snapshots)
+
+    def test_ax_image_architecture_mismatch_fails_before_mutation(self):
+        self.inputs.update(
+            shape='VM.Standard4.Ax.Flex',
+            architecture='arm64',
+        )
+
+        with self.assertRaisesRegex(
+            oci.LifecycleError,
+            'image is not a compatible pinned Oracle Linux 9 platform image',
+        ):
+            self.provision()
+
+        self.assertFalse(self.cloud.calls)
+        self.assertEqual(self.job['resources'], {})
 
     def test_unknown_inventory_version_refuses_cleanup(self):
         self.provision()

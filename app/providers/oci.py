@@ -24,6 +24,10 @@ from ..deathstarbench_contract import (
     DISTRIBUTED_TIERED_TOPOLOGY_ID, K3S_RUNTIME_ID, K3S_RUNTIME_JOURNAL_KEY,
 )
 from ..deathstarbench_topology import DeathStarBenchTopologyManifest, build_topology_manifest
+from ..oci_shapes import (
+    is_standard_flex_shape,
+    oracle_linux_9_image_architecture,
+)
 from ..resource_inventory import ROLE_NODE_INVENTORY_KEY, RoleNodeInventory, StorageResource, persist_role_node_inventory
 
 
@@ -169,11 +173,8 @@ def _validate_inputs(inputs):
             raise LifecycleError(f'Missing {key}.')
     if inputs['architecture'] not in {'arm64', 'x86_64'}:
         raise LifecycleError('Unsupported application architecture.')
-    if not re.fullmatch(r'VM\.Standard\.(?:E[456]|A[124])\.Flex', inputs['shape']):
-        raise LifecycleError('Candidate requires a supported Standard Flex shape.')
-    expected_arch = 'arm64' if '.A' in inputs['shape'] else 'x86_64'
-    if inputs['architecture'] != expected_arch:
-        raise LifecycleError('Shape architecture conflicts with the candidate contract.')
+    if not is_standard_flex_shape(inputs['shape']):
+        raise LifecycleError('Candidate requires a Standard Flex shape.')
     for key in ('ocpus', 'memory_gb'):
         if type(inputs[key]) not in (int, float) or not math.isfinite(inputs[key]) or inputs[key] <= 0:
             raise LifecycleError(f'Invalid {key}.')
@@ -205,6 +206,51 @@ def _validate_defined_tags(value):
                 raise LifecycleError('OCI defined_tags contains an invalid key or value.')
     if count > 64:
         raise LifecycleError('OCI defined_tags exceeds the 64-tag resource limit.')
+
+
+def _validate_pinned_images(contract):
+    """Bind persisted architecture to the immutable platform-image evidence.
+
+    This local validation belongs on the authoritative contract load path so
+    cleanup and recovery fail closed before any cloud call if durable state was
+    altered after provisioning.
+    """
+
+    images = contract.get('images')
+    if not isinstance(images, dict) or set(images) != {'application', 'support'}:
+        raise LifecycleError(
+            'OCI candidate has no exact pinned platform-image evidence.'
+        )
+    for role, architecture in (
+        ('application', contract['inputs']['architecture']),
+        ('support', 'x86_64'),
+    ):
+        image = images.get(role)
+        if not isinstance(image, dict):
+            raise LifecycleError(
+                'OCI candidate pinned platform-image evidence conflicts with '
+                'its inputs.'
+            )
+        name = image.get('display_name', '')
+        try:
+            image_architecture = oracle_linux_9_image_architecture(name)
+        except ValueError:
+            image_architecture = None
+        if (
+            image.get('id') != contract['inputs'][role + '_image_id']
+            or image.get('compartment_id') is not None
+            or image.get('operating_system') != 'Oracle Linux'
+            or not re.fullmatch(
+                r'9(?:\.\d+)*',
+                str(image.get('operating_system_version', '')),
+            )
+            or image_architecture != architecture
+            or image.get('lifecycle_state') != 'AVAILABLE'
+        ):
+            raise LifecycleError(
+                'OCI candidate pinned platform-image evidence conflicts with '
+                'its inputs.'
+            )
 
 
 def _valid_tag_name(value):
@@ -349,11 +395,15 @@ def _preflight(inputs, clients):
         response = _read(clients['compute'], 'get_image', image_id)
         image = _dict(response.data)
         name = image.get('display_name', '')
+        try:
+            image_architecture = oracle_linux_9_image_architecture(name)
+        except ValueError as exc:
+            raise LifecycleError(str(exc)) from exc
         if (image.get('id') != image_id or image.get('operating_system') != 'Oracle Linux'
                 or not str(image.get('operating_system_version', '')).startswith('9')
                 or not name.startswith('Oracle-Linux-9') or image.get('compartment_id') is not None
                 or image.get('lifecycle_state') != 'AVAILABLE'
-                or ('aarch64' in name.lower()) != (arch == 'arm64')):
+                or image_architecture != arch):
             raise LifecycleError(f'{role} image is not a compatible pinned Oracle Linux 9 platform image.')
         compatible = _list(clients['compute'], 'list_image_shape_compatibility_entries', image_id=image_id)
         if shape not in {item.get('shape') for item in compatible}:
@@ -410,6 +460,7 @@ def _load(job):
             or contract.get('status') not in {'planned', 'ready', 'deleting', 'deleted'}):
         raise LifecycleError('Missing or incompatible OCI candidate contract.')
     _validate_inputs(contract['inputs'])
+    _validate_pinned_images(contract)
     expected = _specs(job['id'], contract['inputs'])
     if set(contract['entries']) != set(expected) or contract['manifest'] != _manifest(contract['inputs']).as_dict():
         raise LifecycleError('OCI candidate topology or resource allowlist changed.')
@@ -566,17 +617,6 @@ def validate_distributed_deathstarbench_candidate(job, *, clients=None, require_
         for entry in contract['entries'].values():
             if entry.get('id') and (not isinstance(entry['id'], str) or not re.fullmatch(r'ocid1\.[a-zA-Z0-9._-]+', entry['id'])):
                 raise LifecycleError('OCI candidate has an invalid provider OCID.')
-        images = contract.get('images')
-        if not isinstance(images, dict) or set(images) != {'application', 'support'}:
-            raise LifecycleError('OCI candidate has no exact pinned platform-image evidence.')
-        for role, architecture in (('application', contract['inputs']['architecture']), ('support', 'x86_64')):
-            image = images[role]
-            name = image.get('display_name', '')
-            if (image.get('id') != contract['inputs'][role + '_image_id'] or image.get('compartment_id') is not None
-                    or image.get('operating_system') != 'Oracle Linux' or not re.fullmatch(r'9(?:\.\d+)*', str(image.get('operating_system_version', '')))
-                    or not name.startswith('Oracle-Linux-9') or ('aarch64' in name.lower()) != (architecture == 'arm64')
-                    or image.get('lifecycle_state') != 'AVAILABLE'):
-                raise LifecycleError('OCI candidate pinned platform-image evidence conflicts with its inputs.')
         if require_ready and (contract['status'] != 'ready' or any(
                 entry['status'] != 'ready' or not entry.get('id') for entry in contract['entries'].values())):
             raise LifecycleError('OCI runtime requires the complete ready candidate graph.')

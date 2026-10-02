@@ -8,6 +8,7 @@ from .deathstarbench_contract import (
     RUNTIME_PROFILES,
     SINGLE_HOST_TOPOLOGY_ID,
 )
+from .oci_shapes import is_standard_flex_shape
 
 
 LEGACY_SYSBENCH_WORKLOADS = {
@@ -378,20 +379,13 @@ class BenchmarkPlan(BaseModel):
                     'Distributed DeathStarBench provisions its own dedicated '
                     'database storage; disable the general /data volume.'
                 )
-            if self.provider == 'oci' and not any(
-                self.shape.startswith(prefix)
-                for prefix in (
-                    'VM.Standard.E4.Flex',
-                    'VM.Standard.E5.Flex',
-                    'VM.Standard.E6.Flex',
-                    'VM.Standard.A1.Flex',
-                    'VM.Standard.A2.Flex',
-                    'VM.Standard.A4.Flex',
-                )
+            if (
+                self.provider == 'oci'
+                and not is_standard_flex_shape(self.shape)
             ):
                 raise ValueError(
-                    'OCI distributed DeathStarBench requires a supported '
-                    'Standard E4/E5/E6 or A1/A2/A4 Flex application shape.'
+                    'OCI distributed DeathStarBench requires a Standard Flex '
+                    'application shape.'
                 )
         if self.oci_defined_tags:
             if not distributed_deathstarbench or self.provider != 'oci':

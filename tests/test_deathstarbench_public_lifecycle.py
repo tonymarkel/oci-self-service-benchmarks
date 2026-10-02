@@ -589,7 +589,7 @@ class MainIntegrationTests(unittest.TestCase):
         self.assertIs(distributed.call_args.args[2], run_lock)
         compact.assert_not_called()
 
-    def test_oci_context_uses_plan_defined_tags_and_exact_image_ids(self):
+    def test_oci_context_uses_platform_image_architecture_for_ax_shapes(self):
         compute, network, block = object(), object(), object()
         identity = SimpleNamespace(
             list_availability_domains=Mock(
@@ -599,52 +599,81 @@ class MainIntegrationTests(unittest.TestCase):
             )
         )
         tags = {'Operations': {'Owner': 'benchmark-team'}}
-        plan = distributed_plan(
-            'oci',
-            shape='VM.Standard.A2.Flex',
-            ocpus=4,
-            memory_gb=32,
-            oci_defined_tags=tags,
-            compartment_id='ocid1.compartment.oc1..example',
-        )
-
-        def image(_compute, _compartment, shape, require_ol9=False):
-            self.assertTrue(require_ol9)
-            suffix = 'application' if shape == plan['shape'] else 'support'
-            return SimpleNamespace(id=f'ocid1.image.oc1..{suffix}')
-
-        with (
-            patch.object(
-                main,
-                'clients',
-                return_value=(
-                    {'tenancy': 'ocid1.tenancy.oc1..example'},
-                    compute,
-                    network,
-                    block,
-                    identity,
-                ),
+        cases = (
+            ('VM.Standard4.Ax.Flex', 'Oracle-Linux-9.6-2026.09.01-0', 'x86_64'),
+            ('VM.Standard.E6.Ax.Flex', 'Oracle-Linux-9.6-2026.09.01-0', 'x86_64'),
+            (
+                'VM.Standard.A4.Ax.Flex',
+                'Oracle-Linux-9.6-aarch64-2026.09.01-0',
+                'arm64',
             ),
-            patch.object(main, 'latest_oracle_linux_image', side_effect=image),
-        ):
-            context = main.distributed_oci_provisioning_context(
-                plan,
-                PUBLIC_KEY,
-            )
-        self.assertEqual(
-            context['inputs']['application_image_id'],
-            'ocid1.image.oc1..application',
         )
-        self.assertEqual(
-            context['inputs']['support_image_id'],
-            'ocid1.image.oc1..support',
-        )
-        self.assertEqual(context['inputs']['architecture'], 'arm64')
-        self.assertIs(context['inputs']['defined_tags'], tags)
-        self.assertEqual(
-            set(context['clients']),
-            {'compute', 'network', 'block'},
-        )
+        for shape, display_name, expected_architecture in cases:
+            with self.subTest(shape=shape):
+                plan = distributed_plan(
+                    'oci',
+                    shape=shape,
+                    ocpus=4,
+                    memory_gb=32,
+                    oci_defined_tags=tags,
+                    compartment_id='ocid1.compartment.oc1..example',
+                )
+
+                def image(_compute, _compartment, image_shape, require_ol9=False):
+                    self.assertTrue(require_ol9)
+                    application = image_shape == plan['shape']
+                    return SimpleNamespace(
+                        id=(
+                            'ocid1.image.oc1..application'
+                            if application
+                            else 'ocid1.image.oc1..support'
+                        ),
+                        display_name=(
+                            display_name
+                            if application
+                            else 'Oracle-Linux-9.6-2026.09.01-0'
+                        ),
+                    )
+
+                with (
+                    patch.object(
+                        main,
+                        'clients',
+                        return_value=(
+                            {'tenancy': 'ocid1.tenancy.oc1..example'},
+                            compute,
+                            network,
+                            block,
+                            identity,
+                        ),
+                    ),
+                    patch.object(
+                        main,
+                        'latest_oracle_linux_image',
+                        side_effect=image,
+                    ),
+                ):
+                    context = main.distributed_oci_provisioning_context(
+                        plan,
+                        PUBLIC_KEY,
+                    )
+                self.assertEqual(
+                    context['inputs']['application_image_id'],
+                    'ocid1.image.oc1..application',
+                )
+                self.assertEqual(
+                    context['inputs']['support_image_id'],
+                    'ocid1.image.oc1..support',
+                )
+                self.assertEqual(
+                    context['inputs']['architecture'],
+                    expected_architecture,
+                )
+                self.assertIs(context['inputs']['defined_tags'], tags)
+                self.assertEqual(
+                    set(context['clients']),
+                    {'compute', 'network', 'block'},
+                )
 
 
 class CreateJobSnapshotTests(unittest.IsolatedAsyncioTestCase):

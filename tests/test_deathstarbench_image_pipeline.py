@@ -25,10 +25,10 @@ QUALIFIED_IMAGE_LOCK = (
     / "deathstarbench-social-network-images-v1.json"
 )
 QUALIFIED_IMAGE_LOCK_SHA256 = (
-    "3754d05689836c07c10d21bb49fc562f6a2ba88f24e70e868bb4dfd2b32bb9ea"
+    "44340d363e947af580ef195a35cdb693897ff671831192ceaa74aac7c1aa9c1a"
 )
 QUALIFIED_IMAGE_LOCK_FINGERPRINT = (
-    "sha256:f13825377ea076b26062a0672051c0c7e642062f376b0a4097b216f7cca65dad"
+    "sha256:2b8d63fdae1105c25b9e5e8f0ac7a3f192062ae8c37a83a57eb7048f88bc15c4"
 )
 
 
@@ -429,7 +429,7 @@ def raw_index(include_arm64=True):
 
 
 class DeathStarBenchImageLockTests(unittest.TestCase):
-    def test_checked_in_azure_qualification_lock_is_exact_and_unreleased(self):
+    def test_checked_in_cross_provider_lock_is_exact_and_released(self):
         payload = QUALIFIED_IMAGE_LOCK.read_bytes()
         self.assertEqual(
             hashlib.sha256(payload).hexdigest(),
@@ -442,7 +442,7 @@ class DeathStarBenchImageLockTests(unittest.TestCase):
             validated.fingerprint,
             QUALIFIED_IMAGE_LOCK_FINGERPRINT,
         )
-        self.assertIs(lock["released"], False)
+        self.assertIs(lock["released"], True)
         self.assertTrue(validated.load_driver.published)
         self.assertEqual(
             validated.load_driver.context_sha256,
@@ -499,6 +499,7 @@ class DeathStarBenchImageLockTests(unittest.TestCase):
                 },
             )
             self.assertEqual(lock["schema_version"], 2)
+            self.assertIs(lock["released"], False)
             self.assertFalse(lock["load_driver"]["published"])
             self.assertEqual(
                 lock["workload_revision"], DISTRIBUTED_WORKLOAD_REVISION

@@ -306,6 +306,39 @@ class ClearSavedRunsTests(unittest.TestCase):
             self.assertTrue(aws_missing_contract.exists())
             self.assertTrue(oci_missing_contract.exists())
 
+    def test_missing_state_preserves_distributed_plan_but_not_legacy_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            distributed = root / 'aaaaaaaaaaaa'
+            distributed.mkdir()
+            (distributed / 'report.html').write_text('<p>distributed</p>')
+            (distributed / 'plan.json').write_text(json.dumps({
+                'provider': 'aws',
+                'benchmarks': ['deathstarbench'],
+                'llm_benchmarks': [],
+                'deathstarbench': {
+                    'topology_id': 'distributed_tiered_v1',
+                    'runtime_id': 'k3s_v1',
+                    'workload': 'social_network',
+                },
+            }))
+            legacy = root / 'bbbbbbbbbbbb'
+            legacy.mkdir()
+            (legacy / 'report.html').write_text('<p>legacy</p>')
+
+            with patch.object(main, 'RUNS', root):
+                payload = response_json(main.clear_saved_runs(
+                    ClearSavedRunsRequest(confirmed=True)
+                ))
+
+            self.assertEqual(payload, {
+                'deleted_count': 1,
+                'preserved_count': 1,
+                'preserved_run_ids': [distributed.name],
+            })
+            self.assertTrue(distributed.exists())
+            self.assertFalse(legacy.exists())
+
     def test_empty_archive_is_an_idempotent_no_op(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
             main,

@@ -6,6 +6,7 @@ let sysbenchWorkloads = [];
 let iperf3Protocols = [];
 let phoronixProfiles = [];
 let deathstarWorkloads = [];
+let deathstarTopologies = [];
 let apachebenchWorkloads = [];
 let currentJobPrivateKey = '';
 let providerBootstrap = {};
@@ -16,7 +17,14 @@ let liveStopPending = false;
 
 const terminalStatuses = ['complete', 'destroyed', 'failed', 'reported', 'cleanup_failed', 'interrupted'];
 const liveStoppableStatuses = ['queued', 'provisioning', 'testing', 'reporting'];
+const recoverableDestroyStatuses = ['complete', 'failed', 'cleanup_failed', 'interrupted'];
+const COMPACT_DEATHSTAR_TOPOLOGY_ID = 'single_host_v1';
+const COMPACT_DEATHSTAR_RUNTIME_ID = 'podman_compose_v1';
+const DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID = 'distributed_tiered_v1';
+const DISTRIBUTED_DEATHSTAR_RUNTIME_ID = 'k3s_v1';
 const deathstarDefaults = {
+    topology_id: COMPACT_DEATHSTAR_TOPOLOGY_ID,
+    runtime_id: COMPACT_DEATHSTAR_RUNTIME_ID,
     workload: 'media_microservices',
     warmup_seconds: 30,
     duration_seconds: 60,
@@ -168,14 +176,17 @@ function applyProviderBenchmarkSupport() {
     const supportedLlmBenchmarks = providerCapabilitySet('llm_benchmarks');
     const supportedSysbenchWorkloads = providerCapabilitySet('sysbench_workloads');
     const supportedIperf3Protocols = providerCapabilitySet('iperf3_protocols');
+    enforceDeathstarTopologyValues();
+    const distributed = isDistributedDeathstarbenchSelected();
     $$('input[data-kind="bench"]').forEach(input => {
-        const supported = supportedBenchmarks.has(input.value);
+        const supported = supportedBenchmarks.has(input.value)
+            && (!distributed || input.value === 'deathstarbench');
         input.disabled = !supported;
         input.closest('label')?.classList.toggle('unavailable', !supported);
         if (!supported) input.checked = false;
     });
     $$('input[data-kind="llm"]').forEach(input => {
-        const supported = supportedLlmBenchmarks.has(input.value);
+        const supported = supportedLlmBenchmarks.has(input.value) && !distributed;
         input.disabled = !supported;
         input.closest('label')?.classList.toggle('unavailable', !supported);
         if (!supported) input.checked = false;
@@ -213,6 +224,8 @@ function applyProviderBenchmarkSupport() {
     togglePhoronixSettings();
     toggleApachebenchSettings();
     toggleDeathstarSettings();
+    $('#additional').disabled = distributed;
+    updateDeathstarTopologyPresentation();
 }
 
 function gcpDiskLabel(diskType) {
@@ -283,6 +296,55 @@ function updateGcpStorageHint(shape = null) {
         "selected VM's vCPU count; there is no separate gp3-style IOPS control.";
 }
 
+function providerShapeLabel(provider = currentProvider()) {
+    if (provider === 'aws') return 'EC2 Instance Type';
+    if (provider === 'azure') return 'Azure VM Size';
+    if (provider === 'gcp') return 'Compute Engine Machine Type';
+    return 'Compute Shape';
+}
+
+function updateProviderTopologyCopy() {
+    const provider = currentProvider();
+    const aws = provider === 'aws';
+    const gcp = provider === 'gcp';
+    const azure = provider === 'azure';
+    const distributed = isDistributedDeathstarbenchSelected();
+    const baseShapeLabel = providerShapeLabel(provider);
+    $('#shapeLabel').textContent = distributed
+        ? `Application ${baseShapeLabel}`
+        : baseShapeLabel;
+    $('#key').placeholder = aws
+        ? (
+            distributed
+                ? 'Choose a file or paste the private key used to connect as rocky.'
+                : 'Choose a file or paste the private key used to connect as ec2-user.'
+        )
+        : (gcp || azure
+            ? 'Choose a file or paste the private key used to connect as benchmark.'
+            : 'Choose a file or paste the private key used to connect as opc.');
+    $('#guestOsText').textContent = aws
+        ? (
+            distributed
+                ? 'Distributed AWS runs use approved Rocky Linux 9 images.'
+                : 'AWS runs use the latest Amazon Linux 2023 AMI.'
+        )
+        : (azure
+            ? 'Azure runs use a pinned Rocky Linux 9 image.'
+            : (gcp
+                ? 'GCP runs use the latest standard Rocky Linux 9 image.'
+                : 'OCI runs use Oracle Linux.'));
+    const privateNetwork = aws
+        ? 'private AWS VPC address'
+        : (azure
+            ? 'private Azure VNet address'
+            : (gcp ? 'private Google Cloud VPC address' : 'private OCI VCN address'));
+    $('#deathstarDeploymentHint').textContent = distributed
+        ? 'The Social Network service graph runs across application, database, cache, and control VMs with K3s. ' +
+            `A fifth load-generator VM sends traffic over a ${privateNetwork}.`
+        : 'The selected microservices workload runs with native Podman and podman-compose. ' +
+            `A separate fixed-size x86 load-generator VM sends traffic to the benchmark VM's ${privateNetwork}.`;
+}
+
 function applyProviderUi() {
     const provider = currentProvider();
     const aws = provider === 'aws';
@@ -311,11 +373,7 @@ function applyProviderUi() {
     setProviderOnlyElement('#gcpZoneField', gcp);
     setProviderOnlyElement('#azureSubscriptionField', azure);
     setProviderOnlyElement('#azureZoneField', azure);
-    $('#shapeLabel').textContent = aws
-        ? 'EC2 Instance Type'
-        : (azure
-            ? 'Azure VM Size'
-            : (gcp ? 'Compute Engine Machine Type' : 'Compute Shape'));
+    updateProviderTopologyCopy();
     $('#cpuLabel').textContent = providerFixedCapacity ? 'vCPUs' : 'OCPUs';
     $('#shape').placeholder = aws
         ? 'Search available EC2 instance types'
@@ -324,20 +382,8 @@ function applyProviderUi() {
             : (gcp
                 ? 'Search machine types available in this zone'
                 : 'Select a region and AD to load shapes'));
-    $('#key').placeholder = aws
-        ? 'Choose a file or paste the private key used to connect as ec2-user.'
-        : (gcp || azure
-            ? 'Choose a file or paste the private key used to connect as benchmark.'
-            : 'Choose a file or paste the private key used to connect as opc.');
     $('#ocpus').readOnly = fixedCapacity || azure;
     $('#memory').readOnly = fixedCapacity || azure;
-    $('#guestOsText').textContent = aws
-        ? 'AWS runs use the latest Amazon Linux 2023 AMI.'
-        : (azure
-            ? 'Azure runs use a pinned Rocky Linux 9 image.'
-            : (gcp
-                ? 'GCP runs use the latest standard Rocky Linux 9 image.'
-                : 'OCI runs use Oracle Linux.'));
     $('#keyPairHint').textContent = aws
         ? 'The key pair is checked before any AWS resources are created. AWS accepts RSA or Ed25519 for this flow. The public key configured in .env is imported for this run, and key material is held in memory only while the job runs.'
         : (azure
@@ -357,9 +403,6 @@ function applyProviderUi() {
         : (azure
             ? 'private Azure VNet address'
             : (gcp ? 'private Google Cloud VPC address' : 'private OCI VCN address'));
-    $('#deathstarDeploymentHint').textContent =
-        'The selected microservices workload runs with native Podman and podman-compose. ' +
-        `A separate fixed-size x86 load-generator VM sends traffic to the benchmark VM's ${privateNetwork}.`;
     $('#apachebenchDeploymentHint').textContent =
         'The benchmark VM serves fixed-size responses while a separate fixed-size x86 ' +
         `load-generator VM runs Apache HTTP Server Benchmarking Tool traffic over a ${privateNetwork}. ` +
@@ -581,7 +624,92 @@ function updateDeathstarWorkloadDescription() {
     $('#deathstarWorkloadDescription').textContent = workload?.description || '';
 }
 
+function selectedDeathstarTopology() {
+    const topologyId = $('#deathstarTopology')?.value || COMPACT_DEATHSTAR_TOPOLOGY_ID;
+    return deathstarTopologies.find(item => item.topology_id === topologyId)
+        || deathstarTopologies.find(item => item.topology_id === COMPACT_DEATHSTAR_TOPOLOGY_ID)
+        || {
+            topology_id: COMPACT_DEATHSTAR_TOPOLOGY_ID,
+            runtime_id: COMPACT_DEATHSTAR_RUNTIME_ID,
+            name: 'Compact / single-host',
+            node_count: 2,
+            description: 'Runs the selected service graph on one benchmark VM with a separate load generator.',
+        };
+}
+
+function isDistributedDeathstarbenchSelected() {
+    const selected = $('input[data-kind="bench"][value="deathstarbench"]')?.checked;
+    const topology = selectedDeathstarTopology();
+    return Boolean(
+        selected
+        && topology.topology_id === DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID
+        && topology.runtime_id === DISTRIBUTED_DEATHSTAR_RUNTIME_ID
+    );
+}
+
+function enforceDeathstarTopologyValues({newlySelected = false} = {}) {
+    const checkbox = $('input[data-kind="bench"][value="deathstarbench"]');
+    const topologySelect = $('#deathstarTopology');
+    if (!checkbox || !topologySelect) return;
+    if (!checkbox.checked && topologySelect.value === DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID) {
+        topologySelect.value = COMPACT_DEATHSTAR_TOPOLOGY_ID;
+        topologySelect.dataset.previousTopology = COMPACT_DEATHSTAR_TOPOLOGY_ID;
+    }
+    const distributed = isDistributedDeathstarbenchSelected();
+    if (distributed) {
+        $('#deathstarWorkload').value = 'social_network';
+        if (newlySelected) $('#deathstarConnections').value = '4';
+        if ($('#additional').dataset.compactChecked === undefined) {
+            $('#additional').dataset.compactChecked = String($('#additional').checked);
+        }
+        $('#additional').checked = false;
+    } else if ($('#additional').dataset.compactChecked !== undefined) {
+        $('#additional').checked = $('#additional').dataset.compactChecked === 'true';
+        delete $('#additional').dataset.compactChecked;
+    }
+    updateDeathstarWorkloadDescription();
+}
+
+function updateDeathstarTopologyPresentation() {
+    const topology = selectedDeathstarTopology();
+    const distributed = isDistributedDeathstarbenchSelected();
+    $('#deathstarTopologyDescription').textContent = topology.description || '';
+    $('#deathstarDistributedWarning').hidden = !distributed;
+    setProviderOnlyElement(
+        '#ociDefinedTagsField',
+        distributed && currentProvider() === 'oci',
+    );
+    updateProviderTopologyCopy();
+}
+
+function handleDeathstarTopologyChange() {
+    const select = $('#deathstarTopology');
+    const previous = select.dataset.previousTopology || COMPACT_DEATHSTAR_TOPOLOGY_ID;
+    const newlySelected = (
+        select.value === DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID
+        && previous !== DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID
+    );
+    select.dataset.previousTopology = select.value;
+    const checkbox = $('input[data-kind="bench"][value="deathstarbench"]');
+    if (checkbox) checkbox.checked = true;
+    enforceDeathstarTopologyValues({newlySelected});
+    applyProviderBenchmarkSupport();
+}
+
+function handleDeathstarSelectionChange() {
+    enforceDeathstarTopologyValues();
+    applyProviderBenchmarkSupport();
+}
+
 function setDeathstarValues(options = deathstarDefaults) {
+    const requestedTopology = options.topology_id || COMPACT_DEATHSTAR_TOPOLOGY_ID;
+    const topologyAvailable = deathstarTopologies.some(
+        item => item.topology_id === requestedTopology,
+    );
+    $('#deathstarTopology').value = topologyAvailable
+        ? requestedTopology
+        : COMPACT_DEATHSTAR_TOPOLOGY_ID;
+    $('#deathstarTopology').dataset.previousTopology = $('#deathstarTopology').value;
     $('#deathstarWorkload').value = options.workload || deathstarDefaults.workload;
     if (!$('#deathstarWorkload').value && deathstarWorkloads.length) {
         $('#deathstarWorkload').value = deathstarWorkloads[0].id;
@@ -597,9 +725,10 @@ function setDeathstarValues(options = deathstarDefaults) {
 function toggleDeathstarSettings() {
     const checkbox = $('input[data-kind="bench"][value="deathstarbench"]');
     const selected = Boolean(checkbox?.checked);
+    const distributed = isDistributedDeathstarbenchSelected();
     $('#deathstarSettings').hidden = !selected;
-    $$('#deathstarSettings input, #deathstarSettings select').forEach(field => {
-        field.disabled = !selected;
+    $$('#deathstarSettings input, #deathstarSettings select, #deathstarSettings textarea').forEach(field => {
+        field.disabled = !selected || (distributed && field.id === 'deathstarWorkload');
     });
 }
 
@@ -669,6 +798,27 @@ function renderCatalog(catalog) {
     ).join('');
     setApachebenchValues();
 
+    const compactTopologyFallback = {
+        topology_id: COMPACT_DEATHSTAR_TOPOLOGY_ID,
+        runtime_id: COMPACT_DEATHSTAR_RUNTIME_ID,
+        name: 'Compact / single-host',
+        description: 'Runs the selected service graph on one benchmark VM with a separate load generator.',
+        node_count: 2,
+        released: true,
+    };
+    const topologyCatalog = Array.isArray(catalog.deathstarbench_topologies)
+        ? catalog.deathstarbench_topologies
+        : [compactTopologyFallback];
+    deathstarTopologies = topologyCatalog.filter(topology => topology.released === true);
+    if (!deathstarTopologies.some(
+        topology => topology.topology_id === COMPACT_DEATHSTAR_TOPOLOGY_ID,
+    )) {
+        deathstarTopologies.unshift(compactTopologyFallback);
+    }
+    $('#deathstarTopology').innerHTML = deathstarTopologies.map(topology =>
+        `<option value="${escape(topology.topology_id)}">${escape(topology.name)} — ` +
+        `${escape(topology.node_count)} VMs</option>`,
+    ).join('');
     deathstarWorkloads = catalog.deathstarbench_workloads || [];
     $('#deathstarWorkload').innerHTML = deathstarWorkloads.map(workload =>
         `<option value="${workload.id}">${workload.name}</option>`,
@@ -684,13 +834,15 @@ function renderCatalog(catalog) {
     const apachebenchCheckbox = $('input[data-kind="bench"][value="apachebench"]');
     if (apachebenchCheckbox) apachebenchCheckbox.addEventListener('change', toggleApachebenchSettings);
     const deathstarCheckbox = $('input[data-kind="bench"][value="deathstarbench"]');
-    if (deathstarCheckbox) deathstarCheckbox.addEventListener('change', toggleDeathstarSettings);
+    if (deathstarCheckbox) deathstarCheckbox.addEventListener('change', handleDeathstarSelectionChange);
+    $('#deathstarTopology').addEventListener('change', handleDeathstarTopologyChange);
     $('#deathstarWorkload').addEventListener('change', updateDeathstarWorkloadDescription);
     toggleSysbenchSettings();
     toggleIperf3Settings();
     togglePhoronixSettings();
     toggleApachebenchSettings();
     toggleDeathstarSettings();
+    updateDeathstarTopologyPresentation();
 }
 
 async function placement(parentGeneration = null) {
@@ -955,7 +1107,10 @@ $('#publicKeyFile').addEventListener('change', async event => {
 
 function deathstarOptions(selected) {
     if (!selected) return { ...deathstarDefaults };
+    const topology = selectedDeathstarTopology();
     return {
+        topology_id: topology.topology_id,
+        runtime_id: topology.runtime_id,
         workload: $('#deathstarWorkload').value || deathstarDefaults.workload,
         warmup_seconds: Number($('#deathstarWarmup').value),
         duration_seconds: Number($('#deathstarDuration').value),
@@ -963,6 +1118,22 @@ function deathstarOptions(selected) {
         connections: Number($('#deathstarConnections').value),
         request_rate: Number($('#deathstarRequestRate').value),
     };
+}
+
+function parsedOciDefinedTags(enabled) {
+    if (!enabled) return {};
+    const source = $('#ociDefinedTags').value.trim();
+    if (!source) return {};
+    let tags;
+    try {
+        tags = JSON.parse(source);
+    } catch {
+        throw Error('OCI defined tags must be valid JSON.');
+    }
+    if (!tags || Array.isArray(tags) || typeof tags !== 'object') {
+        throw Error('OCI defined tags must be a JSON object.');
+    }
+    return tags;
 }
 
 function sysbenchOptions(selected) {
@@ -1082,6 +1253,7 @@ $('#planForm').addEventListener('submit', async event => {
     const aws = provider === 'aws';
     const gcp = provider === 'gcp';
     const azure = provider === 'azure';
+    const oci = provider === 'oci';
     const fixedCapacity = aws || gcp;
     const providerFixedCapacity = fixedCapacity || azure;
     const selectedShape = shapes.find(item => item.shape === $('#shape').value);
@@ -1104,6 +1276,18 @@ $('#planForm').addEventListener('submit', async event => {
     const phoronix = phoronixOptions(selectedBenchmarks.includes('phoronix'));
     const apachebench = apachebenchOptions(selectedBenchmarks.includes('apachebench'));
     const deathstarbench = deathstarOptions(selectedBenchmarks.includes('deathstarbench'));
+    const distributedDeathstar = (
+        selectedBenchmarks.includes('deathstarbench')
+        && deathstarbench.topology_id === DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID
+        && deathstarbench.runtime_id === DISTRIBUTED_DEATHSTAR_RUNTIME_ID
+    );
+    let ociDefinedTags;
+    try {
+        ociDefinedTags = parsedOciDefinedTags(oci && distributedDeathstar);
+    } catch (error) {
+        alert(error.message);
+        return;
+    }
     if (selectedBenchmarks.includes('sysbench') && !sysbench.workloads.length) {
         alert('Select at least one Sysbench workload.');
         return;
@@ -1198,6 +1382,7 @@ $('#planForm').addEventListener('submit', async event => {
         phoronix,
         apachebench,
         deathstarbench,
+        oci_defined_tags: ociDefinedTags,
         destroy_after_completion: $('#destroy').checked,
         benchmarks: selectedBenchmarks,
         llm_benchmarks: selected('llm'),
@@ -1266,6 +1451,11 @@ function recordedResourceEntries(job) {
     ));
 }
 
+function canDestroyRecoverableJob(job) {
+    return job.recoverable === true
+        && recoverableDestroyStatuses.includes(job.status);
+}
+
 function renderLiveStopAction(job) {
     const panel = $('#liveRunStop');
     const button = $('#stopAndDestroy');
@@ -1306,14 +1496,7 @@ function renderJobProgress(job) {
     $('#resources').textContent = resources.length
         ? `Recorded resources\n${resources.map(([key, value]) => `${key}: ${value}`).join('\n')}`
         : '';
-    const recoverable = job.recoverable === true || (
-        job.live !== false
-        && resources.some(([key]) => key.endsWith('_id'))
-    );
-    $('#destroyInterrupted').hidden = !(
-        recoverable
-        && ['interrupted', 'cleanup_failed'].includes(job.status)
-    );
+    $('#destroyInterrupted').hidden = !canDestroyRecoverableJob(job);
     renderLiveStopAction(job);
 }
 
@@ -1356,11 +1539,7 @@ function showReport(job) {
         job.status === 'failed' && job.plan?.destroy_after_completion === false
     );
     const connections = explicitlyRetained ? retainedConnections(job) : [];
-    const managedResourcesRemain = recordedResourceEntries(job)
-        .some(([key]) => key.endsWith('_id'));
-    const canDestroy = (job.live !== false || job.recoverable === true) && managedResourcesRemain && (
-        explicitlyRetained || job.status === 'cleanup_failed' || job.status === 'interrupted'
-    );
+    const canDestroy = canDestroyRecoverableJob(job);
     if (job.status === 'destroying') {
         $('#reportStatus').textContent = benchmarkFailed
             ? 'The benchmark failed before producing results. Diagnostic details are saved while infrastructure cleanup continues.'
@@ -1515,6 +1694,7 @@ async function resetToPlan() {
     $('#keyFile').value = '';
     $('#publicKeyFile').value = '';
     delete $('#additional').dataset.ociChecked;
+    delete $('#additional').dataset.compactChecked;
     delete $('#dataSize').dataset.userEdited;
     delete $('#dataSize').dataset.gcpC4aDefaultApplied;
     setSysbenchValues();
@@ -1522,6 +1702,7 @@ async function resetToPlan() {
     setPhoronixValues();
     setApachebenchValues();
     setDeathstarValues();
+    $('#ociDefinedTags').value = '{}';
     toggleSysbenchSettings();
     toggleIperf3Settings();
     togglePhoronixSettings();
@@ -1534,6 +1715,7 @@ async function resetToPlan() {
 
 async function restorePlan(plan) {
     const provider = plan.provider || 'oci';
+    delete $('#additional').dataset.compactChecked;
     delete $('#dataSize').dataset.userEdited;
     delete $('#dataSize').dataset.gcpC4aDefaultApplied;
     $('#provider').value = provider;
@@ -1578,6 +1760,7 @@ async function restorePlan(plan) {
     $('#mount').value = plan.storage?.mount_style === 'iscsi'
         ? 'iscsi'
         : 'paravirtualized';
+    $('#ociDefinedTags').value = JSON.stringify(plan.oci_defined_tags || {}, null, 2);
     $('#destroy').checked = plan.destroy_after_completion ?? true;
     const planBenchmarks = plan.benchmarks || [];
     const hasLegacySysbench = planBenchmarks.some(
@@ -1655,11 +1838,19 @@ async function stopLiveRunAndDestroy() {
     }
 }
 async function destroyCurrentJob(button) {
-    await api(`/api/jobs/${jobId}/destroy`, { method: 'POST' });
-    button.hidden = true;
-    $('#status').textContent = 'DESTROYING — Cleanup has started.';
-    if (poller) clearInterval(poller);
-    poller = setInterval(poll, 2500);
+    button.disabled = true;
+    try {
+        await api(`/api/jobs/${jobId}/destroy`, { method: 'POST' });
+        button.hidden = true;
+        $('#status').textContent = 'DESTROYING — Cleanup has started.';
+        if (poller) clearInterval(poller);
+        poller = setInterval(poll, 2500);
+    } catch (error) {
+        button.hidden = false;
+        button.disabled = false;
+        $('#status').textContent =
+            `Unable to destroy infrastructure: ${error.message}`;
+    }
 }
 $('#stopAndDestroy').addEventListener('click', stopLiveRunAndDestroy);
 $('#destroyNow').addEventListener('click', () => destroyCurrentJob($('#destroyNow')));

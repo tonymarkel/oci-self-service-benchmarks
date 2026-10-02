@@ -310,6 +310,7 @@ class BenchmarkPlan(BaseModel):
     azure_zone: str | None = None
     region: str
     compartment_id: str | None = None
+    oci_defined_tags: dict[str, dict[str, str]] = Field(default_factory=dict)
     availability_domain: str | None = None
     fault_domain: str | None = None
     shape: str
@@ -357,6 +358,86 @@ class BenchmarkPlan(BaseModel):
                 f'{self.provider.upper()} does not support the selected LLM '
                 'benchmark: ' + ', '.join(unsupported_llm)
             )
+        distributed_deathstarbench = (
+            self.deathstarbench.topology_id
+            == DEATHSTARBENCH_DISTRIBUTED_TIERED_TOPOLOGY_ID
+        )
+        if distributed_deathstarbench:
+            if self.benchmarks != ['deathstarbench'] or self.llm_benchmarks:
+                raise ValueError(
+                    'Distributed DeathStarBench must be the only selected '
+                    'benchmark.'
+                )
+            if self.deathstarbench.workload != 'social_network':
+                raise ValueError(
+                    'Distributed DeathStarBench requires the Social Network '
+                    'workload.'
+                )
+            if self.storage.additional_volume:
+                raise ValueError(
+                    'Distributed DeathStarBench provisions its own dedicated '
+                    'database storage; disable the general /data volume.'
+                )
+            if self.provider == 'oci' and not any(
+                self.shape.startswith(prefix)
+                for prefix in (
+                    'VM.Standard.E4.Flex',
+                    'VM.Standard.E5.Flex',
+                    'VM.Standard.E6.Flex',
+                    'VM.Standard.A1.Flex',
+                    'VM.Standard.A2.Flex',
+                    'VM.Standard.A4.Flex',
+                )
+            ):
+                raise ValueError(
+                    'OCI distributed DeathStarBench requires a supported '
+                    'Standard E4/E5/E6 or A1/A2/A4 Flex application shape.'
+                )
+        if self.oci_defined_tags:
+            if not distributed_deathstarbench or self.provider != 'oci':
+                raise ValueError(
+                    'OCI defined tags are supported only for distributed '
+                    'DeathStarBench on OCI.'
+                )
+            if len(self.oci_defined_tags) > 64:
+                raise ValueError(
+                    'OCI defined tags may contain at most 64 namespaces.'
+                )
+            tag_count = 0
+            for namespace, tags in self.oci_defined_tags.items():
+                valid_namespace = (
+                    0 < len(namespace) <= 100
+                    and all(
+                        33 <= ord(character) <= 126 and character != '.'
+                        for character in namespace
+                    )
+                )
+                if not valid_namespace or not tags or len(tags) > 64:
+                    raise ValueError(
+                        'OCI defined tags contain an invalid namespace or tag '
+                        'map.'
+                    )
+                for key, value in tags.items():
+                    tag_count += 1
+                    valid_key = (
+                        0 < len(key) <= 100
+                        and all(
+                            33 <= ord(character) <= 126 and character != '.'
+                            for character in key
+                        )
+                    )
+                    if (
+                        not valid_key
+                        or len(value.encode('utf-8')) > 256
+                        or '\x00' in value
+                    ):
+                        raise ValueError(
+                            'OCI defined tags contain an invalid key or value.'
+                        )
+            if tag_count > 64:
+                raise ValueError(
+                    'OCI defined tags may contain at most 64 tag values.'
+                )
         if self.security.mode != 'shielded' and any([self.security.secure_boot, self.security.measured_boot, self.security.trusted_platform_module]):
             raise ValueError('Shielded options require Shielded security mode.')
         if 'sysbench' in self.benchmarks and not self.sysbench.workloads:

@@ -142,7 +142,7 @@ class ApachebenchUiTests(unittest.TestCase):
         scripts = re.findall(r'/static/app\.js\?v=(\d+)', INDEX)
 
         self.assertEqual(styles, ['19'])
-        self.assertEqual(scripts, ['33'])
+        self.assertEqual(scripts, ['35'])
 
 
 if __name__ == '__main__':

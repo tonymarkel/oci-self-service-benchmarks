@@ -78,6 +78,9 @@ class StatefulEC2:
                     if self.delay_public_address and role not in ('instance-database', 'instance-cache'):
                         instance['PublicIpAddress'] = '192.0.2.' + rid.rsplit('-', 1)[-1]
                         instance['NetworkInterfaces'][0]['Association'] = {'PublicIp': instance['PublicIpAddress']}
+            elif name == 'instance_stopped':
+                for rid in kwargs['InstanceIds']:
+                    self.data['instance'][rid]['State']['Name'] = 'stopped'
         return SimpleNamespace(wait=wait)
 
     def _matches(self, item, filters):
@@ -253,6 +256,9 @@ class StatefulEC2:
                     'InstanceId': request['InstanceId'], 'Device': request['Device'], 'State': 'attached'}]
                 self.data['instance'][request['InstanceId']]['BlockDeviceMappings'].append({
                     'DeviceName': request['Device'], 'Ebs': {'VolumeId': request['VolumeId'], 'DeleteOnTermination': False}})
+            elif name == 'stop_instances':
+                for rid in request['InstanceIds']:
+                    self.data['instance'][rid]['State']['Name'] = 'stopping'
             elif name == 'terminate_instances':
                 for rid in request['InstanceIds']:
                     instance = self.data['instance'].pop(rid)
@@ -398,8 +404,8 @@ class AwsDistributedLifecycleTests(unittest.TestCase):
                 'x86_64',
             )
 
-    def test_normal_provider_entrypoint_keeps_release_gate_closed(self):
-        with self.assertRaisesRegex(ValueError, 'not released'):
+    def test_compact_provider_entrypoint_refuses_distributed_route(self):
+        with self.assertRaisesRegex(ValueError, 'public distributed lifecycle'):
             aws.provision(self.job, candidate_plan(), public_key=PUBLIC_KEY, aws_session=self.session)
         self.assertEqual(self.ec2.calls, [])
 
@@ -908,6 +914,144 @@ class AwsDistributedLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(ResourceInventoryError, 'foreign network interface'):
             aws.destroy_resources(self.job, aws_session=self.session)
         self.assertFalse(any(n.startswith(('delete_', 'terminate_', 'revoke_')) for n, _ in self.ec2.calls[before:]))
+
+    def test_load_generator_is_stopped_before_foreign_graph_refusal(self):
+        self.provision()
+        self.job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
+            'state': 'measurement_started',
+        }
+        self.ec2.extra_nics.append({'NetworkInterfaceId': 'eni-foreign'})
+        graph = self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']
+        loadgen_id = graph['instance-load-generator']['id']
+        before = len(self.ec2.calls)
+
+        with self.assertRaisesRegex(ResourceInventoryError, 'foreign network interface'):
+            aws.destroy_resources(self.job, aws_session=self.session)
+
+        mutations = [
+            name for name, _ in self.ec2.calls[before:]
+            if name.startswith(('stop_', 'terminate_', 'delete_', 'revoke_'))
+        ]
+        self.assertEqual(mutations, ['stop_instances'])
+        self.assertEqual(
+            self.ec2.data['instance'][loadgen_id]['State']['Name'],
+            'stopped',
+        )
+        self.assertIn(
+            DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+            self.job['resources'],
+        )
+
+    def test_load_generator_stop_is_replay_safe(self):
+        self.provision()
+        self.job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
+            'state': 'measurement_started',
+        }
+
+        self.assertTrue(
+            aws.quiesce_distributed_deathstarbench_load_generator(
+                self.job, aws_session=self.session,
+            )
+        )
+        self.assertFalse(
+            aws.quiesce_distributed_deathstarbench_load_generator(
+                self.job, aws_session=self.session,
+            )
+        )
+        self.assertEqual(
+            sum(name == 'stop_instances' for name, _ in self.ec2.calls),
+            1,
+        )
+
+    def test_cleanup_accepts_ephemeral_public_address_release_after_quiesce(self):
+        self.provision()
+        self.job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
+            'state': 'measurement_started',
+        }
+        graph = self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']
+        loadgen_id = graph['instance-load-generator']['id']
+
+        def release_public_address(waiter_name, request):
+            if waiter_name != 'instance_stopped':
+                return
+            self.assertEqual(request['InstanceIds'], [loadgen_id])
+            loadgen = self.ec2.data['instance'][loadgen_id]
+            loadgen.pop('PublicIpAddress', None)
+            loadgen['NetworkInterfaces'][0].pop('Association', None)
+
+        self.ec2.on_wait = release_public_address
+        aws.destroy_resources(self.job, aws_session=self.session)
+
+        self.assertEqual(self.job['status'], 'destroyed')
+        self.assertTrue(all(not values for values in self.ec2.data.values()))
+        self.assertTrue(
+            aws.distributed_deathstarbench_candidate_deleted(self.job)
+        )
+        self.assertNotIn('ssh_user', self.job['resources'])
+        self.assertNotIn(
+            'aws_dsb_load_generator_public_ip',
+            self.job['resources'],
+        )
+
+    def test_cleanup_recovers_quiesced_ephemeral_alias_transition(self):
+        self.provision()
+        aws.validate_distributed_deathstarbench_candidate(
+            self.job,
+            aws_session=self.session,
+        )
+        self.job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
+            'state': 'measurement_started',
+        }
+        graph = self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']
+        entry = graph['instance-load-generator']
+        loadgen = self.ec2.data['instance'].pop(entry['id'])
+        for device in loadgen['BlockDeviceMappings']:
+            if device['Ebs']['DeleteOnTermination']:
+                self.ec2.data['volume'].pop(device['Ebs']['VolumeId'])
+        entry['status'] = 'deleted'
+        entry['public_addresses'] = []
+        aws._dsb_save(self.job, None)
+
+        # The launch-time alias is the one tolerated legacy difference. A
+        # successful terminal cleanup withdraws all runtime aliases.
+        self.assertIsInstance(
+            self.job['resources']['aws_dsb_load_generator_public_ip'],
+            str,
+        )
+        aws.destroy_resources(self.job, aws_session=self.session)
+
+        self.assertEqual(self.job['status'], 'destroyed')
+        self.assertTrue(all(not values for values in self.ec2.data.values()))
+        self.assertNotIn(
+            'aws_dsb_load_generator_public_ip',
+            self.job['resources'],
+        )
+        self.assertTrue(
+            aws.distributed_deathstarbench_candidate_deleted(self.job)
+        )
+
+    def test_load_generator_stop_rejects_changed_ownership(self):
+        self.provision()
+        self.job['resources'][DEATHSTARBENCH_EXECUTION_JOURNAL_KEY] = {
+            'state': 'measurement_started',
+        }
+        graph = self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']
+        loadgen = self.ec2.data['instance'][
+            graph['instance-load-generator']['id']
+        ]
+        next(
+            tag for tag in loadgen['Tags']
+            if tag['Key'] == 'benchmark-job'
+        )['Value'] = 'foreign-job'
+
+        with self.assertRaisesRegex(ResourceInventoryError, 'ownership tags'):
+            aws.quiesce_distributed_deathstarbench_load_generator(
+                self.job, aws_session=self.session,
+            )
+
+        self.assertFalse(any(
+            name == 'stop_instances' for name, _ in self.ec2.calls
+        ))
 
     def test_removed_ownership_tag_cannot_be_mistaken_for_absence(self):
         self.provision()

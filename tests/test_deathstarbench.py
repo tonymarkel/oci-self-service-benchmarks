@@ -146,6 +146,72 @@ class DeathStarBenchOptionsTests(unittest.TestCase):
         self.assertEqual(plan.memory_gb, 8)
         self.assertEqual(plan.deathstarbench.connections, 1)
 
+    def test_distributed_plan_is_social_network_only_and_exclusive(self):
+        options = DeathStarBenchOptions(
+            topology_id='distributed_tiered_v1',
+            runtime_id='k3s_v1',
+            workload='social_network',
+            connections=4,
+        )
+        plan = valid_plan(
+            deathstarbench=options,
+            storage={'additional_volume': False},
+            oci_defined_tags={
+                'CostCenter': {'Department': 'Engineering'},
+            },
+        )
+        self.assertEqual(plan.benchmarks, ['deathstarbench'])
+        self.assertEqual(
+            plan.oci_defined_tags,
+            {'CostCenter': {'Department': 'Engineering'}},
+        )
+
+        invalid = (
+            {'benchmarks': ['deathstarbench', 'stream']},
+            {'llm_benchmarks': ['llama_bench']},
+            {'storage': {'additional_volume': True}},
+            {
+                'deathstarbench': options.model_copy(
+                    update={'workload': 'media_microservices'}
+                ),
+            },
+        )
+        for override in invalid:
+            with self.subTest(override=override):
+                with self.assertRaises(ValidationError):
+                    values = {
+                        'deathstarbench': options,
+                        'storage': {'additional_volume': False},
+                    }
+                    values.update(override)
+                    valid_plan(**values)
+
+    def test_distributed_oci_rejects_unsupported_shapes_and_invalid_tags(self):
+        options = DeathStarBenchOptions(
+            topology_id='distributed_tiered_v1',
+            runtime_id='k3s_v1',
+            workload='social_network',
+            connections=4,
+        )
+        common = {
+            'deathstarbench': options,
+            'storage': {'additional_volume': False},
+        }
+        with self.assertRaisesRegex(ValidationError, 'supported Standard'):
+            valid_plan(shape='BM.DenseIO.E5.128', **common)
+        with self.assertRaisesRegex(ValidationError, 'invalid namespace'):
+            valid_plan(
+                oci_defined_tags={'bad.namespace': {'Department': 'Test'}},
+                **common,
+            )
+        with self.assertRaisesRegex(ValidationError, 'only for distributed'):
+            valid_plan(
+                provider='aws',
+                shape='m7i.xlarge',
+                oci_defined_tags={'CostCenter': {'Department': 'Test'}},
+                **common,
+            )
+
 
 class Wrk2ParserTests(unittest.TestCase):
     REALISTIC_OUTPUT = """\

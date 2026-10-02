@@ -801,6 +801,15 @@ def provision(
     if 'deathstarbench' in (_value(plan, 'benchmarks', ()) or ()):
         topology = _value(dsb, 'topology_id', 'single_host_v1')
         runtime = _value(dsb, 'runtime_id', 'podman_compose_v1')
+        if (
+            topology == DISTRIBUTED_TIERED_TOPOLOGY_ID
+            and runtime == K3S_RUNTIME_ID
+        ):
+            raise ValueError(
+                'The compact AWS provision entry point cannot create '
+                'distributed DeathStarBench; use the public distributed '
+                'lifecycle.'
+            )
         require_released_runtime(topology, runtime)
     profile = _profile(plan)
     region = _region(plan)
@@ -3476,6 +3485,100 @@ def _dsb_pin_image(ec2, pin, architecture):
     return copy.deepcopy(pin)
 
 
+def _latest_official_rocky_linux_9_pin(ec2, architecture):
+    """Resolve one immutable Rocky-owned public AMI using read-only calls.
+
+    The normal application path deliberately excludes Marketplace images: it
+    must never accept terms or depend on an account-specific subscription as
+    part of provisioning.  The complete returned identity is re-read and
+    persisted by the candidate controller before that controller performs its
+    first mutation.
+    """
+
+    if architecture not in {'x86_64', 'arm64'}:
+        raise ValueError('Rocky Linux 9 AMI resolution requires x86_64 or arm64.')
+    request = {
+        'Owners': [AWS_ROCKY_OFFICIAL_OWNER_ID],
+        'Filters': [
+            {'Name': 'state', 'Values': ['available']},
+            {'Name': 'architecture', 'Values': [architecture]},
+            {'Name': 'root-device-type', 'Values': ['ebs']},
+            {'Name': 'virtualization-type', 'Values': ['hvm']},
+            {'Name': 'is-public', 'Values': ['true']},
+            {'Name': 'image-type', 'Values': ['machine']},
+        ],
+    }
+    candidates = []
+    while True:
+        response = ec2.describe_images(**request)
+        for image in response.get('Images', []):
+            if (
+                re.fullmatch(r'ami-[0-9a-f]{8,17}', str(image.get('ImageId', '')))
+                and image.get('OwnerId') == AWS_ROCKY_OFFICIAL_OWNER_ID
+                and image.get('State') == 'available'
+                and image.get('Architecture') == architecture
+                and image.get('RootDeviceType') == 'ebs'
+                and image.get('VirtualizationType') == 'hvm'
+                and image.get('ImageType') == 'machine'
+                and image.get('EnaSupport') is True
+                and image.get('Public') is True
+                and not (image.get('ProductCodes') or [])
+                and re.search(
+                    r'rocky[-_ ]?9|rocky[-_ ]?linux[-_ ]?9',
+                    str(image.get('Name', '')),
+                    re.I,
+                )
+                and isinstance(image.get('CreationDate'), str)
+                and bool(image['CreationDate'])
+                and isinstance(image.get('RootDeviceName'), str)
+                and image['RootDeviceName'].startswith('/dev/')
+            ):
+                candidates.append(image)
+        token = response.get('NextToken')
+        if not token:
+            break
+        request['NextToken'] = token
+    if not candidates:
+        raise RuntimeError(
+            'No approved public Rocky Linux 9 AMI is available for '
+            f'{architecture} in this AWS region.'
+        )
+    selected = max(
+        candidates,
+        key=lambda image: (image['CreationDate'], image['ImageId']),
+    )
+    return {
+        'image_id': selected['ImageId'],
+        'owner_id': selected['OwnerId'],
+        'name': selected['Name'],
+        'creation_date': selected['CreationDate'],
+        'product_code': None,
+        'architecture': selected['Architecture'],
+        'root_device_name': selected['RootDeviceName'],
+    }
+
+
+def resolve_distributed_deathstarbench_image_pins(plan, *, aws_session=None):
+    """Resolve complete public image pins without mutating the AWS account."""
+
+    session = _session(_profile(plan), _region(plan), aws_session)
+    ec2 = _dsb_ec2_client(session, _region(plan))
+    application_architecture = _instance_type_details(
+        ec2,
+        _instance_type(plan),
+    )['architecture']
+    support = _latest_official_rocky_linux_9_pin(ec2, 'x86_64')
+    application = (
+        copy.deepcopy(support)
+        if application_architecture == 'x86_64'
+        else _latest_official_rocky_linux_9_pin(ec2, application_architecture)
+    )
+    return {
+        'support_image': support,
+        'application_image': application,
+    }
+
+
 def _dsb_role_subnet(role):
     return ('data' if role in ('database', 'cache') else
             'loadgen' if role == 'load-generator' else 'management')
@@ -3519,7 +3622,7 @@ def _dsb_save(job, persist):
     _persist(job, persist)
 
 
-def _dsb_load(job):
+def _dsb_load(job, *, allow_quiesced_load_generator=False):
     resources = job.get('resources', {})
     state = resources.get(AWS_DSB_GRAPH_KEY)
     if (resources.get('provider') != 'aws' or not isinstance(state, dict)
@@ -3545,7 +3648,12 @@ def _dsb_load(job):
                *('instance-' + k for k in AWS_DSB_ADDRESSES)}
     if set(state['graph']) != allowed:
         _dsb_fail('graph resource allowlist differs.')
-    _dsb_validate_published_aliases(resources, contract, state['graph'])
+    _dsb_validate_published_aliases(
+        resources,
+        contract,
+        state['graph'],
+        allow_quiesced_load_generator=allow_quiesced_load_generator,
+    )
     return state
 
 
@@ -3563,11 +3671,46 @@ def _dsb_runtime_aliases(contract, graph):
     return aliases
 
 
-def _dsb_validate_published_aliases(resources, contract, graph, *, required=False):
+def _dsb_validate_published_aliases(
+    resources,
+    contract,
+    graph,
+    *,
+    required=False,
+    allow_quiesced_load_generator=False,
+):
     expected = _dsb_runtime_aliases(contract, graph)
     published = set(expected).intersection(resources)
-    if published and (published != set(expected) or any(resources[key] != value for key, value in expected.items())):
-        _dsb_fail('published runtime SSH/storage aliases differ from the authoritative graph.')
+    aliases_match = (
+        published == set(expected)
+        and all(resources[key] == value for key, value in expected.items())
+    )
+    if published and not aliases_match:
+        loadgen_public_key = 'aws_dsb_load_generator_public_ip'
+        loadgen_entry = graph.get('instance-load-generator', {})
+        quiesced_ephemeral_address = (
+            allow_quiesced_load_generator
+            and DEATHSTARBENCH_EXECUTION_JOURNAL_KEY in resources
+            and published == set(expected)
+            and isinstance(loadgen_entry, Mapping)
+            and loadgen_entry.get('status') in {
+                'running', 'deleting', 'delete_ambiguous', 'deleted',
+            }
+            and loadgen_entry.get('id')
+            and not loadgen_entry.get('public_addresses')
+            and isinstance(resources.get(loadgen_public_key), str)
+            and bool(resources[loadgen_public_key])
+            and all(
+                resources[key] == value
+                for key, value in expected.items()
+                if key != loadgen_public_key
+            )
+        )
+        if not quiesced_ephemeral_address:
+            _dsb_fail(
+                'published runtime SSH/storage aliases differ from the '
+                'authoritative graph.'
+            )
     if required and published != set(expected):
         _dsb_fail('runtime SSH/storage aliases have not been cloud-validated and published.')
     return expected
@@ -3752,7 +3895,15 @@ def _dsb_specs(contract, graph):
     return dict(specs)
 
 
-def _dsb_verify_item(contract, graph, key, item, *, allow_attaching=False):
+def _dsb_verify_item(
+    contract,
+    graph,
+    key,
+    item,
+    *,
+    allow_attaching=False,
+    allow_quiesced_load_generator=False,
+):
     kind, request = _dsb_specs(contract, graph)[key]
     _dsb_require_tags(item, contract['job_id'], key)
     identifier = _DSB_KINDS[kind][2]
@@ -3797,8 +3948,29 @@ def _dsb_verify_item(contract, graph, key, item, *, allow_attaching=False):
         public_ip = item.get('PublicIpAddress')
         association = primary.get('Association', {})
         if nic['AssociatePublicIpAddress']:
-            if ((public_ip and association.get('PublicIp') and association['PublicIp'] != public_ip)
-                    or (not allow_attaching and not _dsb_public_address_ready(key, item))):
+            quiesced_address_release = (
+                allow_quiesced_load_generator
+                and key == 'instance-load-generator'
+                and item.get('State', {}).get('Name') in {
+                    'stopping', 'stopped', 'shutting-down', 'terminated',
+                }
+                and not public_ip
+                and not association
+            )
+            if (
+                not quiesced_address_release
+                and (
+                    (
+                        public_ip
+                        and association.get('PublicIp')
+                        and association['PublicIp'] != public_ip
+                    )
+                    or (
+                        not allow_attaching
+                        and not _dsb_public_address_ready(key, item)
+                    )
+                )
+            ):
                 _dsb_fail(f'{key} required public address/primary ENI association differs.')
         elif public_ip or association:
             _dsb_fail(f'{key} has an unexpected public address/primary ENI association.')
@@ -3830,7 +4002,15 @@ def _dsb_verify_item(contract, graph, key, item, *, allow_attaching=False):
                 _dsb_fail(f'{key} has an unexpected attached disk.')
 
 
-def _dsb_discover(ec2, contract, graph, key, *, allow_attaching=False):
+def _dsb_discover(
+    ec2,
+    contract,
+    graph,
+    key,
+    *,
+    allow_attaching=False,
+    allow_quiesced_load_generator=False,
+):
     kind, _ = _dsb_specs(contract, graph)[key]
     if graph[key].get('id'):
         id_filter = {'igw': 'internet-gateway-id', 'route': 'route-table-id',
@@ -3844,7 +4024,14 @@ def _dsb_discover(ec2, contract, graph, key, *, allow_attaching=False):
         _dsb_fail(f'{key} reconciliation found multiple resources.')
     if not found:
         return None
-    _dsb_verify_item(contract, graph, key, found[0], allow_attaching=allow_attaching)
+    _dsb_verify_item(
+        contract,
+        graph,
+        key,
+        found[0],
+        allow_attaching=allow_attaching,
+        allow_quiesced_load_generator=allow_quiesced_load_generator,
+    )
     return found[0]
 
 
@@ -4376,10 +4563,18 @@ def _dsb_verify_graph(ec2, contract, graph, objects):
 
 
 def recover_distributed_deathstarbench_candidate(
-    job, *, persist=None, aws_session=None, wait_for_attachments=True,
+    job,
+    *,
+    persist=None,
+    aws_session=None,
+    wait_for_attachments=True,
+    allow_quiesced_load_generator=False,
 ):
     """Read-only cloud reconciliation; persist accepted IDs, never re-create."""
-    state = _dsb_load(job)
+    state = _dsb_load(
+        job,
+        allow_quiesced_load_generator=allow_quiesced_load_generator,
+    )
     contract, graph = state['contract'], state['graph']
     session = _session(contract['profile'], contract['region'], aws_session)
     if session.client('sts', region_name=contract['region']).get_caller_identity()['Account'] != contract['account_id']:
@@ -4389,7 +4584,14 @@ def recover_distributed_deathstarbench_candidate(
     for key in _dsb_specs(contract, graph):
         entry = graph[key]
         may_wait = wait_for_attachments and entry['status'] not in ('deleting', 'delete_ambiguous', 'deleted')
-        found = _dsb_discover(ec2, contract, graph, key, allow_attaching=may_wait)
+        found = _dsb_discover(
+            ec2,
+            contract,
+            graph,
+            key,
+            allow_attaching=may_wait,
+            allow_quiesced_load_generator=allow_quiesced_load_generator,
+        )
         if found:
             if entry['status'] == 'deleted':
                 _dsb_fail(f'{key} reappeared after confirmed deletion.')
@@ -4397,7 +4599,18 @@ def recover_distributed_deathstarbench_candidate(
                 found = _dsb_wait_for_primary_attachment(ec2, job, key, found, persist)
             entry['id'] = found[_DSB_KINDS[_dsb_specs(contract, graph)[key][0]][2]]
             if key.startswith('instance-'):
-                entry['public_addresses'] = [found['PublicIpAddress']] if found.get('PublicIpAddress') else []
+                observed_public_ip = found.get('PublicIpAddress')
+                if not (
+                    allow_quiesced_load_generator
+                    and key == 'instance-load-generator'
+                    and not observed_public_ip
+                    and found.get('State', {}).get('Name') in {
+                        'stopping', 'stopped', 'shutting-down', 'terminated',
+                    }
+                ):
+                    entry['public_addresses'] = (
+                        [observed_public_ip] if observed_public_ip else []
+                    )
             if entry['status'] not in ('deleting', 'delete_ambiguous'):
                 entry['status'] = ('creating' if key.startswith('instance-')
                     and found.get('State', {}).get('Name') == 'pending' else 'running')
@@ -4414,21 +4627,117 @@ def recover_distributed_deathstarbench_candidate(
     return objects
 
 
+def quiesce_distributed_deathstarbench_load_generator(
+    job, *, aws_session=None,
+):
+    """Stop only the exact owned load generator before graph-wide cleanup.
+
+    A durable execution journal means a remote benchmark unit may still be
+    producing traffic even after the controller lost SSH.  Validate the local
+    candidate contract and the load-generator instance itself before using the
+    EC2 control plane.  This intentionally does not audit unrelated siblings:
+    the full cleanup gate below may reject those, but it must do so only after
+    measured traffic has been quiesced.
+    """
+    resources = job.get('resources', {})
+    if DEATHSTARBENCH_EXECUTION_JOURNAL_KEY not in resources:
+        return False
+    state = _dsb_load(job, allow_quiesced_load_generator=True)
+    contract, graph = state['contract'], state['graph']
+    entry = graph['instance-load-generator']
+    if entry.get('status') in ('planned', 'deleted'):
+        return False
+    session = _session(
+        contract['profile'], contract['region'], aws_session,
+    )
+    account = session.client(
+        'sts', region_name=contract['region'],
+    ).get_caller_identity().get('Account')
+    if account != contract['account_id']:
+        _dsb_fail('current AWS account differs from the launch account.')
+    ec2 = _dsb_ec2_client(session, contract['region'])
+    instance = _dsb_discover(
+        ec2,
+        contract,
+        graph,
+        'instance-load-generator',
+        allow_quiesced_load_generator=True,
+    )
+    if instance is None:
+        return False
+    state_name = instance.get('State', {}).get('Name')
+    quiet_states = {
+        'stopping', 'stopped', 'shutting-down', 'terminated',
+    }
+    if state_name in quiet_states:
+        return False
+    if state_name not in {'pending', 'running'}:
+        _dsb_fail(
+            'load-generator instance has an unsupported lifecycle state; '
+            'refusing stop.'
+        )
+    instance_id = entry.get('id')
+    if instance_id != instance.get('InstanceId'):
+        _dsb_fail('load-generator instance identity changed before stop.')
+    try:
+        ec2.stop_instances(InstanceIds=[instance_id])
+        ec2.get_waiter('instance_stopped').wait(InstanceIds=[instance_id])
+    except Exception:
+        # A response or waiter can be lost after EC2 accepted the idempotent
+        # stop.  Accept only a fresh exact-instance read proving a quiet state;
+        # otherwise surface the failure so an operator can retry safely.
+        observed = _dsb_discover(
+            ec2,
+            contract,
+            graph,
+            'instance-load-generator',
+            allow_quiesced_load_generator=True,
+        )
+        if observed is None or observed.get('State', {}).get('Name') in quiet_states:
+            return True
+        raise
+    observed = _dsb_discover(
+        ec2,
+        contract,
+        graph,
+        'instance-load-generator',
+        allow_quiesced_load_generator=True,
+    )
+    if observed is not None and observed.get('State', {}).get('Name') not in quiet_states:
+        _dsb_fail('load-generator stop was not confirmed.')
+    return True
+
+
 def destroy_distributed_deathstarbench_candidate(
     job, *, emit=None, persist=None, aws_session=None, preserve_status=False,
 ):
-    """Verify the entire graph first; delete dependencies in a replayable order.
+    """Quiesce exact load traffic, then verify and delete the whole graph.
 
-    On any ambiguity or foreign resource the remaining graph is retained. This
-    entrypoint never force-detaches a disk or deletes a dependency after an
-    unconfirmed child deletion. Durable tombstones remain as recovery evidence.
+    On any ambiguity or foreign resource the remaining graph is retained. The
+    targeted stop occurs first only when an execution journal exists, so a
+    later sibling refusal cannot strand active traffic. This entrypoint never
+    force-detaches a disk or deletes a dependency after an unconfirmed child
+    deletion. Durable tombstones remain as recovery evidence.
     """
-    state = _dsb_load(job)
+    state = _dsb_load(
+        job,
+        allow_quiesced_load_generator=(
+            DEATHSTARBENCH_EXECUTION_JOURNAL_KEY
+            in job.get('resources', {})
+        ),
+    )
     c, g = state['contract'], state['graph']
     session = _session(c['profile'], c['region'], aws_session)
     ec2 = _dsb_ec2_client(session, c['region'])
+    quiesce_distributed_deathstarbench_load_generator(
+        job, aws_session=session,
+    )
     objects = recover_distributed_deathstarbench_candidate(
-        job, persist=persist, aws_session=session, wait_for_attachments=False,
+        job,
+        persist=persist,
+        aws_session=session,
+        wait_for_attachments=False,
+        allow_quiesced_load_generator=True,
     )
     order = [*('instance-' + r for r in _dsb_contract_manifest(c).deletion_order),
              'database-data', 'nat', 'eip', *('sg-' + r for r in AWS_DSB_ADDRESSES),
@@ -4441,7 +4750,13 @@ def destroy_distributed_deathstarbench_candidate(
         if item and item.get('IpPermissions'):
             ec2.revoke_security_group_ingress(GroupId=item['GroupId'], IpPermissions=item['IpPermissions'])
     for key in order:
-        item = _dsb_discover(ec2, c, g, key)
+        item = _dsb_discover(
+            ec2,
+            c,
+            g,
+            key,
+            allow_quiesced_load_generator=True,
+        )
         if item is None:
             if g[key]['status'] == 'planned':
                 g[key]['status'] = 'deleted'
@@ -4481,11 +4796,21 @@ def destroy_distributed_deathstarbench_candidate(
                 # DeleteVpc also removes provider-created defaults. Re-audit
                 # them immediately before that implicit destructive action.
                 recover_distributed_deathstarbench_candidate(
-                    job, persist=persist, aws_session=session, wait_for_attachments=False,
+                    job,
+                    persist=persist,
+                    aws_session=session,
+                    wait_for_attachments=False,
+                    allow_quiesced_load_generator=True,
                 )
                 ec2.delete_vpc(VpcId=resource_id)
             for _ in range(AMBIGUOUS_TAG_LOOKUP_ATTEMPTS):
-                if _dsb_discover(ec2, c, g, key) is None:
+                if _dsb_discover(
+                    ec2,
+                    c,
+                    g,
+                    key,
+                    allow_quiesced_load_generator=True,
+                ) is None:
                     break
                 time.sleep(AMBIGUOUS_TAG_LOOKUP_DELAY_SECONDS)
             else:
@@ -4497,6 +4822,10 @@ def destroy_distributed_deathstarbench_candidate(
         g[key]['status'] = 'deleted'
         _dsb_save(job, persist)
         _emit(job, emit, 'Cleanup', f'Deleted AWS distributed {key}.')
+    if not all(entry.get('status') == 'deleted' for entry in g.values()):
+        _dsb_fail('AWS distributed cleanup ended without complete tombstones.')
+    for alias in _dsb_runtime_aliases(c, g):
+        job['resources'].pop(alias, None)
     if not preserve_status:
         job['status'] = 'destroyed'
     job.pop('cleanup_error', None)

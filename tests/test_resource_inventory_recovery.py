@@ -254,7 +254,10 @@ class RoleNodeInventoryRecoveryTests(unittest.TestCase):
                 self.assertTrue(
                     main.has_recoverable_resources_for_any_provider(job)
                 )
-                self.assertGreaterEqual(terminal.call_count, 2)
+                # Incomplete candidate evidence is intrinsically nonterminal;
+                # it must remain recoverable without asking a provider parser
+                # to interpret a missing ownership root.
+                terminal.assert_not_called()
 
     def test_unknown_provider_prefixed_keys_are_not_candidate_aliases(self):
         cases = (

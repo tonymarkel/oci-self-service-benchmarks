@@ -181,6 +181,16 @@ class Client:
         return response([{'vnic_id': item['id'], 'is_primary': True} for item in self.cloud.items.get('vnic', {}).values()
                          if item.get('subnet_id') == subnet_id])
 
+    def instance_action(self, identity, action, **kwargs):
+        self.cloud.calls.append((
+            'instance_action',
+            {'identity': identity, 'action': action, **kwargs},
+        ))
+        if action != 'STOP' or kwargs.get('if_match') != '1':
+            raise AssertionError((identity, action, kwargs))
+        self.cloud.items['instance'][identity]['lifecycle_state'] = 'STOPPED'
+        return response(self.cloud.items['instance'][identity])
+
 
 class OCIDistributedLifecycleTests(unittest.TestCase):
     def setUp(self):
@@ -188,6 +198,12 @@ class OCIDistributedLifecycleTests(unittest.TestCase):
         self.job = {'id': '012345abcdef', 'resources': {}}
         self.snapshots = []
         self.inputs = copy.deepcopy(INPUTS)
+
+    def test_root_tenancy_is_a_valid_compartment_scope(self):
+        oci._validate_inputs({
+            **self.inputs,
+            'compartment_id': 'ocid1.tenancy.oc1..test',
+        })
 
     def persist(self, job):
         # Ensures SDK timestamps and models have not leaked into persisted JSON.
@@ -594,6 +610,75 @@ class OCIDistributedLifecycleTests(unittest.TestCase):
                     self.destroy()
                 self.assertEqual(before, len(self.cloud.calls))
 
+    def test_load_generator_is_stopped_before_foreign_graph_refusal(self):
+        self.provision()
+        self.job['resources'][
+            oci.DEATHSTARBENCH_EXECUTION_JOURNAL_KEY
+        ] = {'state': 'measurement_started'}
+        self.cloud.put('local_peering_gateway', {
+            'vcn_id': self.contract['entries']['vcn']['id'],
+            'compartment_id': COMPARTMENT,
+        })
+        loadgen = self.contract['entries']['load-generator']
+        before = len(self.cloud.calls)
+
+        with self.assertRaisesRegex(oci.LifecycleError, 'Foreign'):
+            self.destroy()
+
+        mutations = [
+            method for method, _ in self.cloud.calls[before:]
+            if method == 'instance_action'
+            or method.startswith('delete_')
+            or method in {'detach_volume', 'terminate_instance'}
+        ]
+        self.assertEqual(mutations, ['instance_action'])
+        self.assertEqual(
+            self.cloud.items['instance'][loadgen['id']]['lifecycle_state'],
+            'STOPPED',
+        )
+        self.assertIn(
+            oci.DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+            self.job['resources'],
+        )
+
+    def test_load_generator_stop_is_replay_safe(self):
+        self.provision()
+        self.job['resources'][
+            oci.DEATHSTARBENCH_EXECUTION_JOURNAL_KEY
+        ] = {'state': 'measurement_started'}
+
+        self.assertTrue(
+            oci.quiesce_distributed_deathstarbench_load_generator(
+                self.job, clients=self.cloud.clients,
+            )
+        )
+        self.assertFalse(
+            oci.quiesce_distributed_deathstarbench_load_generator(
+                self.job, clients=self.cloud.clients,
+            )
+        )
+        self.assertEqual(
+            sum(method == 'instance_action' for method, _ in self.cloud.calls),
+            1,
+        )
+
+    def test_load_generator_stop_rejects_changed_ownership(self):
+        self.provision()
+        self.job['resources'][
+            oci.DEATHSTARBENCH_EXECUTION_JOURNAL_KEY
+        ] = {'state': 'measurement_started'}
+        entry = self.contract['entries']['load-generator']
+        self.cloud.items['instance'][entry['id']]['display_name'] = 'foreign'
+
+        with self.assertRaisesRegex(oci.LifecycleError, 'display_name'):
+            oci.quiesce_distributed_deathstarbench_load_generator(
+                self.job, clients=self.cloud.clients,
+            )
+
+        self.assertFalse(any(
+            method == 'instance_action' for method, _ in self.cloud.calls
+        ))
+
     def test_changed_default_child_blocks_all_cleanup(self):
         self.provision()
         identity = self.contract['entries']['vcn']['implicit']['security_list']['id']
@@ -818,10 +903,10 @@ class OCIDistributedLifecycleTests(unittest.TestCase):
         self.assertEqual(self.contract['status'], 'deleted')
         self.assertFalse(self.cloud.items['vcn'])
 
-    def test_no_runtime_or_registry_release_changes(self):
+    def test_coordinated_runtime_profile_is_released(self):
         from app.deathstarbench_contract import require_released_runtime
-        with self.assertRaises(ValueError):
-            require_released_runtime('distributed_tiered_v1', 'k3s_v1')
+        profile = require_released_runtime('distributed_tiered_v1', 'k3s_v1')
+        self.assertTrue(profile.released)
 
     def test_arm_application_pins_separate_compatible_platform_image(self):
         arm_image = 'ocid1.image.oc1.iad.oraclelinux9aarch64'

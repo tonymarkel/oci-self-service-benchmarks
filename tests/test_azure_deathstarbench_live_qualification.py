@@ -17,6 +17,7 @@ from unittest import mock
 from urllib.error import HTTPError
 
 from app.deathstarbench_contract import (
+    DISTRIBUTED_PROVIDER_TERMINAL_KEY,
     DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
     DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
     DISTRIBUTED_IMAGE_SET_REVISION,
@@ -24,6 +25,7 @@ from app.deathstarbench_contract import (
     DISTRIBUTED_TIERED_TOPOLOGY_ID,
     DISTRIBUTED_WORKLOAD_REVISION,
     K3S_RUNTIME_ID,
+    distributed_provider_terminal_marker,
     K3S_RUNTIME_JOURNAL_KEY,
 )
 from app.deathstarbench_k3s_workload import (
@@ -2630,6 +2632,8 @@ raise AssertionError('hard exit unexpectedly returned')
             'provider': 'azure',
             'region': 'eastus2',
             'architecture': 'arm64',
+            DISTRIBUTED_PROVIDER_TERMINAL_KEY:
+                distributed_provider_terminal_marker('azure', job['id']),
             qualification.DISTRIBUTED_NETWORK_QUALIFICATION_KEY: {
                 'schema_version': 1,
                 'provider': 'azure',

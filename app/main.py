@@ -43,6 +43,7 @@ from .apachebench import (
 )
 from .catalog import (
     BENCHMARKS,
+    DEATHSTARBENCH_TOPOLOGIES,
     DEATHSTARBENCH_WORKLOADS,
     IPERF3_PROTOCOLS,
     LLM_BENCHMARKS,
@@ -72,13 +73,21 @@ from .deathstarbench import (
     workload as deathstarbench_workload,
 )
 from .deathstarbench_contract import (
+    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+    DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
+    DISTRIBUTED_PROVIDER_TERMINAL_KEY,
     DISTRIBUTED_TIERED_TOPOLOGY_ID,
+    K3S_RUNTIME_JOURNAL_KEY,
     K3S_RUNTIME_ID,
     PODMAN_COMPOSE_RUNTIME_ID,
     SINGLE_HOST_TOPOLOGY_ID,
+    distributed_provider_terminal_marker,
     require_released_runtime,
 )
 from .deathstarbench_distributed import (
+    DISTRIBUTED_NETWORK_QUALIFICATION_KEY,
+    TOPOLOGY_FINGERPRINT_KEY,
+    TOPOLOGY_MANIFEST_KEY,
     prepare_azure_distributed_k3s_candidate,
     prepare_azure_distributed_social_network_candidate,
     prepare_gcp_distributed_k3s_candidate,
@@ -87,6 +96,16 @@ from .deathstarbench_distributed import (
 from .deathstarbench_distributed_measurement import (
     run_azure_distributed_social_network_measurement,
     run_gcp_distributed_social_network_measurement,
+)
+from .deathstarbench_public import (
+    PublicDistributedLifecycleError,
+    is_distributed_deathstarbench_plan,
+    load_run_distributed_image_lock,
+    preflight_distributed_deathstarbench_release,
+    provision_distributed_deathstarbench as provision_public_distributed_deathstarbench,
+    run_distributed_deathstarbench as run_public_distributed_deathstarbench,
+    snapshot_distributed_image_lock,
+    validate_distributed_deathstarbench_plan,
 )
 from .models import (
     BenchmarkPlan,
@@ -194,6 +213,45 @@ OCI_DISTRIBUTED_CANDIDATE_ALIAS_KEYS = frozenset({
         for attribute in ('instance_id', 'private_ip', 'public_ip')
     ),
 })
+AZURE_DISTRIBUTED_CANDIDATE_ALIAS_KEYS = frozenset({
+    'azure_distributed_candidate',
+    *(
+        f'azure_dsb_{role.replace("-", "_")}_{attribute}'
+        for role in aws_provider.AWS_DSB_ADDRESSES
+        for attribute in ('instance_id', 'private_ip', 'public_ip')
+    ),
+})
+GCP_DISTRIBUTED_CANDIDATE_ALIAS_KEYS = frozenset({
+    'gcp_distributed_candidate',
+    *(
+        f'gcp_dsb_{role.replace("-", "_")}_{attribute}'
+        for role in aws_provider.AWS_DSB_ADDRESSES
+        for attribute in ('instance_name', 'private_ip', 'public_ip')
+    ),
+})
+DISTRIBUTED_CANDIDATE_EVIDENCE_KEYS = frozenset({
+    TOPOLOGY_MANIFEST_KEY,
+    TOPOLOGY_FINGERPRINT_KEY,
+    K3S_RUNTIME_JOURNAL_KEY,
+    DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
+    DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
+    DISTRIBUTED_NETWORK_QUALIFICATION_KEY,
+})
+DISTRIBUTED_PREFLIGHT_TERMINAL_KEY = 'distributed_preflight_terminal_v1'
+_DISTRIBUTED_LIVE_EMPTY_PREFLIGHT_PROOF = object()
+
+
+def _distributed_preflight_terminal_marker(provider, job_id):
+    """Return exact run-bound proof that the live job made no cloud write."""
+
+    return {
+        'schema_version': 1,
+        'provider': provider,
+        'job_id': job_id,
+        'topology_id': DISTRIBUTED_TIERED_TOPOLOGY_ID,
+        'runtime_id': K3S_RUNTIME_ID,
+        'cloud_mutation_started': False,
+    }
 
 
 class RunCancelled(BaseException):
@@ -757,7 +815,7 @@ def _distributed_candidate_providers(job):
     plan_provider = value(plan, 'provider')
     options = value(plan, 'deathstarbench')
     if (
-        plan_provider in {'aws', 'oci'}
+        plan_provider in {'aws', 'azure', 'gcp', 'oci'}
         and (
             value(options, 'topology_id') == DISTRIBUTED_TIERED_TOPOLOGY_ID
             or value(options, 'runtime_id') == K3S_RUNTIME_ID
@@ -769,6 +827,29 @@ def _distributed_candidate_providers(job):
     if not isinstance(resources, dict):
         return frozenset(providers)
     keys = set(resources)
+    if keys & DISTRIBUTED_CANDIDATE_EVIDENCE_KEYS:
+        if plan_provider in {'aws', 'azure', 'gcp', 'oci'}:
+            providers.add(plan_provider)
+        else:
+            providers.update({'aws', 'azure', 'gcp', 'oci'})
+    # Terminal-marker presence is itself distributed ownership evidence. A
+    # damaged plan must not make a malformed or copied marker fall through to
+    # generic history deletion. Unknown marker providers deliberately classify
+    # as conflicting evidence so every terminal projection fails closed.
+    for marker_key in (
+        DISTRIBUTED_PREFLIGHT_TERMINAL_KEY,
+        DISTRIBUTED_PROVIDER_TERMINAL_KEY,
+    ):
+        if marker_key not in resources:
+            continue
+        marker = resources.get(marker_key)
+        marker_provider = (
+            marker.get('provider') if isinstance(marker, dict) else None
+        )
+        if marker_provider in {'aws', 'azure', 'gcp', 'oci'}:
+            providers.add(marker_provider)
+        else:
+            providers.update({'aws', 'azure', 'gcp', 'oci'})
     if (
         aws_provider.AWS_DSB_GRAPH_KEY in keys
         or keys & AWS_DISTRIBUTED_CANDIDATE_ALIAS_KEYS
@@ -779,16 +860,216 @@ def _distributed_candidate_providers(job):
         or keys & OCI_DISTRIBUTED_CANDIDATE_ALIAS_KEYS
     ):
         providers.add('oci')
+    if keys & AZURE_DISTRIBUTED_CANDIDATE_ALIAS_KEYS:
+        providers.add('azure')
+    if keys & GCP_DISTRIBUTED_CANDIDATE_ALIAS_KEYS:
+        providers.add('gcp')
     return frozenset(providers)
 
 
-def _distributed_candidate_local_terminal_state(job):
-    """Return local terminal proof for a distributed AWS/OCI candidate.
+def _exact_distributed_candidate_plan(job, provider):
+    """Return whether a saved plan is the one released five-node contract."""
 
-    ``None`` means that the saved run is not one of these operator-only
-    candidates. ``False`` deliberately includes malformed, mixed-provider, and
-    nonterminal candidate state so generic recovery projections fail closed.
-    Both provider predicates are local-only and never make cloud calls.
+    plan = job.get('plan') if isinstance(job, dict) else None
+
+    def value(document, key, default=None):
+        if isinstance(document, dict):
+            return document.get(key, default)
+        return getattr(document, key, default)
+
+    options = value(plan, 'deathstarbench')
+    return (
+        value(plan, 'provider') == provider
+        and tuple(value(plan, 'benchmarks', ()) or ()) == ('deathstarbench',)
+        and not tuple(value(plan, 'llm_benchmarks', ()) or ())
+        and value(options, 'topology_id') == DISTRIBUTED_TIERED_TOPOLOGY_ID
+        and value(options, 'runtime_id') == K3S_RUNTIME_ID
+        and value(options, 'workload') == 'social_network'
+    )
+
+
+def _legacy_distributed_operator_plan(job, provider, resources):
+    """Recognize persisted qualifier plans from before public API release."""
+
+    plan = job.get('plan') if isinstance(job, dict) else None
+    if not isinstance(plan, dict) or plan.get('provider') != provider:
+        return False
+    options = plan.get('deathstarbench')
+    retained_legacy_contract = (
+        options is None
+        and (
+            (
+                provider == 'aws'
+                and aws_provider.AWS_DSB_GRAPH_KEY in resources
+            )
+            or (
+                provider == 'oci'
+                and oci_provider.CONTRACT_KEY in resources
+            )
+        )
+    )
+    if retained_legacy_contract:
+        return True
+    if 'benchmarks' in plan or 'llm_benchmarks' in plan:
+        return False
+    return isinstance(options, dict) and (
+        options.get('topology_id') == DISTRIBUTED_TIERED_TOPOLOGY_ID
+        and options.get('runtime_id') == K3S_RUNTIME_ID
+        and options.get('workload') == 'social_network'
+    )
+
+
+def _distributed_cleanup_contract_is_complete(resources, provider):
+    """Require the provider's complete persisted ownership root."""
+
+    if not isinstance(resources, dict):
+        return False
+    if provider == 'aws':
+        return isinstance(resources.get(aws_provider.AWS_DSB_GRAPH_KEY), dict)
+    if provider == 'oci':
+        return isinstance(resources.get(oci_provider.CONTRACT_KEY), dict)
+    if provider == 'azure':
+        return resources.get('azure_distributed_candidate') is True
+    if provider == 'gcp':
+        return resources.get('gcp_distributed_candidate') is True
+    return False
+
+
+def _incomplete_distributed_cleanup_message(provider, job_id=None):
+    """Return actionable recovery guidance for pre-public candidate state."""
+
+    identifier = str(job_id or '<run-id>')
+    if provider in {'aws', 'oci'}:
+        command = (
+            'qualify_aws_oci_deathstarbench_distributed.py '
+            f'--provider {provider} --cleanup-only {identifier}'
+        )
+    else:
+        command = (
+            f'qualify_{provider}_deathstarbench_distributed.py '
+            f'--cleanup-only {identifier}'
+        )
+    return (
+        f'{provider.upper()} distributed DeathStarBench infrastructure has '
+        'no complete persisted ownership contract, so the normal API refuses '
+        f'cloud mutation. Use {command} with the retained qualification '
+        'artifacts.'
+    )
+
+
+def _distributed_preflight_terminal_state(job, provider):
+    """Prove an exact public run stopped before its first cloud mutation."""
+
+    resources = job.get('resources') if isinstance(job, dict) else None
+    if not isinstance(resources, dict) or set(resources) != {
+        DISTRIBUTED_PREFLIGHT_TERMINAL_KEY
+    }:
+        return False
+    return (
+        _exact_distributed_candidate_plan(job, provider)
+        and isinstance(job.get('id'), str)
+        and bool(job['id'])
+        and resources[DISTRIBUTED_PREFLIGHT_TERMINAL_KEY]
+        == _distributed_preflight_terminal_marker(provider, job['id'])
+    )
+
+
+def _transfer_live_distributed_preflight_proof(
+    job_id,
+    live_job,
+    persisted_job,
+):
+    """Transfer the process-only no-write proof under the persisted run lease.
+
+    A freshly created run may finish its supervisor after a read-only preflight
+    failure while still retaining the unforgeable in-process sentinel. Manual
+    cleanup reloads the lease-protected state before mutation, so copy that
+    sentinel only when the registry still owns the same object, both documents
+    describe the exact same public plan, and neither has resource evidence.
+    Recovered jobs and copied/mismatched objects can never satisfy this gate.
+    """
+
+    if (
+        not isinstance(live_job, dict)
+        or not isinstance(persisted_job, dict)
+        or jobs.get(job_id) is not live_job
+        or live_job.get('id') != job_id
+        or persisted_job.get('id') != job_id
+        or live_job.get('_distributed_empty_preflight_proof')
+        is not _DISTRIBUTED_LIVE_EMPTY_PREFLIGHT_PROOF
+        or live_job.get('plan') != persisted_job.get('plan')
+    ):
+        return False
+    live_resources = live_job.get('resources')
+    persisted_resources = persisted_job.get('resources')
+    if (
+        not isinstance(live_resources, dict)
+        or live_resources
+        or not isinstance(persisted_resources, dict)
+        or persisted_resources
+    ):
+        return False
+    plan = persisted_job.get('plan')
+    provider = (
+        plan.get('provider')
+        if isinstance(plan, dict)
+        else getattr(plan, 'provider', None)
+    )
+    if not _exact_distributed_candidate_plan(persisted_job, provider):
+        return False
+    persisted_job['_distributed_empty_preflight_proof'] = (
+        _DISTRIBUTED_LIVE_EMPTY_PREFLIGHT_PROOF
+    )
+    return True
+
+
+_DISTRIBUTED_TERMINAL_METADATA_KEYS = frozenset({
+    DISTRIBUTED_PROVIDER_TERMINAL_KEY,
+    DISTRIBUTED_NETWORK_QUALIFICATION_KEY,
+    'provider',
+    'region',
+    'availability_zone',
+    'instance_type',
+    'architecture',
+    'ocpus',
+    'vcpu',
+    'memory_gb',
+    'image_id',
+    'image_name',
+    'ssh_user',
+    'loadgen_shape',
+    'loadgen_vcpus',
+    'loadgen_memory_gb',
+    'loadgen_architecture',
+})
+
+
+def _cleared_distributed_provider_contract(job, provider):
+    """Validate positive run-bound proof for a provider that clears its graph."""
+
+    resources = job.get('resources') if isinstance(job, dict) else None
+    if (
+        provider not in {'azure', 'gcp'}
+        or not isinstance(resources, dict)
+        or not set(resources) <= _DISTRIBUTED_TERMINAL_METADATA_KEYS
+    ):
+        return False
+    job_id = job.get('id')
+    return (
+        isinstance(job_id, str)
+        and bool(job_id)
+        and resources.get(DISTRIBUTED_PROVIDER_TERMINAL_KEY)
+        == distributed_provider_terminal_marker(provider, job_id)
+    )
+
+
+def _distributed_candidate_local_terminal_state(job):
+    """Return local terminal proof for a distributed provider candidate.
+
+    ``None`` means that the saved run is not distributed. ``False`` deliberately
+    includes malformed, mixed-provider, and nonterminal state so generic
+    recovery projections fail closed. Every predicate is local-only and never
+    makes a cloud call.
     """
 
     if not isinstance(job, dict):
@@ -807,13 +1088,32 @@ def _distributed_candidate_local_terminal_state(job):
         if isinstance(plan, dict)
         else getattr(plan, 'provider', None)
     )
-    if job.get('status') != 'destroyed' or job.get('cleanup_error'):
+    legacy_operator_plan = _legacy_distributed_operator_plan(
+        job,
+        provider,
+        resources,
+    )
+    if (
+        job.get('status') != 'destroyed'
+        or job.get('cleanup_error')
+        or not (
+            _exact_distributed_candidate_plan(job, provider)
+            or legacy_operator_plan
+        )
+    ):
         return False
+    if DISTRIBUTED_PREFLIGHT_TERMINAL_KEY in resources:
+        # A marker is terminal evidence only when its complete payload and the
+        # exact public plan both validate. Never let a damaged marker fall
+        # through to a provider's separate cleared-graph absence proof.
+        return _distributed_preflight_terminal_state(job, provider)
     try:
         if provider == 'aws' and candidate_providers == {'aws'}:
             return aws_provider.distributed_deathstarbench_candidate_deleted(job)
         if provider == 'oci' and candidate_providers == {'oci'}:
             return oci_provider.distributed_candidate_is_deleted(job)
+        if provider in {'azure', 'gcp'} and candidate_providers == {provider}:
+            return _cleared_distributed_provider_contract(job, provider)
     except Exception:
         # A projection must never turn damaged terminal evidence into a local
         # absence proof merely because its validator raised unexpectedly.
@@ -1390,10 +1690,9 @@ def run_summary(directory):
         recovery_job
     )
     # Legacy compact providers assign ``destroyed`` only after their cleanup
-    # proof and may retain harmless audit IDs. Distributed AWS/OCI candidates
-    # instead retain a much richer tombstone graph, so history must require the
-    # provider-specific local predicate and fail closed on malformed/nonterminal
-    # state even when the outer status says ``destroyed``.
+    # proof and may retain harmless audit IDs. Distributed providers either
+    # retain a tombstone graph or clear an independently absence-checked graph,
+    # so history requires their stricter local terminal predicate.
     recoverable = (
         not distributed_terminal
         if distributed_terminal is not None
@@ -1403,6 +1702,9 @@ def run_summary(directory):
         )
     )
     provider = plan.get('provider', 'oci')
+    deathstarbench_options = plan.get('deathstarbench')
+    if not isinstance(deathstarbench_options, dict):
+        deathstarbench_options = None
     return {
         'id': directory.name,
         'provider': provider,
@@ -1425,6 +1727,7 @@ def run_summary(directory):
         'memory_gb': plan.get('memory_gb'),
         'architecture': architecture,
         'benchmarks': benchmark_names,
+        'deathstarbench': deathstarbench_options,
         'comparison_result_ids': comparison_result_ids,
     }
 
@@ -1500,8 +1803,18 @@ def saved_run_can_be_deleted(directory, *, lease_held=False):
             # lifecycle may still be the only cloud-cleanup manifest.
             return False
     if job is None:
-        # Reports and structured results created before state persistence do
-        # not contain a resource manifest that this app could later recover.
+        # Legacy reports and structured results created before state
+        # persistence do not contain a resource manifest that this app could
+        # later recover. A distributed plan is different: even when its state
+        # manifest is missing, the run ID and provider/topology contract are
+        # still operator-recovery evidence and must fail closed instead of
+        # being erased as legacy history.
+        plan = read_json_file(directory / 'plan.json', {})
+        if _distributed_candidate_providers({
+            'plan': plan,
+            'resources': {},
+        }):
+            return False
         return True
 
     status = job.get('status')
@@ -1511,9 +1824,8 @@ def saved_run_can_be_deleted(directory, *, lease_held=False):
     if status in ACTIVE_RUN_STATUSES or status in PRESERVED_RUN_STATUSES:
         return False
     # Compact providers assign ``destroyed`` only after cleanup proves their
-    # resources absent. Distributed AWS/OCI candidates retain an auditable
-    # graph, so their outer status alone is not terminal proof: malformed or
-    # nonterminal graphs must remain available for operator recovery.
+    # resources absent. Distributed runs require their provider-specific local
+    # terminal proof; an outer status alone can never hide a malformed graph.
     if status == 'destroyed':
         return _distributed_candidate_local_terminal_state(job) is not False
     try:
@@ -1535,8 +1847,8 @@ def require_destroyed_run_terminal_proof(job):
             409,
             'This run claims to be destroyed, but its saved distributed '
             'cleanup evidence is incomplete or inconsistent. No cloud '
-            'action was started; use the provider qualification recovery '
-            'workflow to reconcile it.',
+            'action was started. Restore the saved ownership contract and '
+            'retry the normal Destroy action.',
         )
 
 
@@ -1588,6 +1900,21 @@ def ssh_defaults(request: Request):
 
 @app.get('/api/catalog')
 def catalog():
+    distributed_released = False
+    try:
+        preflight_distributed_deathstarbench_release()
+        distributed_released = True
+    except PublicDistributedLifecycleError:
+        # Catalog discovery is read-only and remains usable while a release
+        # bundle is incomplete.  The exact profile stays hidden until every
+        # coordinated release artifact validates together.
+        pass
+    deathstarbench_topologies = []
+    for topology in DEATHSTARBENCH_TOPOLOGIES:
+        item = dict(topology)
+        if item.get('topology_id') == DISTRIBUTED_TIERED_TOPOLOGY_ID:
+            item['released'] = distributed_released
+        deathstarbench_topologies.append(item)
     return {
         'benchmarks': BENCHMARKS,
         'llm_benchmarks': LLM_BENCHMARKS,
@@ -1596,6 +1923,7 @@ def catalog():
         'phoronix_profiles': PHORONIX_PROFILES,
         'apachebench_workloads': APACHEBENCH_WORKLOADS,
         'deathstarbench_workloads': DEATHSTARBENCH_WORKLOADS,
+        'deathstarbench_topologies': deathstarbench_topologies,
     }
 
 
@@ -1977,6 +2305,12 @@ def azure_vm_sizes(
 @app.post('/api/jobs')
 async def create_job(plan: BenchmarkPlan):
     adapter = provider_adapter(plan)
+    distributed_deathstarbench = is_distributed_deathstarbench_plan(plan)
+    if distributed_deathstarbench:
+        try:
+            validate_distributed_deathstarbench_plan(plan)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
     if 'deathstarbench' in plan.benchmarks:
         try:
             require_released_runtime(
@@ -1986,6 +2320,11 @@ async def create_job(plan: BenchmarkPlan):
         except ValueError as exc:
             # Reject unreleased topology contracts before SSH validation,
             # filesystem writes, task creation, or any cloud API call.
+            raise HTTPException(422, str(exc)) from exc
+    if distributed_deathstarbench:
+        try:
+            preflight_distributed_deathstarbench_release()
+        except PublicDistributedLifecycleError as exc:
             raise HTTPException(422, str(exc)) from exc
     try:
         derived_public_key = derive_public_key(
@@ -2021,6 +2360,11 @@ async def create_job(plan: BenchmarkPlan):
         '_public_key': uploaded_public_key,
         '_persist_state': True,
         '_cancel_event': threading.Event(),
+        '_distributed_empty_preflight_proof': (
+            _DISTRIBUTED_LIVE_EMPTY_PREFLIGHT_PROOF
+            if distributed_deathstarbench
+            else None
+        ),
         'status': 'queued',
         'events': [],
         'resources': {},
@@ -2038,6 +2382,8 @@ async def create_job(plan: BenchmarkPlan):
             'Unable to establish exclusive ownership for the new run.',
         ) from exc
     try:
+        if distributed_deathstarbench:
+            snapshot_distributed_image_lock(run_directory)
         (run_directory / 'plan.json').write_text(
             json.dumps(sanitized_plan, indent=2)
         )
@@ -2261,6 +2607,7 @@ async def destroy(job_id: str):
     if not RUN_ID_PATTERN.fullmatch(job_id):
         raise HTTPException(404, 'Job not found')
     job = jobs.get(job_id)
+    live_job_source = job
     live_job = job is not None
     if job is not None and job['status'] == 'destroyed':
         require_destroyed_run_terminal_proof(job)
@@ -2355,20 +2702,20 @@ async def destroy(job_id: str):
         job = load_persisted_job(job_id)
         if not job:
             raise HTTPException(404, 'Job not found')
+        # Lease ownership and the fresh persisted read must precede this
+        # transfer. The proof is process-only and cannot be reconstructed after
+        # restart, copied between jobs, or used once either resource map is
+        # nonempty.
+        _transfer_live_distributed_preflight_proof(
+            job_id,
+            live_job_source,
+            job,
+        )
         if job['status'] == 'destroyed':
             require_destroyed_run_terminal_proof(job)
             cleanup_lease.release()
             return {'status': job['status']}
         candidate_providers = _distributed_candidate_providers(job)
-        if 'oci' in candidate_providers:
-            raise HTTPException(
-                409,
-                'OCI distributed DeathStarBench infrastructure is owned by '
-                'the qualification operator and cannot use the normal API '
-                'cleanup path. Run '
-                f'qualify_aws_oci_deathstarbench_distributed.py --provider '
-                f'oci --cleanup-only {job_id}.',
-            )
         resources = job.get('resources')
         plan = job.get('plan')
         plan_provider = (
@@ -2376,22 +2723,38 @@ async def destroy(job_id: str):
             if isinstance(plan, dict)
             else getattr(plan, 'provider', None)
         )
-        if (
-            'aws' in candidate_providers
-            and (
-                plan_provider != 'aws'
-                or not isinstance(resources, dict)
-                or aws_provider.AWS_DSB_GRAPH_KEY not in resources
-            )
+        if candidate_providers and (
+            len(candidate_providers) != 1
+            or plan_provider not in candidate_providers
+            or not isinstance(resources, dict)
         ):
             raise HTTPException(
                 409,
-                'AWS distributed DeathStarBench infrastructure has no '
-                'complete candidate graph and cannot use the legacy normal '
-                'API cleanup path. Run '
-                f'qualify_aws_oci_deathstarbench_distributed.py --provider '
-                f'aws --cleanup-only {job_id}.',
+                'The saved distributed DeathStarBench provider ownership '
+                'evidence is incomplete or inconsistent. No cleanup was '
+                'started.',
             )
+        if candidate_providers and resources:
+            provider = next(iter(candidate_providers))
+            if (
+                not _distributed_preflight_terminal_state(job, provider)
+                and not _cleared_distributed_provider_contract(job, provider)
+                and not _distributed_cleanup_contract_is_complete(
+                    resources,
+                    provider,
+                )
+            ):
+                raise HTTPException(
+                    409,
+                    _incomplete_distributed_cleanup_message(provider, job_id),
+                )
+        elif candidate_providers:
+            provider = next(iter(candidate_providers))
+            if not _exact_distributed_candidate_plan(job, provider):
+                raise HTTPException(
+                    409,
+                    _incomplete_distributed_cleanup_message(provider, job_id),
+                )
         jobs[job_id] = job
     except BaseException:
         if not cleanup_lease.released:
@@ -2719,6 +3082,74 @@ def latest_oracle_linux_image(compute, compartment_id, shape, require_ol9=False)
     )
 
 
+def distributed_oci_provisioning_context(plan, public_key):
+    """Resolve the exact OCI candidate inputs using read-only SDK calls."""
+
+    def plan_value(key, default=None):
+        if isinstance(plan, dict):
+            return plan.get(key, default)
+        return getattr(plan, key, default)
+
+    region = str(plan_value('region', '') or '').strip()
+    cfg, compute, network, storage, identity = clients(region)
+    compartment = str(
+        plan_value('compartment_id') or cfg.get('tenancy') or ''
+    ).strip()
+    availability_domain = str(
+        plan_value('availability_domain') or ''
+    ).strip()
+    if not availability_domain:
+        domains = identity.list_availability_domains(compartment).data
+        if not domains:
+            raise RuntimeError(
+                'OCI did not return an availability domain for the '
+                'distributed DeathStarBench run.'
+            )
+        availability_domain = str(domains[0].name or '').strip()
+    shape = str(plan_value('shape', '') or '').strip()
+    application_image = latest_oracle_linux_image(
+        compute,
+        compartment,
+        shape,
+        require_ol9=True,
+    )
+    support_image = latest_oracle_linux_image(
+        compute,
+        compartment,
+        oci_provider.SUPPORT_SHAPE,
+        require_ol9=True,
+    )
+    application_image_id = str(
+        getattr(application_image, 'id', '') or ''
+    ).strip()
+    support_image_id = str(getattr(support_image, 'id', '') or '').strip()
+    if not application_image_id or not support_image_id:
+        raise RuntimeError(
+            'OCI did not return immutable platform image IDs for all '
+            'distributed DeathStarBench roles.'
+        )
+    return {
+        'clients': {
+            'compute': compute,
+            'network': network,
+            'block': storage,
+        },
+        'inputs': {
+            'compartment_id': compartment,
+            'availability_domain': availability_domain,
+            'region': region,
+            'shape': shape,
+            'architecture': 'arm64' if '.A' in shape else 'x86_64',
+            'ocpus': plan_value('ocpus'),
+            'memory_gb': plan_value('memory_gb'),
+            'application_image_id': application_image_id,
+            'support_image_id': support_image_id,
+            'public_key': str(public_key or '').strip(),
+            'defined_tags': plan_value('oci_defined_tags', {}) or {},
+        },
+    }
+
+
 def load_generator_shape(available_shapes):
     by_name = {item.shape: item for item in available_shapes}
     for shape_name in LOAD_GENERATOR_SHAPES:
@@ -2779,6 +3210,18 @@ def provision(job, plan):
         require_released_runtime(
             topology_id,
             runtime_id,
+        )
+    if is_distributed_deathstarbench_plan(plan):
+        validate_distributed_deathstarbench_plan(plan)
+        image_lock = load_run_distributed_image_lock(RUNS, job['id'])
+        return provision_public_distributed_deathstarbench(
+            job,
+            plan,
+            image_lock,
+            public_key=job.get('_public_key'),
+            emit=event,
+            persist=persist_job_state,
+            oci_context_factory=distributed_oci_provisioning_context,
         )
     return dispatch_provider_operation(
         plan,
@@ -2841,6 +3284,11 @@ def _oci_available_volume_device(compute, instance_id):
 
 
 def provision_oci(job, plan):
+    if is_distributed_deathstarbench_plan(plan):
+        raise ValueError(
+            'The compact OCI provision entry point cannot create distributed '
+            'DeathStarBench; use the public distributed lifecycle.'
+        )
     cfg, compute, network, storage, identity = clients(plan.region)
     iperf3_protocols = selected_iperf3_protocols(plan)
     uses_load_generator = plan_uses_load_generator(plan)
@@ -5913,6 +6361,30 @@ def run_azure_benchmarks(job, plan):
 
 
 def run_benchmarks(job, plan):
+    if is_distributed_deathstarbench_plan(plan):
+        validate_distributed_deathstarbench_plan(plan)
+        options = (
+            plan.get('deathstarbench', {})
+            if isinstance(plan, dict)
+            else getattr(plan, 'deathstarbench', None)
+        )
+        require_released_runtime(
+            options.get('topology_id')
+            if isinstance(options, dict)
+            else getattr(options, 'topology_id', None),
+            options.get('runtime_id')
+            if isinstance(options, dict)
+            else getattr(options, 'runtime_id', None),
+        )
+        image_lock = load_run_distributed_image_lock(RUNS, job['id'])
+        return run_public_distributed_deathstarbench(
+            job,
+            plan,
+            image_lock,
+            execute=ssh,
+            emit=event,
+            persist=persist_job_state,
+        )
     return dispatch_provider_operation(
         plan,
         'benchmark',
@@ -6318,6 +6790,87 @@ def destroy_with_status_under_lease(job, lease):
 
 def destroy_resources(job, preserve_status=False):
     plan = job.get('plan', {})
+    resources = job.get('resources')
+    candidate_providers = _distributed_candidate_providers(job)
+    if candidate_providers:
+        provider = (
+            plan.get('provider')
+            if isinstance(plan, dict)
+            else getattr(plan, 'provider', None)
+        )
+        if (
+            len(candidate_providers) != 1
+            or provider not in candidate_providers
+            or not isinstance(resources, dict)
+        ):
+            raise RuntimeError(
+                'Distributed DeathStarBench cleanup refuses inconsistent '
+                'provider ownership evidence.'
+            )
+        if not resources:
+            # Every distributed provisioner persists its complete ownership
+            # contract before its first cloud mutation. Only the live process
+            # that created this job may use that invariant to attest an empty
+            # preflight boundary; the sentinel is intentionally never saved.
+            # A recovered empty document could be truncated state and must
+            # remain actionable instead of being relabeled as deleted.
+            if (
+                not _exact_distributed_candidate_plan(job, provider)
+                or job.get('_distributed_empty_preflight_proof')
+                is not _DISTRIBUTED_LIVE_EMPTY_PREFLIGHT_PROOF
+            ):
+                raise RuntimeError(
+                    _incomplete_distributed_cleanup_message(
+                        provider,
+                        job.get('id'),
+                    )
+                )
+            resources[DISTRIBUTED_PREFLIGHT_TERMINAL_KEY] = (
+                _distributed_preflight_terminal_marker(
+                    provider,
+                    str(job.get('id') or ''),
+                )
+            )
+            if not preserve_status:
+                job['status'] = 'destroyed'
+                job.pop('cleanup_error', None)
+                event(
+                    job,
+                    'Complete',
+                    'Distributed preflight stopped before any cloud resource '
+                    'was created; no infrastructure cleanup was required.',
+                )
+            elif job.get('_persist_state'):
+                # ``preserve_status`` is used by lifecycle callers that own
+                # the outer status transition.  The absence proof itself must
+                # still be durable before this function returns.
+                persist_job_state(job)
+            return resources
+        if _distributed_preflight_terminal_state(job, provider):
+            if not preserve_status:
+                job['status'] = 'destroyed'
+                job.pop('cleanup_error', None)
+                if job.get('_persist_state'):
+                    persist_job_state(job)
+            return resources
+        if _cleared_distributed_provider_contract(job, provider):
+            if not preserve_status:
+                job['status'] = 'destroyed'
+                job.pop('cleanup_error', None)
+                if job.get('_persist_state'):
+                    persist_job_state(job)
+            return resources
+        required_contract = _distributed_cleanup_contract_is_complete(
+            resources,
+            provider,
+        )
+        if not required_contract:
+            raise RuntimeError(
+                _incomplete_distributed_cleanup_message(
+                    provider,
+                    job.get('id'),
+                )
+            )
     return dispatch_provider_operation(
         plan,
         'destroy',
@@ -6326,29 +6879,132 @@ def destroy_resources(job, preserve_status=False):
                 job,
                 preserve_status=preserve_status,
             ),
-            'aws': lambda: aws_provider.destroy_resources(
-                job,
-                emit=event,
-                persist=persist_job_state,
-                preserve_status=preserve_status,
+            'aws': lambda: destroy_aws_resources(
+                job, preserve_status=preserve_status
             ),
-            'gcp': lambda: gcp_provider.destroy_resources(
-                job,
-                emit=event,
-                persist=persist_job_state,
-                preserve_status=preserve_status,
+            'gcp': lambda: destroy_gcp_resources(
+                job, preserve_status=preserve_status
             ),
-            'azure': lambda: azure_provider.destroy_resources(
-                job,
-                emit=event,
-                persist=persist_job_state,
-                preserve_status=preserve_status,
+            'azure': lambda: destroy_azure_resources(
+                job, preserve_status=preserve_status
             ),
         },
     )
 
 
+def destroy_gcp_resources(job, preserve_status=False):
+    """Clean GCP and require its atomic terminal-deletion marker."""
+
+    distributed = (
+        job.get('resources', {}).get('gcp_distributed_candidate') is True
+    )
+    result = gcp_provider.destroy_resources(
+        job,
+        emit=event,
+        persist=persist_job_state,
+        preserve_status=preserve_status,
+    )
+    if distributed and not _cleared_distributed_provider_contract(job, 'gcp'):
+        raise RuntimeError(
+            'GCP distributed cleanup lacks strict terminal deletion evidence.'
+        )
+    return result
+
+
+def destroy_azure_resources(job, preserve_status=False):
+    """Clean Azure and require its atomic terminal-deletion marker."""
+
+    distributed = (
+        job.get('resources', {}).get('azure_distributed_candidate') is True
+    )
+    result = azure_provider.destroy_resources(
+        job,
+        emit=event,
+        persist=persist_job_state,
+        preserve_status=preserve_status,
+    )
+    if distributed and not _cleared_distributed_provider_contract(job, 'azure'):
+        raise RuntimeError(
+            'Azure distributed cleanup lacks strict terminal deletion evidence.'
+        )
+    return result
+
+
+def destroy_aws_resources(job, preserve_status=False):
+    """Run AWS cleanup and require the candidate's retained tombstone proof."""
+
+    distributed = aws_provider.AWS_DSB_GRAPH_KEY in job.get('resources', {})
+    result = aws_provider.destroy_resources(
+        job,
+        emit=event,
+        persist=persist_job_state,
+        preserve_status=preserve_status,
+    )
+    if distributed:
+        aws_provider.recover_distributed_deathstarbench_candidate(
+            job,
+            persist=persist_job_state,
+            wait_for_attachments=False,
+        )
+        if not aws_provider.distributed_deathstarbench_candidate_deleted(job):
+            raise RuntimeError(
+                'AWS distributed cleanup lacks strict terminal deletion '
+                'evidence.'
+            )
+        if not preserve_status:
+            job['status'] = 'destroyed'
+            job.pop('cleanup_error', None)
+            persist_job_state(job)
+    return result
+
+
+def destroy_distributed_oci_resources(job, preserve_status=False):
+    """Clean an OCI candidate from its exact persisted regional contract."""
+
+    contract = job.get('resources', {}).get(oci_provider.CONTRACT_KEY)
+    inputs = contract.get('inputs') if isinstance(contract, dict) else None
+    region = inputs.get('region') if isinstance(inputs, dict) else None
+    if not isinstance(region, str) or not region.strip():
+        raise RuntimeError(
+            'OCI distributed cleanup requires its persisted region contract.'
+        )
+    _, compute, network, storage, _ = clients(region.strip())
+    provider_clients = {
+        'compute': compute,
+        'network': network,
+        'block': storage,
+    }
+    if not preserve_status:
+        job['status'] = 'destroying'
+        event(job, 'Destroy', 'Removing distributed OCI infrastructure.')
+    oci_provider.destroy_distributed_deathstarbench_candidate(
+        job,
+        clients=provider_clients,
+        persist=persist_job_state,
+        emit=event,
+    )
+    oci_provider.attest_distributed_candidate_terminal_deletion(
+        job,
+        clients=provider_clients,
+    )
+    if not oci_provider.distributed_candidate_is_deleted(job):
+        raise RuntimeError(
+            'OCI distributed cleanup lacks strict terminal deletion evidence.'
+        )
+    if not preserve_status:
+        job['status'] = 'destroyed'
+        job.pop('cleanup_error', None)
+        persist_job_state(job)
+        event(job, 'Complete', 'OCI distributed infrastructure was destroyed.')
+    return job['resources']
+
+
 def destroy_oci_resources(job, preserve_status=False):
+    if oci_provider.CONTRACT_KEY in job.get('resources', {}):
+        return destroy_distributed_oci_resources(
+            job,
+            preserve_status=preserve_status,
+        )
     if not preserve_status: job['status'] = 'destroying'
     event(job, 'Destroy', 'Removing benchmark infrastructure.')
     plan = job['plan']; cfg, compute, network, storage, _ = clients(plan['region']); r = job['resources']

@@ -224,6 +224,8 @@
                         Podman and podman-compose. A separate fixed-size x86 load-generator VM sends traffic to the
                         benchmark VM's private cloud-network address.</p>
                     <div class="grid">
+                        <label class="wide">Deployment topology<select id="deathstarTopology" required></select>
+                            <small id="deathstarTopologyDescription"></small></label>
                         <label class="wide">Workload<select id="deathstarWorkload" required></select>
                             <small id="deathstarWorkloadDescription"></small></label>
                         <label>Warm-up (seconds)<input id="deathstarWarmup" type="number" min="0" max="600" step="1"
@@ -236,6 +238,16 @@
                                 value="64" required></label>
                         <label>Request rate (requests/second)<input id="deathstarRequestRate" type="number" min="1"
                                 max="100000" step="1" value="100" required></label>
+                    </div>
+                    <p id="deathstarDistributedWarning" class="provider-notice" hidden><strong>Five-VM deployment:</strong>
+                        the selected compute shape applies to the application role. Fixed support VMs and dedicated
+                        database storage are provisioned as part of this run, increasing cloud cost.</p>
+                    <div id="ociDefinedTagsField" class="grid" hidden>
+                        <label class="wide">OCI defined tags (advanced JSON)<textarea id="ociDefinedTags"
+                                rows="4" spellcheck="false"
+                                placeholder='{"CostCenter":{"Department":"Engineering"}}'>{}</textarea>
+                            <small>Optional namespace, key, and value mappings applied to every supported resource in
+                                the distributed deployment.</small></label>
                     </div>
                     <p class="hint">Connections and request rate must each be at least—and evenly divisible by—the
                         number of worker threads. The benchmark shape requires at least 16 GB of memory.</p>
@@ -291,7 +303,7 @@
             <iframe id="reportFrame" class="report-frame" title="Benchmark results"></iframe>
         </section>
     </main>
-    <script src="/static/app.js?v=33"></script>
+    <script src="/static/app.js?v=35"></script>
 </body>
 
 </html>

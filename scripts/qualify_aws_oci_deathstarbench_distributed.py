@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely qualify the unreleased AWS or OCI distributed DSB candidate.
+"""Safely qualify the AWS or OCI distributed DeathStarBench contract.
 
 This is an operator-only harness.  It deliberately bypasses the public
 dispatcher, persists immutable provider/image inputs before the first cloud

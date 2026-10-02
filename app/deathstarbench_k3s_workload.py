@@ -6,9 +6,9 @@ are checked into ``app/manifests``.  A render may vary only by selecting one
 of the two platform-specific immutable image sets and by inserting the load
 generator's single-host CIDR into the ingress policy.
 
-The bundle is a release candidate.  Its image lock must explicitly say that
-it is unreleased; changing that state belongs to the wider runtime release
-gate, after the images and live-cloud lifecycle have been qualified.
+The checked-in release flags are validated as one coordinated bundle by the
+public lifecycle gate. Qualification artifacts may remain all-false, while a
+public bundle must be all-true; a mixed transition always fails closed.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from typing import Any
 from .deathstarbench_contract import (
     DISTRIBUTED_IMAGE_SET_REVISION,
     DISTRIBUTED_LOAD_DRIVER_REVISION,
+    DISTRIBUTED_TIERED_PROFILE,
     DISTRIBUTED_WORKLOAD_REVISION,
 )
 from .k3s_runtime import K3S_BINARY
@@ -294,6 +295,7 @@ class WorkloadImageLock:
 
     platforms: Mapping[str, Mapping[str, str]]
     load_driver: LoadDriverImageLock
+    released: bool
     fingerprint: str
 
     def image(self, architecture: str, image_key: str) -> str:
@@ -332,9 +334,9 @@ def validate_image_lock(value: Mapping[str, Any]) -> WorkloadImageLock:
         raise WorkloadBundleError('The workload image lock has the wrong image set.')
     if lock['upstream_revision'] != UPSTREAM_REVISION:
         raise WorkloadBundleError('The workload image lock has the wrong upstream commit.')
-    if lock['released'] is not False:
+    if type(lock['released']) is not bool:
         raise WorkloadBundleError(
-            'The distributed workload image set is still an unreleased candidate.'
+            'The distributed workload image-set release flag must be Boolean.'
         )
 
     raw_load_driver = _mapping(lock['load_driver'], 'Load-driver image lock')
@@ -473,6 +475,7 @@ def validate_image_lock(value: Mapping[str, Any]) -> WorkloadImageLock:
     return WorkloadImageLock(
         platforms=MappingProxyType(normalized),
         load_driver=load_driver,
+        released=lock['released'],
         fingerprint=fingerprint,
     )
 
@@ -542,8 +545,10 @@ def _component_specs() -> tuple[dict[str, Any], ...]:
         raise WorkloadBundleError('The component asset has the wrong upstream commit.')
     if asset['workload_revision'] != DISTRIBUTED_WORKLOAD_REVISION:
         raise WorkloadBundleError('The component asset has the wrong workload revision.')
-    if asset['released'] is not False:
-        raise WorkloadBundleError('The component asset must remain unreleased.')
+    if type(asset['released']) is not bool:
+        raise WorkloadBundleError(
+            'The component asset release flag must be Boolean.'
+        )
 
     raw_components = _sequence(asset['components'], 'Workload components')
     components: list[dict[str, Any]] = []
@@ -930,7 +935,7 @@ def _network_policy_contract() -> tuple[tuple[str, str, str, int], ...]:
         or asset['namespace'] != NAMESPACE
         or asset['upstream_revision'] != UPSTREAM_REVISION
         or asset['workload_revision'] != DISTRIBUTED_WORKLOAD_REVISION
-        or asset['released'] is not False
+        or type(asset['released']) is not bool
     ):
         raise WorkloadBundleError('The network-policy asset identity drifted.')
     edges: list[tuple[str, str, str, int]] = []
@@ -997,6 +1002,56 @@ def _network_policy_contract() -> tuple[tuple[str, str, str, int], ...]:
     }:
         raise WorkloadBundleError('The load-generator policy contract drifted.')
     return tuple(edges)
+
+
+def distributed_bundle_release_flags(
+    image_lock: Mapping[str, Any],
+) -> Mapping[str, bool]:
+    """Validate and expose the coordinated public-release flags.
+
+    Runtime, image, load-driver, component, and NetworkPolicy assets form one
+    executable bundle.  A partial transition is never a public release, even
+    though both qualification candidates and released artifacts remain valid,
+    inspectable inputs.
+    """
+
+    validated_lock = validate_image_lock(image_lock)
+    _component_specs()
+    _network_policy_contract()
+    component_asset = _mapping(
+        _read_json_asset(COMPONENT_ASSET, 'workload component asset'),
+        'Workload component asset',
+    )
+    policy_asset = _mapping(
+        _read_json_asset(NETWORK_POLICY_ASSET, 'network-policy asset'),
+        'Network-policy asset',
+    )
+    return MappingProxyType({
+        'runtime_profile': DISTRIBUTED_TIERED_PROFILE.released,
+        'image_lock': validated_lock.released,
+        'load_driver': validated_lock.load_driver.published,
+        'component_asset': component_asset['released'],
+        'network_policy_asset': policy_asset['released'],
+    })
+
+
+def require_released_distributed_bundle(
+    image_lock: Mapping[str, Any],
+) -> WorkloadImageLock:
+    """Require one completely validated, coherently released bundle."""
+
+    flags = distributed_bundle_release_flags(image_lock)
+    if not all(flags.values()):
+        state = ', '.join(
+            f'{name}={str(value).lower()}'
+            for name, value in flags.items()
+        )
+        raise WorkloadBundleError(
+            'Distributed DeathStarBench is not coherently released ('
+            + state
+            + ').'
+        )
+    return validate_image_lock(image_lock)
 
 
 def _policy_metadata(name: str) -> dict[str, Any]:

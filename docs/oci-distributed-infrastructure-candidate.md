@@ -1,8 +1,10 @@
 # OCI distributed infrastructure candidate
 
-This is an **operator-only candidate**, not a released benchmark mode. The
-normal UI/API/provider dispatch and release gate are unchanged. A separate
-operator wrapper now connects the infrastructure adapter to Oracle Linux guest
+This document describes the **operator qualification surface** for the
+released distributed benchmark. The compact provider entrypoint rejects direct
+distributed calls so callers cannot bypass the coordinated public lifecycle
+gate; the normal UI/API uses that guarded public dispatcher. A separate operator
+wrapper connects the infrastructure adapter to Oracle Linux guest
 preparation, the shared K3s bootstrap, Social Network workload, network
 qualification, optional measurement path, resume, and cleanup-only machinery.
 See `docs/deathstarbench-distributed.md` for the complete current contract and
@@ -175,9 +177,8 @@ projected no recoverable ownership.
 
 This completes OCI's representative checkpoint failure matrix. OCI does not
 claim live active-signal or cleanup-interruption qualification; those paths
-remain synthetically covered but are outside this matrix. The candidate remains
-unreleased. The operator-path prerequisite gates are complete; public UI/API
-lifecycle integration and the coordinated release-flag transition remain a
-separate slice.
+remain synthetically covered but are outside this matrix. The operator-path
+prerequisite gates, public UI/API lifecycle integration, and coordinated
+release-flag transition are complete.
 
 SDK reference: [OCI Core clients](https://docs.oracle.com/en-us/iaas/tools/python/latest/api/core.html).

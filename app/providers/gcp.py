@@ -25,11 +25,13 @@ from typing import Any
 from ..deathstarbench_contract import (
     DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
     DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
+    DISTRIBUTED_PROVIDER_TERMINAL_KEY,
     DISTRIBUTED_TIERED_TOPOLOGY_ID,
     K3S_RUNTIME_ID,
     K3S_RUNTIME_JOURNAL_KEY,
     PODMAN_COMPOSE_RUNTIME_ID,
     SINGLE_HOST_TOPOLOGY_ID,
+    distributed_provider_terminal_marker,
     require_released_runtime,
 )
 from ..deathstarbench_topology import (
@@ -2735,6 +2737,15 @@ def provision(
     benchmarks = tuple(_value(plan, 'benchmarks', ()) or ())
     if 'deathstarbench' in benchmarks:
         topology_id, runtime_id = _deathstarbench_contract_ids(plan)
+        if (
+            topology_id == DISTRIBUTED_TIERED_TOPOLOGY_ID
+            and runtime_id == K3S_RUNTIME_ID
+        ):
+            raise ValueError(
+                'The compact GCP provision entry point cannot create '
+                'distributed DeathStarBench; use the public distributed '
+                'lifecycle.'
+            )
         require_released_runtime(topology_id, runtime_id)
     requested_project = _project_id(plan)
     project_id, _, clients = _runtime(requested_project or None, credentials, clients)
@@ -5512,6 +5523,119 @@ def _verify_distributed_cleanup_resources(
                 )
 
 
+def _quiesce_distributed_load_generator(
+    job: dict[str, Any],
+    *,
+    clients: Mapping[str, Any],
+    manifest: DeathStarBenchTopologyManifest,
+) -> bool:
+    """Stop one exact owned load generator before the full graph audit."""
+    resources = job['resources']
+    if DEATHSTARBENCH_EXECUTION_JOURNAL_KEY not in resources:
+        return False
+    prefix = DISTRIBUTED_NODE_PREFIXES['load-generator']
+    if not resources.get(f'{prefix}_name'):
+        return False
+    if (
+        not resources.get(f'{prefix}_id')
+        or not resources.get(f'{prefix}_self_link')
+    ):
+        raise RuntimeError(
+            'Refusing GCP load-generator stop because its immutable identity '
+            'is incomplete.'
+        )
+    instance = _get_cleanup_resource(prefix, resources, clients)
+    if instance is None:
+        return False
+    # Reuse the candidate's exact identity, ownership, placement, metadata,
+    # NIC, and disk validator.  Supplying only this node deliberately avoids
+    # letting an unrelated foreign sibling prevent traffic quiescence.
+    _verify_distributed_cleanup_resources(
+        job, {prefix: instance}, manifest=manifest,
+    )
+    state = str(_value(instance, 'status', '') or '').upper()
+    quiet_states = {'STOPPING', 'TERMINATED', 'SUSPENDING', 'SUSPENDED'}
+    if state in quiet_states:
+        return False
+    if state != 'RUNNING':
+        raise RuntimeError(
+            'Refusing GCP load-generator stop because its lifecycle state '
+            f'is unsupported: {state or "missing"}.'
+        )
+    project_id = str(resources['gcp_project_id'])
+    zone = str(resources['gcp_zone'])
+    name = str(resources[f'{prefix}_name'])
+    # Stop is idempotent, and a deterministic UUID also deduplicates a retry
+    # whose first operation response was lost.
+    request_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f'gcp-dsb-loadgen-stop:{project_id}:{zone}:{name}:'
+        f'{resources.get(f"{prefix}_id")}',
+    ))
+    try:
+        operation = _call(
+            clients['instances'], 'stop', clients, 'StopInstanceRequest',
+            project=project_id, zone=zone, instance=name,
+            request_id=request_id,
+        )
+        _wait(operation)
+    except Exception:
+        observed = _get_cleanup_resource(prefix, resources, clients)
+        if observed is None:
+            return True
+        _verify_distributed_cleanup_resources(
+            job, {prefix: observed}, manifest=manifest,
+        )
+        if str(_value(observed, 'status', '') or '').upper() in quiet_states:
+            return True
+        raise
+    observed = _get_cleanup_resource(prefix, resources, clients)
+    if observed is None:
+        return True
+    _verify_distributed_cleanup_resources(
+        job, {prefix: observed}, manifest=manifest,
+    )
+    if str(_value(observed, 'status', '') or '').upper() not in quiet_states:
+        raise RuntimeError('GCP load-generator stop was not confirmed.')
+    return True
+
+
+def quiesce_distributed_deathstarbench_load_generator(
+    job: dict[str, Any],
+    *,
+    credentials=None,
+    clients: Mapping[str, Any] | None = None,
+) -> bool:
+    """Public replay-safe load-generator stop using persisted ownership."""
+    resources = job.setdefault('resources', {})
+    if DEATHSTARBENCH_EXECUTION_JOURNAL_KEY not in resources:
+        return False
+    try:
+        manifest, _, _ = _load_distributed_cleanup_contract(job)
+    except (ResourceInventoryError, TopologyManifestError, ValueError) as exc:
+        raise RuntimeError(
+            'Refusing GCP load-generator stop because the persisted '
+            f'ownership inventory is invalid: {exc}'
+        ) from exc
+    project_id, _, clients = _runtime(
+        str(resources['gcp_project_id']), credentials, clients,
+    )
+    project = _call(
+        clients['projects'], 'get', clients, 'GetProjectRequest',
+        project=project_id,
+    )
+    if str(_value(project, 'id', '') or '') != str(
+        resources['gcp_compute_project_id']
+    ):
+        raise RuntimeError(
+            'Refusing GCP load-generator stop because the immutable Compute '
+            'project ID changed.'
+        )
+    return _quiesce_distributed_load_generator(
+        job, clients=clients, manifest=manifest,
+    )
+
+
 def _destroy_distributed_deathstarbench_candidate(
     job: dict[str, Any],
     *,
@@ -5544,6 +5668,10 @@ def _destroy_distributed_deathstarbench_candidate(
             'Refusing GCP distributed cleanup because the immutable Compute '
             'project ID changed. No resources were changed.'
         )
+
+    _quiesce_distributed_load_generator(
+        job, clients=clients, manifest=manifest,
+    )
 
     for prefix in DISTRIBUTED_RESOURCE_PREFIXES:
         if not resources.get(f'{prefix}_name'):
@@ -5724,7 +5852,17 @@ def _destroy_distributed_deathstarbench_candidate(
         DEATHSTARBENCH_WORKLOAD_JOURNAL_KEY,
         DEATHSTARBENCH_EXECUTION_JOURNAL_KEY,
     ))
-    _forget(job, persist, *cleanup_keys)
+    for key in cleanup_keys:
+        resources.pop(key, None)
+    resources[DISTRIBUTED_PROVIDER_TERMINAL_KEY] = (
+        distributed_provider_terminal_marker(
+            'gcp',
+            str(job.get('id') or ''),
+        )
+    )
+    # The final independent absence sweep above and this marker are committed
+    # together. A missing or truncated graph is never itself terminal proof.
+    _persist(job, persist)
     if not preserve_status:
         job['status'] = 'destroyed'
         job['cleanup_error'] = None

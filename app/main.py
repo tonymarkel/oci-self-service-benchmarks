@@ -1183,6 +1183,7 @@ def has_recoverable_resources(job):
         'gcp_project_id',
         'gcp_compute_project_id',
         'gcp_peer_image_id',
+        'gcp_loadgen_image_id',
     }
     if any(
         value and key.endswith('_id') and key not in identity_only_ids

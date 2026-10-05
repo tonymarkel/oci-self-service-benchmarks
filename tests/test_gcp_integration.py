@@ -113,6 +113,63 @@ class GcpMainDispatchTests(unittest.TestCase):
         job['resources'].pop('gcp_resource_prefix')
         self.assertFalse(main.has_recoverable_resources(job))
 
+    def test_cleaned_web_run_image_provenance_is_not_recoverable(self):
+        from tests.test_gcp_provider import (
+            PUBLIC_KEY,
+            clients_and_timeline,
+            plan as provider_plan,
+        )
+
+        clients, _ = clients_and_timeline()
+        selected = provider_plan(benchmarks=['apachebench'])
+        job = {
+            'id': 'webclean',
+            'status': 'provisioning',
+            'plan': selected,
+            'resources': {},
+            'events': [],
+            'results': [],
+            'created_at': main.now(),
+            'updated_at': main.now(),
+        }
+        main.gcp_provider.provision(
+            job, selected, public_key=PUBLIC_KEY, clients=clients,
+        )
+        main.gcp_provider.destroy_resources(job, clients=clients)
+
+        self.assertEqual(job['status'], 'destroyed')
+        self.assertEqual(job['resources']['gcp_loadgen_image_id'], '9001')
+        self.assertNotIn('gcp_resource_prefix', job['resources'])
+        self.assertFalse(main.has_recoverable_resources(job))
+        self.assertFalse(main.has_recoverable_resources_for_any_provider(job))
+        with tempfile.TemporaryDirectory() as directory:
+            run_directory = Path(directory) / job['id']
+            with (
+                patch.object(main, 'RUNS', Path(directory)),
+                patch.dict(main.jobs, {}, clear=True),
+            ):
+                main.persist_job_state(job)
+                status = main.job_status(job['id'])
+                summary = main.run_summary(run_directory)
+
+        self.assertEqual(status['status'], 'destroyed')
+        self.assertFalse(status['recoverable'])
+        self.assertFalse(summary['recoverable'])
+        for key, value in (
+            ('gcp_resource_prefix', 'benchmark-webclean'),
+            ('gcp_loadgen_instance_id', '2002'),
+            ('gcp_loadgen_instance_request_id', 'response-lost-request'),
+        ):
+            with self.subTest(resource_key=key):
+                pending = {
+                    **job,
+                    'resources': {**job['resources'], key: value},
+                }
+                self.assertTrue(main.has_recoverable_resources(pending))
+                self.assertTrue(
+                    main.has_recoverable_resources_for_any_provider(pending)
+                )
+
     def test_persisted_gcp_ownership_contract_survives_app_restart(self):
         job = {
             'id': 'gcp-response-lost',

@@ -295,6 +295,21 @@ def plan(**overrides):
     return value
 
 
+def fixed_machine(name, *, architecture='X86_64', **metadata):
+    return {
+        'name': name,
+        'id': '4004',
+        'self_link': (
+            'projects/p/zones/us-east1-b/machineTypes/' + name
+        ),
+        'guest_cpus': 4,
+        'memory_mb': 16384,
+        'architecture': architecture,
+        'is_shared_cpu': False,
+        **metadata,
+    }
+
+
 def network_create_arguments(clients, job_id='abc12345'):
     name = f'benchmark-{job_id}'
     expected = gcp._network_resource(clients, job_id, name)
@@ -314,6 +329,66 @@ def network_create_arguments(clients, job_id='abc12345'):
 
 
 class GcpDiscoveryTests(unittest.TestCase):
+    def test_c4_and_c4d_variants_use_explicit_hyperdisk_profile(self):
+        names = [
+            f'{family}-{capacity}-4'
+            for family in ('c4', 'c4d')
+            for capacity in ('standard', 'highmem', 'highcpu')
+        ]
+        machines = [fixed_machine(name) for name in names]
+        for family in ('c4', 'c4d'):
+            machines.extend([
+                fixed_machine(f'{family}-standard-8', architecture='ARM64'),
+                fixed_machine(f'{family}-standard-16', architecture=''),
+                fixed_machine(f'{family}-standard-4-lssd'),
+                fixed_machine(f'{family}-standard-4-metal'),
+                fixed_machine(
+                    f'{family}-standard-32',
+                    bundled_local_ssds={'partition_count': 1},
+                ),
+                fixed_machine(
+                    f'{family}-standard-48', accelerators=[{'count': 1}],
+                ),
+            ])
+        clients, _ = clients_and_timeline()
+        clients['machine_types'] = StaticService(listed=machines)
+
+        response = gcp.machine_types('p', 'us-east1-b', clients=clients)
+
+        self.assertEqual(
+            {item['machine_type'] for item in response['items']}, set(names)
+        )
+        for item in response['items']:
+            with self.subTest(machine_type=item['machine_type']):
+                self.assertEqual(item['architecture'], 'x86_64')
+                self.assertEqual(item['disk_type'], 'hyperdisk-balanced')
+                self.assertEqual(item['disk_interface'], 'NVME')
+                self.assertEqual(item['network_interface_type'], 'GVNIC')
+                self.assertEqual(item['disk_provisioned_iops'], 3000)
+                self.assertEqual(
+                    item['disk_provisioned_throughput_mibps'], 140
+                )
+
+    def test_c3_selection_retains_persistent_disk_defaults(self):
+        clients, _ = clients_and_timeline()
+        clients['machine_types'] = MachineTypeService([
+            fixed_machine('c3-standard-4'),
+        ])
+
+        response = gcp.machine_types('p', 'us-east1-b', clients=clients)
+        details = gcp._machine_type_details(
+            'p', 'us-east1-b', 'c3-standard-4', clients
+        )
+
+        self.assertEqual(len(response['items']), 1)
+        for item in (response['items'][0], details):
+            self.assertEqual(item['machine_type'], 'c3-standard-4')
+            self.assertEqual(item['disk_type'], 'pd-balanced')
+            self.assertIsNone(item['disk_interface'])
+            self.assertIsNone(item['network_interface_type'])
+            self.assertIsNone(item['disk_provisioned_iops'])
+            self.assertIsNone(item['disk_provisioned_throughput_mibps'])
+
     def test_machine_types_filter_non_pd_and_high_risk_variants(self):
         items = [
             {
@@ -370,6 +445,153 @@ class GcpDiscoveryTests(unittest.TestCase):
 
 
 class GcpProvisionTests(unittest.TestCase):
+    def test_invalid_c4_and_c4d_fail_before_any_cloud_insert(self):
+        for family in ('c4', 'c4d'):
+            cases = (
+                ('arm', '', {'architecture': 'ARM64'}),
+                ('missing-architecture', '', {'architecture': ''}),
+                ('lssd', '-lssd', {}),
+                ('metal', '-metal', {}),
+                ('bundled', '', {'bundled_local_ssds': {'partition_count': 1}}),
+                ('accelerator', '', {'accelerators': [{'count': 1}]}),
+            )
+            for case, suffix, metadata in cases:
+                with self.subTest(family=family, case=case):
+                    shape = f'{family}-standard-4{suffix}'
+                    machine = fixed_machine(shape, **metadata)
+                    if case == 'missing-architecture':
+                        machine.pop('architecture')
+                    clients, timeline = clients_and_timeline(
+                        machine=machine
+                    )
+
+                    with self.assertRaisesRegex(ValueError, 'not supported'):
+                        gcp.provision(
+                            {'id': 'invalid4', 'resources': {}},
+                            plan(shape=shape, ocpus=4, memory_gb=16),
+                            public_key=PUBLIC_KEY,
+                            clients=clients,
+                        )
+
+                    self.assertFalse(any(
+                        event[0] == 'insert' for event in timeline
+                    ))
+
+    def test_c4_and_c4d_full_graph_keeps_fixed_n2_web_loadgen_profile(self):
+        for family in ('c4', 'c4d'):
+            with self.subTest(family=family):
+                shape = f'{family}-standard-4'
+                clients, _ = clients_and_timeline(machine=fixed_machine(shape))
+                n2 = {
+                    **fixed_machine('n2-standard-2'),
+                    'id': '2002',
+                    'guest_cpus': 2,
+                    'memory_mb': 8192,
+                }
+                clients['machine_types'] = MachineTypeService([
+                    fixed_machine(shape), n2,
+                ])
+                job = {'id': 'c4graph1', 'resources': {}}
+
+                resources = gcp.provision(
+                    job,
+                    plan(
+                        shape=shape,
+                        ocpus=4,
+                        memory_gb=16,
+                        benchmarks=['fio', 'iperf3', 'apachebench'],
+                        iperf3={'protocols': ['tcp']},
+                        storage={
+                            'additional_volume': True,
+                            'additional_size_gb': 100,
+                        },
+                    ),
+                    public_key=PUBLIC_KEY,
+                    clients=clients,
+                )
+
+                self.assertEqual(resources['architecture'], 'x86_64')
+                for kind in ('boot', 'data'):
+                    self.assertEqual(
+                        resources[f'gcp_{kind}_disk_type'],
+                        'hyperdisk-balanced',
+                    )
+                    self.assertEqual(
+                        resources[f'gcp_{kind}_disk_provisioned_iops'], 3000
+                    )
+                    self.assertEqual(
+                        resources[
+                            f'gcp_{kind}_disk_provisioned_throughput_mibps'
+                        ],
+                        140,
+                    )
+                for role in ('runner', 'iperf-peer'):
+                    instance = clients['instances'].items[
+                        f'benchmark-c4graph1-{role}'
+                    ]
+                    self.assertEqual(
+                        instance['machine_type'].rsplit('/', 1)[-1], shape
+                    )
+                    self.assertEqual(
+                        instance['network_interfaces'][0]['nic_type'], 'GVNIC'
+                    )
+                    self.assertTrue(all(
+                        disk['interface'] == 'NVME'
+                        for disk in instance['disks']
+                    ))
+                for role in ('runner-boot', 'iperf-peer-boot', 'data'):
+                    disk = clients['disks'].items[f'benchmark-c4graph1-{role}']
+                    self.assertEqual(
+                        disk['type_'].rsplit('/', 1)[-1], 'hyperdisk-balanced'
+                    )
+                    self.assertEqual(disk['provisioned_iops'], 3000)
+                    self.assertEqual(disk['provisioned_throughput'], 140)
+
+                loadgen = clients['instances'].items['benchmark-c4graph1-loadgen']
+                self.assertEqual(
+                    loadgen['machine_type'].rsplit('/', 1)[-1], 'n2-standard-2'
+                )
+                self.assertNotIn('nic_type', loadgen['network_interfaces'][0])
+                self.assertTrue(all(
+                    'interface' not in disk for disk in loadgen['disks']
+                ))
+                boot = clients['disks'].items['benchmark-c4graph1-loadgen-boot']
+                self.assertEqual(boot['type_'].rsplit('/', 1)[-1], 'pd-balanced')
+                self.assertIsNone(boot['provisioned_iops'])
+                self.assertIsNone(boot['provisioned_throughput'])
+                self.assertEqual(resources['loadgen_architecture'], 'x86_64')
+                self.assertEqual(resources['gcp_loadgen_boot_disk_type'], 'pd-balanced')
+
+    def test_c3_provision_retains_persistent_disk_graph(self):
+        shape = 'c3-standard-4'
+        clients, _ = clients_and_timeline(machine=fixed_machine(shape))
+
+        resources = gcp.provision(
+            {'id': 'c3graph1', 'resources': {}},
+            plan(
+                shape=shape,
+                ocpus=4,
+                memory_gb=16,
+                benchmarks=['fio', 'iperf3'],
+                iperf3={'protocols': ['tcp']},
+                storage={'additional_volume': True, 'additional_size_gb': 100},
+            ),
+            public_key=PUBLIC_KEY,
+            clients=clients,
+        )
+
+        self.assertEqual(resources['gcp_boot_disk_type'], 'pd-balanced')
+        self.assertEqual(resources['gcp_data_disk_type'], 'pd-balanced')
+        for instance in clients['instances'].items.values():
+            self.assertNotIn('nic_type', instance['network_interfaces'][0])
+            self.assertTrue(all(
+                'interface' not in disk for disk in instance['disks']
+            ))
+        for disk in clients['disks'].items.values():
+            self.assertEqual(disk['type_'].rsplit('/', 1)[-1], 'pd-balanced')
+            self.assertIsNone(disk.get('provisioned_iops'))
+            self.assertIsNone(disk.get('provisioned_throughput'))
+
     def test_partial_persisted_image_contract_fails_before_cloud_insert(self):
         clients, timeline = clients_and_timeline()
         job = {
@@ -1651,33 +1873,39 @@ class GcpCleanupTests(unittest.TestCase):
         timeline.clear()
         return job, clients, timeline
 
-    def c4a_provisioned(self):
+    def hyperdisk_provisioned(self, family='c4a'):
+        shape = f'{family}-standard-4'
+        architecture = 'ARM64' if family == 'c4a' else 'X86_64'
         machine = {
-            'name': 'c4a-standard-4',
+            'name': shape,
             'id': '4004',
             'self_link': (
-                'projects/p/zones/us-east1-b/machineTypes/c4a-standard-4'
+                'projects/p/zones/us-east1-b/machineTypes/' + shape
             ),
             'guest_cpus': 4,
             'memory_mb': 16384,
-            'architecture': 'ARM64',
+            'architecture': architecture,
         }
+        image_name = (
+            'rocky-linux-9-arm64-v20260813'
+            if architecture == 'ARM64' else 'rocky-linux-9-v20260813'
+        )
         image = {
-            'name': 'rocky-linux-9-arm64-v20260813',
+            'name': image_name,
             'id': '9401',
             'self_link': (
                 'projects/rocky-linux-cloud/global/images/'
-                'rocky-linux-9-arm64-v20260813'
+                + image_name
             ),
             'status': 'READY',
-            'architecture': 'ARM64',
+            'architecture': architecture,
         }
         clients, timeline = clients_and_timeline(machine=machine, image=image)
         job = {'id': 'c4ac1ean', 'resources': {}, 'status': 'provisioning'}
         gcp.provision(
             job,
             plan(
-                shape='c4a-standard-4',
+                shape=shape,
                 ocpus=4,
                 memory_gb=16,
                 benchmarks=['fio', 'iperf3'],
@@ -1692,6 +1920,26 @@ class GcpCleanupTests(unittest.TestCase):
         )
         timeline.clear()
         return job, clients, timeline
+
+    def test_c4_and_c4d_cleanup_after_json_restart(self):
+        for family in ('c4', 'c4d'):
+            with self.subTest(family=family):
+                job, clients, timeline = self.hyperdisk_provisioned(family)
+                restarted = json.loads(json.dumps(job))
+
+                gcp.destroy_resources(restarted, clients=clients)
+
+                self.assertEqual(restarted['status'], 'destroyed')
+                self.assertFalse(gcp._managed_resources_remain(
+                    restarted['resources']
+                ))
+                for service_name in (
+                    'instances', 'disks', 'firewalls', 'subnetworks', 'networks',
+                ):
+                    self.assertEqual(clients[service_name].items, {})
+                deleted = [event[1] for event in timeline if event[0] == 'delete']
+                self.assertEqual(deleted[:2], ['instance', 'instance'])
+                self.assertEqual(deleted[-1], 'network')
 
     def web_provisioned(self):
         clients, timeline = clients_and_timeline()
@@ -2024,35 +2272,49 @@ class GcpCleanupTests(unittest.TestCase):
 
         self.assertFalse(any(item[0] == 'delete' for item in timeline))
 
-    def test_c4a_cleanup_rejects_hyperdisk_performance_drift(self):
-        job, clients, timeline = self.c4a_provisioned()
-        data = clients['disks'].items['benchmark-c4ac1ean-data']
-        data['provisioned_iops'] = 4000
+    def test_hyperdisk_cleanup_rejects_performance_drift_after_restart(self):
+        for family in ('c4a', 'c4', 'c4d'):
+            for field, value, message in (
+                ('provisioned_iops', 4000, 'provisioned IOPS changed'),
+                ('provisioned_throughput', 200, 'provisioned throughput changed'),
+            ):
+                with self.subTest(family=family, field=field):
+                    job, clients, timeline = self.hyperdisk_provisioned(family)
+                    data = clients['disks'].items['benchmark-c4ac1ean-data']
+                    data[field] = value
+                    restarted = json.loads(json.dumps(job))
 
-        with self.assertRaisesRegex(RuntimeError, 'provisioned IOPS changed'):
-            gcp.destroy_resources(job, clients=clients)
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        gcp.destroy_resources(restarted, clients=clients)
 
-        self.assertFalse(any(item[0] == 'delete' for item in timeline))
+                    self.assertFalse(any(
+                        item[0] == 'delete' for item in timeline
+                    ))
 
-    def test_c4a_cleanup_rejects_nic_and_disk_interface_drift(self):
-        for field, value, message in (
-            ('nic', 'VIRTIO_NET', 'network interface type'),
-            ('disk', 'SCSI', 'disk interface'),
-        ):
-            with self.subTest(field=field):
-                job, clients, timeline = self.c4a_provisioned()
-                runner = clients['instances'].items[
-                    'benchmark-c4ac1ean-runner'
-                ]
-                if field == 'nic':
-                    runner['network_interfaces'][0]['nic_type'] = value
-                else:
-                    runner['disks'][0]['interface'] = value
+    def test_hyperdisk_cleanup_rejects_nic_and_disk_interface_drift(self):
+        for family in ('c4a', 'c4', 'c4d'):
+            for field, value, message in (
+                ('nic', 'VIRTIO_NET', 'network interface type'),
+                ('disk', 'SCSI', 'disk interface'),
+            ):
+                with self.subTest(family=family, field=field):
+                    job, clients, timeline = self.hyperdisk_provisioned(family)
+                    runner = clients['instances'].items[
+                        'benchmark-c4ac1ean-runner'
+                    ]
+                    if field == 'nic':
+                        runner['network_interfaces'][0]['nic_type'] = value
+                    else:
+                        runner['disks'][0]['interface'] = value
 
-                with self.assertRaisesRegex(RuntimeError, message):
-                    gcp.destroy_resources(job, clients=clients)
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        gcp.destroy_resources(
+                            json.loads(json.dumps(job)), clients=clients
+                        )
 
-                self.assertFalse(any(item[0] == 'delete' for item in timeline))
+                    self.assertFalse(any(
+                        item[0] == 'delete' for item in timeline
+                    ))
 
     def test_response_lost_c4a_data_disk_replays_exact_hyperdisk_profile(self):
         clients, timeline = clients_and_timeline()

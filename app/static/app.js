@@ -43,7 +43,7 @@ const apachebenchDefaults = {
     warmup_requests: 10000,
     trials: 3,
 };
-const GCP_C4A_DATA_SIZE_GB = 100;
+const GCP_HYPERDISK_DATA_SIZE_GB = 100;
 const legacySysbenchWorkloads = {
     sysbench_cpu: 'cpu',
     sysbench_memory: 'memory',
@@ -252,17 +252,17 @@ function applyGcpMachineStorageDefault(shape) {
         && dataSize.dataset.userEdited !== 'true'
         && Number(dataSize.value) === Number(dataSize.defaultValue)
     ) {
-        dataSize.value = String(GCP_C4A_DATA_SIZE_GB);
-        dataSize.dataset.gcpC4aDefaultApplied = 'true';
+        dataSize.value = String(GCP_HYPERDISK_DATA_SIZE_GB);
+        dataSize.dataset.gcpHyperdiskDefaultApplied = 'true';
         return;
     }
     if (
         !usesHyperdisk
-        && dataSize.dataset.gcpC4aDefaultApplied === 'true'
+        && dataSize.dataset.gcpHyperdiskDefaultApplied === 'true'
         && dataSize.dataset.userEdited !== 'true'
     ) {
         dataSize.value = dataSize.defaultValue;
-        delete dataSize.dataset.gcpC4aDefaultApplied;
+        delete dataSize.dataset.gcpHyperdiskDefaultApplied;
     }
 }
 
@@ -272,7 +272,7 @@ function updateGcpStorageHint(shape = null) {
     applyGcpMachineStorageDefault(shape);
     if (!shape) {
         hint.textContent =
-            'GCP /data volumes use pd-balanced by default; C4A uses Hyperdisk Balanced. ' +
+            'GCP /data volumes use pd-balanced by default; C4, C4A, and C4D use Hyperdisk Balanced. ' +
             'Select a machine type to see the exact disk and network profile. ' +
             'These provider-required settings are recorded in the report.';
         return;
@@ -284,10 +284,10 @@ function updateGcpStorageHint(shape = null) {
             `${shape.shape} uses ${diskLabel} for its boot and optional /data volumes ` +
             'at the benchmark baseline of 3,000 IOPS and 140 MiB/s, plus ' +
             `${interfaceLabel}. The app derives these required settings and records ` +
-            'the provisioned values in every benchmark result. An untouched /data ' +
-            `size defaults to ${GCP_C4A_DATA_SIZE_GB} GiB for C4A; launch still ` +
-            'depends on remaining regional C4A vCPU and Hyperdisk capacity/performance ' +
-            'quota and on zonal capacity.';
+            'the provisioned values in the report and applicable benchmark metadata. An untouched /data ' +
+            `size defaults to ${GCP_HYPERDISK_DATA_SIZE_GB} GiB. Launch depends on ` +
+            'remaining regional VM-family vCPU and Hyperdisk capacity quota and on ' +
+            'zonal capacity. Baseline IOPS and throughput do not count against quota.';
         return;
     }
     hint.textContent =
@@ -1091,7 +1091,7 @@ $('#shape').addEventListener('input', updateSelectedShape);
 $('#shape').addEventListener('change', updateSelectedShape);
 $('#dataSize').addEventListener('input', () => {
     $('#dataSize').dataset.userEdited = 'true';
-    delete $('#dataSize').dataset.gcpC4aDefaultApplied;
+    delete $('#dataSize').dataset.gcpHyperdiskDefaultApplied;
 });
 $$('input[name=security]').forEach(input => input.addEventListener('change', () => {
     $('#shielded').hidden = $('input[name=security]:checked').value !== 'shielded';
@@ -1696,7 +1696,7 @@ async function resetToPlan() {
     delete $('#additional').dataset.ociChecked;
     delete $('#additional').dataset.compactChecked;
     delete $('#dataSize').dataset.userEdited;
-    delete $('#dataSize').dataset.gcpC4aDefaultApplied;
+    delete $('#dataSize').dataset.gcpHyperdiskDefaultApplied;
     setSysbenchValues();
     setIperf3Values();
     setPhoronixValues();
@@ -1717,7 +1717,7 @@ async function restorePlan(plan) {
     const provider = plan.provider || 'oci';
     delete $('#additional').dataset.compactChecked;
     delete $('#dataSize').dataset.userEdited;
-    delete $('#dataSize').dataset.gcpC4aDefaultApplied;
+    delete $('#dataSize').dataset.gcpHyperdiskDefaultApplied;
     $('#provider').value = provider;
     $('#awsProfile').value = plan.aws_profile || 'default';
     $('#gcpProject').value = plan.gcp_project_id || '';

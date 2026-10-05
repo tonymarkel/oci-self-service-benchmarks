@@ -232,7 +232,7 @@ class LiveStopUiTests(unittest.TestCase):
     def test_changed_assets_are_cache_busted(self):
         self.assertIn('/static/styles.css?v=19', INDEX)
         self.assertIn('/static/styles.css?v=19', HISTORY_INDEX)
-        self.assertIn('/static/app.js?v=35', INDEX)
+        self.assertIn('/static/app.js?v=36', INDEX)
 
 
 if __name__ == '__main__':

@@ -1,4 +1,5 @@
 import copy
+import json
 import unittest
 from unittest.mock import patch
 
@@ -197,6 +198,23 @@ def candidate_plan():
     }
 
 
+def x86_application_candidate(shape):
+    clients, timeline = candidate_clients()
+    machines = list(clients['machine_types'].machines.values()) + [{
+        'name': shape,
+        'id': '4008',
+        'self_link': f'projects/p/zones/us-east1-b/machineTypes/{shape}',
+        'guest_cpus': 8,
+        'memory_mb': 32768,
+        'architecture': 'X86_64',
+        'is_shared_cpu': False,
+    }]
+    clients['machine_types'] = MachineTypeService(machines)
+    selected = candidate_plan()
+    selected.update({'shape': shape, 'ocpus': 8, 'memory_gb': 32})
+    return clients, timeline, selected
+
+
 class GcpDistributedDeathStarBenchLifecycleTests(unittest.TestCase):
     def test_real_compute_message_accepts_static_private_address(self):
         from google.cloud import compute_v1
@@ -343,6 +361,171 @@ class GcpDistributedDeathStarBenchLifecycleTests(unittest.TestCase):
             resources['gcp_dsb_application_image_id'], '9401'
         )
         self.assertEqual(resources['gcp_dsb_support_image_id'], '9001')
+
+    def test_c4_c4d_and_c3_profiles_survive_restart_and_complete_cleanup(self):
+        for shape, application_disk_type, application_interface in (
+            ('c4-standard-8', 'hyperdisk-balanced', 'NVME'),
+            ('c4d-standard-8', 'hyperdisk-balanced', 'NVME'),
+            ('c3-standard-8', 'pd-balanced', None),
+        ):
+            with self.subTest(shape=shape):
+                clients, timeline, selected = x86_application_candidate(shape)
+                job = {'id': 'gcpx8601', 'resources': {}}
+                gcp.provision_distributed_deathstarbench_candidate(
+                    job,
+                    selected,
+                    public_key=PUBLIC_KEY,
+                    clients=clients,
+                )
+                restarted = json.loads(json.dumps(job))
+                recorded_ids = {
+                    name: instance['id']
+                    for name, instance in clients['instances'].items.items()
+                }
+                timeline.clear()
+
+                resources = gcp.provision_distributed_deathstarbench_candidate(
+                    restarted,
+                    selected,
+                    public_key=PUBLIC_KEY,
+                    clients=clients,
+                )
+
+                self.assertEqual(
+                    {
+                        name: instance['id']
+                        for name, instance in clients['instances'].items.items()
+                    },
+                    recorded_ids,
+                )
+                application_insert = next(
+                    event[2] for event in timeline
+                    if event[:2] == ('insert', 'instance')
+                    and event[2]['instance_resource']['name']
+                    == 'benchmark-gcpx8601-dsb-application'
+                )
+                self.assertEqual(
+                    application_insert['request_id'],
+                    job['resources']['gcp_dsb_application_instance_request_id'],
+                )
+                application = clients['instances'].items[
+                    'benchmark-gcpx8601-dsb-application'
+                ]
+                hyperdisk = application_disk_type == 'hyperdisk-balanced'
+                self.assertEqual(
+                    application['machine_type'].rsplit('/', 1)[-1], shape
+                )
+                self.assertEqual(
+                    application['network_interfaces'][0].get('nic_type'),
+                    'GVNIC' if hyperdisk else None,
+                )
+                self.assertEqual(
+                    application['disks'][0].get('interface'),
+                    application_interface,
+                )
+                application_boot = clients['disks'].items[
+                    'benchmark-gcpx8601-dsb-application-boot'
+                ]
+                self.assertEqual(
+                    application_boot['type_'].rsplit('/', 1)[-1],
+                    application_disk_type,
+                )
+                self.assertEqual(
+                    application_boot['provisioned_iops'],
+                    3000 if hyperdisk else None,
+                )
+                self.assertEqual(
+                    application_boot['provisioned_throughput'],
+                    140 if hyperdisk else None,
+                )
+                self.assertEqual(resources['architecture'], 'x86_64')
+                self.assertEqual(resources['gcp_dsb_application_image_id'], '9001')
+                self.assertEqual(resources['gcp_dsb_support_image_id'], '9001')
+                for role, support_shape in gcp.DISTRIBUTED_ROLE_MACHINE_TYPES.items():
+                    instance = clients['instances'].items[
+                        f'benchmark-gcpx8601-dsb-{role}'
+                    ]
+                    self.assertEqual(
+                        instance['machine_type'].rsplit('/', 1)[-1], support_shape
+                    )
+                    support_boot = clients['disks'].items[
+                        f'benchmark-gcpx8601-dsb-{role}-boot'
+                    ]
+                    self.assertEqual(
+                        support_boot['type_'].rsplit('/', 1)[-1], 'pd-balanced'
+                    )
+                    self.assertIsNone(support_boot['provisioned_iops'])
+                    self.assertIsNone(support_boot['provisioned_throughput'])
+                database = clients['instances'].items[
+                    'benchmark-gcpx8601-dsb-database'
+                ]
+                database_data = next(
+                    disk for disk in database['disks'] if not disk['boot']
+                )
+                self.assertEqual(database_data['interface'], 'SCSI')
+                self.assertFalse(database_data['auto_delete'])
+                self.assertEqual(
+                    clients['disks'].items[
+                        'benchmark-gcpx8601-dsb-database-data'
+                    ]['type_'].rsplit('/', 1)[-1],
+                    'pd-ssd',
+                )
+
+                restarted = json.loads(json.dumps(restarted))
+                with patch.object(gcp, 'RECONCILIATION_DELAY_SECONDS', 0):
+                    gcp.destroy_resources(restarted, clients=clients)
+
+                self.assertEqual(restarted['status'], 'destroyed')
+                self.assertEqual(
+                    restarted['resources'][DISTRIBUTED_PROVIDER_TERMINAL_KEY],
+                    distributed_provider_terminal_marker('gcp', 'gcpx8601'),
+                )
+                for service in (
+                    'instances', 'disks', 'firewalls', 'routers',
+                    'subnetworks', 'networks',
+                ):
+                    self.assertFalse(clients[service].items, service)
+
+    def test_c4_and_c4d_cleanup_refuses_changed_application_profile(self):
+        for shape in ('c4-standard-8', 'c4d-standard-8'):
+            for field, value, message in (
+                ('nic', 'VIRTIO_NET', 'network interface type'),
+                ('interface', 'SCSI', 'disk interface'),
+                ('provisioned_iops', 4000, 'provisioned IOPS changed'),
+                ('provisioned_throughput', 200, 'provisioned throughput changed'),
+            ):
+                with self.subTest(shape=shape, field=field):
+                    clients, timeline, selected = x86_application_candidate(shape)
+                    job = {'id': 'gcpx8602', 'resources': {}}
+                    gcp.provision_distributed_deathstarbench_candidate(
+                        job,
+                        selected,
+                        public_key=PUBLIC_KEY,
+                        clients=clients,
+                    )
+                    application = clients['instances'].items[
+                        'benchmark-gcpx8602-dsb-application'
+                    ]
+                    if field == 'nic':
+                        application['network_interfaces'][0]['nic_type'] = value
+                    elif field == 'interface':
+                        application['disks'][0]['interface'] = value
+                    else:
+                        clients['disks'].items[
+                            'benchmark-gcpx8602-dsb-application-boot'
+                        ][field] = value
+                    restarted = json.loads(json.dumps(job))
+                    timeline.clear()
+
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        gcp.destroy_resources(restarted, clients=clients)
+
+                    self.assertFalse(any(
+                        event[0] in {'insert', 'patch', 'stop', 'delete'}
+                        for event in timeline
+                    ))
+                    self.assertEqual(len(clients['instances'].items), 5)
+                    self.assertIn('gcp_distributed_candidate', restarted['resources'])
 
     def test_provisions_exact_five_role_graph_and_inventory(self):
         clients, timeline = candidate_clients()

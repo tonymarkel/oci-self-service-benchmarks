@@ -129,15 +129,13 @@ DISTRIBUTED_FIREWALL_PREFIXES = (
 )
 
 # Fourth-generation Compute Engine series use Hyperdisk rather than
-# Persistent Disk. C4A has a deliberately supported Hyperdisk Balanced
-# profile below; the other Hyperdisk-only families remain excluded until each
+# Persistent Disk. C4, C4A, and C4D have deliberately supported Hyperdisk
+# Balanced profiles below; other Hyperdisk-only families remain excluded until each
 # architecture/guest/storage contract is implemented and tested explicitly.
 HYPERDISK_ONLY_FAMILIES = frozenset({
     'a4',
     'a4x',
     'a4x-max',
-    'c4',
-    'c4d',
     'c4n',
     'g4',
     'h4d',
@@ -149,7 +147,12 @@ HYPERDISK_ONLY_FAMILIES = frozenset({
     'x4',
 })
 SUPPORTED_ARCHITECTURES = frozenset({'x86_64', 'arm64'})
-EXPLICIT_GVNIC_FAMILIES = frozenset({'c4a', 'h3'})
+HYPERDISK_BALANCED_ARCHITECTURES = MappingProxyType({
+    'c4': 'x86_64',
+    'c4a': 'arm64',
+    'c4d': 'x86_64',
+})
+EXPLICIT_GVNIC_FAMILIES = frozenset({'c4', 'c4a', 'c4d', 'h3'})
 
 EventCallback = Callable[[dict[str, Any], str, str], None]
 PersistCallback = Callable[[dict[str, Any]], None]
@@ -591,11 +594,11 @@ def _machine_storage_profile(
         )
     except ValueError:
         return None
-    if family == 'c4a':
-        # C4A is Google Axion (Arm64), supports only NVMe disks, requires
-        # Hyperdisk for boot/storage, and requires gVNIC. Reject inconsistent
-        # API metadata instead of silently launching another architecture.
-        if architecture != 'arm64':
+    if family in HYPERDISK_BALANCED_ARCHITECTURES:
+        # C4/C4D are x86_64 and C4A is Google Axion (Arm64). These families
+        # require Hyperdisk, NVMe disk attachments, and gVNIC. Reject
+        # inconsistent API metadata rather than launch another architecture.
+        if architecture != HYPERDISK_BALANCED_ARCHITECTURES[family]:
             return None
         return {
             'disk_type': HYPERDISK_BALANCED_TYPE,
@@ -2448,8 +2451,8 @@ def _instance_resource(
         'GVNIC' if family in EXPLICIT_GVNIC_FAMILIES else None
     )
     if requested_nic_type:
-        # H3 and C4A require Google Virtual NIC. Rocky Linux 9's Google image
-        # includes the gVNIC driver for both supported architectures.
+        # H3 and C4/C4A/C4D require Google Virtual NIC. Google's Rocky Linux 9
+        # image includes the gVNIC driver for both supported architectures.
         network_interface['nic_type'] = requested_nic_type
 
     tags = tuple(dict.fromkeys(
@@ -2785,7 +2788,7 @@ def provision(
     if fileio_selected and not additional_volume:
         raise ValueError(
             'GCP fio and Sysbench File I/O require the additional '
-            'pd-balanced data disk.'
+            'data disk.'
         )
 
     project = _call(
@@ -2827,7 +2830,7 @@ def provision(
     loadgen_image = None
     if web_benchmarks:
         # Resolve capacity and image compatibility before the first cloud
-        # write. A C4A target can therefore use an independent x86 N2 load
+        # write. A Hyperdisk-family target can use an independent x86 N2 load
         # generator without inheriting the target's Hyperdisk/NVMe profile.
         loadgen_details = _loadgen_machine_details(project_id, zone, clients)
         loadgen_image = _persisted_image_contract(
@@ -5383,6 +5386,20 @@ def _verify_distributed_cleanup_resources(
                 f'Refusing GCP distributed cleanup because {role} has a '
                 'different machine type. No resources were changed.'
             )
+        # Reconstruct the immutable family contract from the saved inventory;
+        # older runs need no new state keys to verify required NVMe/gVNIC use.
+        storage_profile = _machine_storage_profile({
+            'name': expected_machine,
+            'architecture': resources[
+                f'gcp_dsb_{role.replace("-", "_")}_architecture'
+            ],
+        })
+        if storage_profile is None:
+            raise RuntimeError(
+                f'Refusing GCP distributed cleanup because {role} has an '
+                'unsupported machine/architecture contract. No resources '
+                'were changed.'
+            )
         tags = _string_set(_value(_value(instance, 'tags', {}), 'items', ()))
         if tags != {role_tags[role]}:
             raise RuntimeError(
@@ -5423,6 +5440,14 @@ def _verify_distributed_cleanup_resources(
             raise RuntimeError(
                 f'Refusing GCP distributed cleanup because {role} network '
                 'relationships changed. No resources were changed.'
+            )
+        expected_nic_type = storage_profile['network_interface_type']
+        if expected_nic_type and str(
+            _value(interfaces[0], 'nic_type', '') or ''
+        ) != expected_nic_type:
+            raise RuntimeError(
+                f'Refusing GCP distributed cleanup because {role} network '
+                'interface type changed. No resources were changed.'
             )
         private_ip = (
             _value(interfaces[0], 'network_i_p')
@@ -5466,6 +5491,14 @@ def _verify_distributed_cleanup_resources(
                 safe = bool(_value(disk, 'boot', False)) and bool(
                     _value(disk, 'auto_delete', False)
                 )
+                expected_interface = storage_profile['disk_interface']
+                if expected_interface and str(
+                    _value(disk, 'interface', '') or ''
+                ) != expected_interface:
+                    raise RuntimeError(
+                        f'Refusing GCP distributed cleanup because {role} '
+                        'disk interface changed. No resources were changed.'
+                    )
             else:
                 safe = (
                     not bool(_value(disk, 'boot', False))

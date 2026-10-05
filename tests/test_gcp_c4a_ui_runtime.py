@@ -85,7 +85,7 @@ class GcpHyperdiskUiContractTests(unittest.TestCase):
         self.assertIn("shape.disk_type === 'hyperdisk-balanced'", JAVASCRIPT)
         self.assertIn('3,000 IOPS and 140 MiB/s', JAVASCRIPT)
         self.assertIn('shape.network_interface_type', JAVASCRIPT)
-        self.assertIn('the provisioned values in every benchmark result', JAVASCRIPT)
+        self.assertIn('the provisioned values in the report and applicable benchmark metadata', JAVASCRIPT)
         self.assertIn('const GCP_HYPERDISK_DATA_SIZE_GB = 100', JAVASCRIPT)
         self.assertIn("dataSize.dataset.userEdited !== 'true'", JAVASCRIPT)
         self.assertIn("dataSize.dataset.gcpHyperdiskDefaultApplied = 'true'", JAVASCRIPT)

@@ -107,8 +107,9 @@ supported types use a zonal `pd-balanced` Persistent Disk, whose performance
 scales with disk size and VM vCPU count. C4, C4A, and C4D use Hyperdisk Balanced
 for both boot and optional `/data` disks at an explicit baseline of 3,000 IOPS and
 140 MiB/s, with NVMe disks and gVNIC as required by the machine series. The app
-records that resolved profile in every benchmark result; it does not accept a
-client-supplied disk or NIC override. C4/C4A/C4D `-lssd`, bare-metal, and accelerator
+records that resolved profile in reports and applicable benchmark metadata;
+it does not accept a client-supplied disk or NIC override. C4/C4A/C4D `-lssd`,
+bare-metal, and accelerator
 variants remain excluded. Other families that require an unimplemented
 Hyperdisk profile, bundled Local SSD, or accelerators remain hidden. Discovery
 therefore never exposes a provider-verified instance-local device to the
@@ -128,6 +129,9 @@ CPU quotas plus Hyperdisk Balanced capacity quota. The 3,000 IOPS / 140 MiB/s ba
 count against Hyperdisk performance quota. A quota failure is distinct from
 a temporary zonal-capacity failure: the former needs a quota adjustment or a
 smaller plan, while the latter can often be retried in another advertised zone.
+
+Live C4/C4D evidence and the remaining distributed C4D qualification gap are
+documented in the [qualification record](docs/qualification/gcp-c4-c4d-public-lifecycle.md).
 
 ## Microsoft Azure setup
 

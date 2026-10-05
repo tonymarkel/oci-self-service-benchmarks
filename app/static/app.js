@@ -284,7 +284,7 @@ function updateGcpStorageHint(shape = null) {
             `${shape.shape} uses ${diskLabel} for its boot and optional /data volumes ` +
             'at the benchmark baseline of 3,000 IOPS and 140 MiB/s, plus ' +
             `${interfaceLabel}. The app derives these required settings and records ` +
-            'the provisioned values in every benchmark result. An untouched /data ' +
+            'the provisioned values in the report and applicable benchmark metadata. An untouched /data ' +
             `size defaults to ${GCP_HYPERDISK_DATA_SIZE_GB} GiB. Launch depends on ` +
             'remaining regional VM-family vCPU and Hyperdisk capacity quota and on ' +
             'zonal capacity. Baseline IOPS and throughput do not count against quota.';

@@ -178,7 +178,7 @@
                     <p class="hint" id="awsStorageHint" hidden>AWS fallback /data volumes use gp3 with the included
                         baseline of 3,000 IOPS and 125 MiB/s throughput.</p>
                     <p class="hint" id="gcpStorageHint" aria-live="polite" hidden>GCP /data volumes use pd-balanced
-                        by default; C4A uses Hyperdisk Balanced. Select a machine type to see the exact
+                        by default; C4, C4A, and C4D use Hyperdisk Balanced. Select a machine type to see the exact
                         disk and network profile. Local SSD and -lssd machine types are not in the current catalog,
                         so storage benchmarks use /data. These provider-required settings are recorded in the
                         report.</p>
@@ -303,7 +303,7 @@
             <iframe id="reportFrame" class="report-frame" title="Benchmark results"></iframe>
         </section>
     </main>
-    <script src="/static/app.js?v=35"></script>
+    <script src="/static/app.js?v=36"></script>
 </body>
 
 </html>

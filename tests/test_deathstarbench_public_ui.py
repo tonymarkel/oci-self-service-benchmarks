@@ -196,7 +196,7 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(values['searchable'])
 
     def test_changed_scripts_are_cache_busted(self):
-        self.assertIn('/static/app.js?v=35', INDEX)
+        self.assertIn('/static/app.js?v=36', INDEX)
         self.assertIn('/static/history.js?v=18', HISTORY_HTML)
 
 

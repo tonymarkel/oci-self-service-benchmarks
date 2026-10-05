@@ -1,3 +1,6 @@
+import json
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -73,20 +76,61 @@ class GcpC4aPlanContractTests(unittest.TestCase):
         self.assertNotIn('provisioned_throughput_mibps', StorageOptions.model_fields)
 
 
-class GcpC4aUiContractTests(unittest.TestCase):
-    def test_form_describes_machine_derived_c4a_storage_and_networking(self):
-        self.assertIn('<script src="/static/app.js?v=35"></script>', INDEX)
-        self.assertIn('C4A uses Hyperdisk Balanced', INDEX)
+class GcpHyperdiskUiContractTests(unittest.TestCase):
+    def test_form_describes_machine_derived_hyperdisk_storage_and_networking(self):
+        self.assertIn('<script src="/static/app.js?v=36"></script>', INDEX)
+        self.assertIn('C4, C4A, and C4D use Hyperdisk Balanced', INDEX)
         self.assertIn('aria-live="polite"', INDEX)
         self.assertIn('function updateGcpStorageHint(shape = null)', JAVASCRIPT)
         self.assertIn("shape.disk_type === 'hyperdisk-balanced'", JAVASCRIPT)
         self.assertIn('3,000 IOPS and 140 MiB/s', JAVASCRIPT)
         self.assertIn('shape.network_interface_type', JAVASCRIPT)
         self.assertIn('the provisioned values in every benchmark result', JAVASCRIPT)
-        self.assertIn('const GCP_C4A_DATA_SIZE_GB = 100', JAVASCRIPT)
+        self.assertIn('const GCP_HYPERDISK_DATA_SIZE_GB = 100', JAVASCRIPT)
         self.assertIn("dataSize.dataset.userEdited !== 'true'", JAVASCRIPT)
-        self.assertIn("dataSize.dataset.gcpC4aDefaultApplied = 'true'", JAVASCRIPT)
-        self.assertIn('remaining regional C4A vCPU and Hyperdisk', JAVASCRIPT)
+        self.assertIn("dataSize.dataset.gcpHyperdiskDefaultApplied = 'true'", JAVASCRIPT)
+        self.assertIn('remaining regional VM-family vCPU and Hyperdisk', JAVASCRIPT)
+        self.assertIn('Baseline IOPS and throughput do not count against quota.', JAVASCRIPT)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for UI behavior')
+    def test_family_switches_restore_defaults_and_preserve_user_data_size(self):
+        start = JAVASCRIPT.index('function applyGcpMachineStorageDefault(shape)')
+        end = JAVASCRIPT.index('function updateGcpStorageHint(', start)
+        default_function = JAVASCRIPT[start:end]
+        script = """
+const dataSize = {value: '1024', defaultValue: '1024', dataset: {}};
+const $ = selector => {
+    if (selector !== '#dataSize') throw new Error('Unexpected selector');
+    return dataSize;
+};
+const GCP_HYPERDISK_DATA_SIZE_GB = 100;
+eval(FUNCTION_SOURCE);
+const values = [];
+for (const family of ['c4', 'c4a', 'c4d']) {
+    applyGcpMachineStorageDefault({shape: `${family}-standard-4`, disk_type: 'hyperdisk-balanced'});
+    values.push(dataSize.value);
+}
+applyGcpMachineStorageDefault({shape: 'c3-standard-4', disk_type: 'pd-balanced'});
+values.push(dataSize.value);
+dataSize.value = '250';
+dataSize.dataset.userEdited = 'true';
+delete dataSize.dataset.gcpHyperdiskDefaultApplied;
+applyGcpMachineStorageDefault({shape: 'c4-standard-4', disk_type: 'hyperdisk-balanced'});
+values.push(dataSize.value);
+applyGcpMachineStorageDefault({shape: 'c3-standard-4', disk_type: 'pd-balanced'});
+values.push(dataSize.value);
+dataSize.dataset = {};
+dataSize.value = '512';
+applyGcpMachineStorageDefault({shape: 'c4d-standard-4', disk_type: 'hyperdisk-balanced'});
+values.push(dataSize.value);
+process.stdout.write(JSON.stringify(values));
+""".replace('FUNCTION_SOURCE', json.dumps(default_function))
+        values = json.loads(subprocess.check_output(
+            ['node', '-e', script],
+            cwd=ROOT,
+            text=True,
+        ))
+        self.assertEqual(values, ['100', '100', '100', '1024', '250', '250', '512'])
 
     def test_discovery_metadata_is_visible_after_type_selection(self):
         selected_start = JAVASCRIPT.index('function updateSelectedShape()')
@@ -106,11 +150,23 @@ class GcpC4aUiContractTests(unittest.TestCase):
         )
 
 
-class GcpC4aRuntimeMetadataTests(unittest.TestCase):
+class GcpHyperdiskRuntimeMetadataTests(unittest.TestCase):
     def test_hyperdisk_and_gvnic_contract_is_recorded_in_every_result(self):
-        plan = c4a_plan()
+        for shape, architecture in (
+            ('c4a-standard-4', 'arm64'),
+            ('c4-standard-4', 'x86_64'),
+            ('c4d-standard-4', 'x86_64'),
+        ):
+            with self.subTest(shape=shape):
+                self.assert_hyperdisk_contract_recorded(shape, architecture)
+
+    def assert_hyperdisk_contract_recorded(self, shape, architecture):
+        plan = c4a_plan(shape=shape)
         job = gcp_job(
             plan,
+            architecture=architecture,
+            image_id=f'rocky-linux-9-{architecture}-v20260813',
+            image_name=f'rocky-linux-9-{architecture}-v20260813',
             gcp_network_interface_type='GVNIC',
             gcp_disk_interface='NVME',
             gcp_boot_disk_type='hyperdisk-balanced',
@@ -144,6 +200,8 @@ class GcpC4aRuntimeMetadataTests(unittest.TestCase):
         prepare_target.assert_called_once()
         execute.assert_called_once()
         metadata = execute.call_args.kwargs['metadata']
+        self.assertEqual(metadata['machine_type'], shape)
+        self.assertEqual(metadata['architecture'], architecture)
         self.assertEqual(metadata['network_interface_type'], 'GVNIC')
         self.assertEqual(metadata['disk_interface'], 'NVME')
         self.assertEqual(metadata['boot_volume_type'], 'hyperdisk-balanced')
@@ -165,15 +223,28 @@ class GcpC4aRuntimeMetadataTests(unittest.TestCase):
         )
 
     def test_pd_balanced_runtime_keeps_optional_hyperdisk_fields_absent(self):
+        for shape, architecture, network_interface in (
+            ('t2a-standard-4', 'arm64', 'VIRTIO_NET'),
+            ('c3-standard-4', 'x86_64', 'GVNIC'),
+        ):
+            with self.subTest(shape=shape):
+                self.assert_pd_balanced_contract_recorded(
+                    shape, architecture, network_interface,
+                )
+
+    def assert_pd_balanced_contract_recorded(
+        self, shape, architecture, network_interface,
+    ):
         plan = c4a_plan(
-            shape='t2a-standard-4',
+            shape=shape,
             storage={'additional_volume': False},
             benchmarks=['sysbench'],
             sysbench={'workloads': ['cpu']},
         )
         job = gcp_job(
             plan,
-            gcp_network_interface_type='VIRTIO_NET',
+            architecture=architecture,
+            gcp_network_interface_type=network_interface,
             gcp_boot_disk_type='pd-balanced',
         )
 
@@ -184,7 +255,9 @@ class GcpC4aRuntimeMetadataTests(unittest.TestCase):
             main.run_gcp_benchmarks(job, plan)
 
         metadata = execute.call_args.kwargs['metadata']
-        self.assertEqual(metadata['network_interface_type'], 'VIRTIO_NET')
+        self.assertEqual(metadata['machine_type'], shape)
+        self.assertEqual(metadata['architecture'], architecture)
+        self.assertEqual(metadata['network_interface_type'], network_interface)
         self.assertNotIn('disk_interface', metadata)
         self.assertEqual(metadata['boot_volume_type'], 'pd-balanced')
         self.assertNotIn('boot_volume_provisioned_iops', metadata)

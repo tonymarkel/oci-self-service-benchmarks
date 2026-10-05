@@ -104,11 +104,11 @@ adds one shared, fixed `n2-standard-2` web load generator in that zone.
 
 The GCP storage profile is derived from the selected machine type. Most
 supported types use a zonal `pd-balanced` Persistent Disk, whose performance
-scales with disk size and VM vCPU count. C4A uses Hyperdisk Balanced for both
-boot and optional `/data` disks at an explicit baseline of 3,000 IOPS and
+scales with disk size and VM vCPU count. C4, C4A, and C4D use Hyperdisk Balanced
+for both boot and optional `/data` disks at an explicit baseline of 3,000 IOPS and
 140 MiB/s, with NVMe disks and gVNIC as required by the machine series. The app
 records that resolved profile in every benchmark result; it does not accept a
-client-supplied disk or NIC override. C4A `-lssd`, bare-metal, and accelerator
+client-supplied disk or NIC override. C4/C4A/C4D `-lssd`, bare-metal, and accelerator
 variants remain excluded. Other families that require an unimplemented
 Hyperdisk profile, bundled Local SSD, or accelerators remain hidden. Discovery
 therefore never exposes a provider-verified instance-local device to the
@@ -123,8 +123,9 @@ when its Compute API response omits `architecture`, the app uses x86_64 only
 for that exact load-generator type and rejects any explicit contradictory
 architecture value.
 
-C4A launches consume the regional C4A VM-family vCPU quota plus Hyperdisk
-Balanced capacity, IOPS, and throughput quota. A quota failure is distinct from
+C4, C4A, and C4D launches consume their regional VM-family and project-wide
+CPU quotas plus Hyperdisk Balanced capacity quota. The 3,000 IOPS / 140 MiB/s baseline does not
+count against Hyperdisk performance quota. A quota failure is distinct from
 a temporary zonal-capacity failure: the former needs a quota adjustment or a
 smaller plan, while the latter can often be retried in another advertised zone.
 
@@ -194,7 +195,7 @@ during cleanup; AWS EC2 accepts RSA and Ed25519 keys for this flow.
 - OCI, AWS, and GCP support the full exposed workload set: Sysbench CPU, memory, and file I/O; STREAM; fio; iperf3 TCP, UDP, and SCTP; the curated Phoronix profiles; ApacheBench; DeathStarBench; and CPU-only llama.cpp. Azure supports the same surface except SCTP; its iperf3 choices are TCP and UDP.
 - fio and Sysbench file I/O always require and provision the additional `/data` volume as a safe fallback. Before either benchmark, the app prefers one blank, provider-verified instance-local NVMe device and mounts it at `/benchmark-local`; if none is verified, it uses the exact provisioned `/data` volume. An NVMe device name or transport alone is not treated as proof of local storage. Instance-local storage is ephemeral, so its contents disappear with the benchmark instance. Reports record the target that was actually tested.
 - AWS storage fallbacks use an encrypted gp3 `/data` volume with selectable capacity and the gp3 baseline of 3,000 IOPS and 125 MiB/s. It is mounted by its exact EBS volume ID with a persistent filesystem UUID and is included in ownership-safe cleanup even when verified local NVMe is selected for the benchmark.
-- GCP storage tests use `pd-balanced` on the broadly compatible machine families. C4A uses Hyperdisk Balanced at 3,000 IOPS / 140 MiB/s with NVMe and gVNIC. An untouched C4A `/data` size defaults to 100 GiB; larger plans still require sufficient regional Hyperdisk capacity and performance quota. Because the current catalog excludes Local SSD, `-lssd`, and bundled-local-SSD machine types, GCP storage benchmarks use `/data`.
+- GCP storage tests use `pd-balanced` on the broadly compatible machine families, including C3. C4, C4A, and C4D use Hyperdisk Balanced at 3,000 IOPS / 140 MiB/s with NVMe and gVNIC. An untouched Hyperdisk `/data` size defaults to 100 GiB; larger plans still require sufficient regional Hyperdisk capacity quota. Baseline IOPS and throughput do not count against performance quota. VM-family vCPU quota and zonal capacity still apply. Because the current catalog excludes Local SSD, `-lssd`, and bundled-local-SSD machine types, GCP storage benchmarks use `/data`.
 - Azure storage fallbacks use a zonal Premium SSD v2 `/data` disk at 3,000 IOPS and 125 MiB/s. Region, zone, VM-size, and disk support are validated before launch; the disk remains provisioned and cleanup-owned when verified local NVMe is benchmarked instead.
 - Sysbench is selected once, then its CPU, memory, and file I/O workloads can be enabled independently. CPU is the default; file I/O follows the verified-local-NVMe preference and `/data` fallback policy above.
 - iperf3 is selected once and TCP is the default. OCI, AWS, and GCP support TCP, UDP, and SCTP; Azure supports TCP and UDP. Every provider uses a separate peer and targets only its private address. AWS, GCP, and Azure use a same-size peer in the runner's Availability Zone or zone so a small helper does not cap the result. TCP/5201 is retained for control and TCP data, and UDP/5201 is opened only when selected. SCTP rules and guest kernel validation apply only to providers advertising SCTP support.

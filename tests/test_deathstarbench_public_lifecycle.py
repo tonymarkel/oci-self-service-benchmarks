@@ -507,11 +507,18 @@ class AwsPublicImageResolverTests(unittest.TestCase):
 class MainIntegrationTests(unittest.TestCase):
     def test_catalog_advertises_distributed_only_after_coordinated_preflight(self):
         def distributed_entry(document):
-            return next(
-                item
-                for item in document['deathstarbench_topologies']
-                if item['topology_id'] == 'distributed_tiered_v1'
+            self.assertEqual(
+                [
+                    (item['topology_id'], item['runtime_id'])
+                    for item in document['deathstarbench_topologies']
+                ],
+                [('distributed_tiered_v1', 'k3s_v1')],
             )
+            self.assertEqual(
+                [item['id'] for item in document['deathstarbench_workloads']],
+                ['social_network'],
+            )
+            return document['deathstarbench_topologies'][0]
 
         with patch.object(
             main,

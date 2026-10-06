@@ -218,11 +218,17 @@
                         for both x86_64 and AArch64
                         Oracle Linux instances.</p>
                 </fieldset>
+                <p id="deathstarAvailabilityWarning" class="provider-notice" role="status" hidden>
+                    Distributed DeathStarBench is currently unavailable because its release bundle has not
+                    validated. Other benchmarks remain available.</p>
+                <p id="deathstarLegacyPlanWarning" class="provider-notice" role="status" hidden>
+                    Compact / single-host DeathStarBench is no longer offered for new runs. DeathStarBench
+                    was deselected from this saved plan. Select it again to review a five-VM distributed run.</p>
                 <fieldset id="deathstarSettings" class="benchmark-settings deathstar-settings" hidden>
                     <legend>DeathStarBench settings</legend>
-                    <p class="hint" id="deathstarDeploymentHint">The selected microservices workload runs with native
-                        Podman and podman-compose. A separate fixed-size x86 load-generator VM sends traffic to the
-                        benchmark VM's private cloud-network address.</p>
+                    <p class="hint" id="deathstarDeploymentHint">Social Network runs across application, database,
+                        cache, and control VMs with K3s. A fifth load-generator VM sends traffic over the private
+                        cloud network. This test runs separately from other benchmarks.</p>
                     <div class="grid">
                         <label class="wide">Deployment topology<select id="deathstarTopology" required></select>
                             <small id="deathstarTopologyDescription"></small></label>
@@ -235,7 +241,7 @@
                         <label>Worker threads<input id="deathstarThreads" type="number" min="1" max="64" step="1"
                                 value="4" required></label>
                         <label>Connections<input id="deathstarConnections" type="number" min="1" max="4096" step="1"
-                                value="64" required></label>
+                                value="4" required></label>
                         <label>Request rate (requests/second)<input id="deathstarRequestRate" type="number" min="1"
                                 max="100000" step="1" value="100" required></label>
                     </div>
@@ -303,7 +309,7 @@
             <iframe id="reportFrame" class="report-frame" title="Benchmark results"></iframe>
         </section>
     </main>
-    <script src="/static/app.js?v=36"></script>
+    <script src="/static/app.js?v=37"></script>
 </body>
 
 </html>

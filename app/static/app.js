@@ -18,18 +18,16 @@ let liveStopPending = false;
 const terminalStatuses = ['complete', 'destroyed', 'failed', 'reported', 'cleanup_failed', 'interrupted'];
 const liveStoppableStatuses = ['queued', 'provisioning', 'testing', 'reporting'];
 const recoverableDestroyStatuses = ['complete', 'failed', 'cleanup_failed', 'interrupted'];
-const COMPACT_DEATHSTAR_TOPOLOGY_ID = 'single_host_v1';
-const COMPACT_DEATHSTAR_RUNTIME_ID = 'podman_compose_v1';
 const DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID = 'distributed_tiered_v1';
 const DISTRIBUTED_DEATHSTAR_RUNTIME_ID = 'k3s_v1';
 const deathstarDefaults = {
-    topology_id: COMPACT_DEATHSTAR_TOPOLOGY_ID,
-    runtime_id: COMPACT_DEATHSTAR_RUNTIME_ID,
-    workload: 'media_microservices',
+    topology_id: DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID,
+    runtime_id: DISTRIBUTED_DEATHSTAR_RUNTIME_ID,
+    workload: 'social_network',
     warmup_seconds: 30,
     duration_seconds: 60,
     threads: 4,
-    connections: 64,
+    connections: 4,
     request_rate: 100,
 };
 const sysbenchDefaults = { workloads: ['cpu'] };
@@ -180,6 +178,7 @@ function applyProviderBenchmarkSupport() {
     const distributed = isDistributedDeathstarbenchSelected();
     $$('input[data-kind="bench"]').forEach(input => {
         const supported = supportedBenchmarks.has(input.value)
+            && (input.value !== 'deathstarbench' || Boolean(selectedDeathstarTopology()))
             && (!distributed || input.value === 'deathstarbench');
         input.disabled = !supported;
         input.closest('label')?.classList.toggle('unavailable', !supported);
@@ -338,11 +337,9 @@ function updateProviderTopologyCopy() {
         : (azure
             ? 'private Azure VNet address'
             : (gcp ? 'private Google Cloud VPC address' : 'private OCI VCN address'));
-    $('#deathstarDeploymentHint').textContent = distributed
-        ? 'The Social Network service graph runs across application, database, cache, and control VMs with K3s. ' +
-            `A fifth load-generator VM sends traffic over a ${privateNetwork}.`
-        : 'The selected microservices workload runs with native Podman and podman-compose. ' +
-            `A separate fixed-size x86 load-generator VM sends traffic to the benchmark VM's ${privateNetwork}.`;
+    $('#deathstarDeploymentHint').textContent =
+        'The Social Network service graph runs across application, database, cache, and control VMs with K3s. ' +
+        `A fifth load-generator VM sends traffic over a ${privateNetwork}.`;
 }
 
 function applyProviderUi() {
@@ -624,17 +621,23 @@ function updateDeathstarWorkloadDescription() {
     $('#deathstarWorkloadDescription').textContent = workload?.description || '';
 }
 
+function selectableDeathstarTopologies(catalog) {
+    const topologies = Array.isArray(catalog.deathstarbench_topologies)
+        ? catalog.deathstarbench_topologies
+        : [];
+    return topologies.filter(topology => (
+        topology?.released === true
+        && topology.topology_id === DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID
+        && topology.runtime_id === DISTRIBUTED_DEATHSTAR_RUNTIME_ID
+        && topology.node_count === 5
+        && Array.isArray(topology.workloads)
+        && topology.workloads.includes('social_network')
+    ));
+}
+
 function selectedDeathstarTopology() {
-    const topologyId = $('#deathstarTopology')?.value || COMPACT_DEATHSTAR_TOPOLOGY_ID;
-    return deathstarTopologies.find(item => item.topology_id === topologyId)
-        || deathstarTopologies.find(item => item.topology_id === COMPACT_DEATHSTAR_TOPOLOGY_ID)
-        || {
-            topology_id: COMPACT_DEATHSTAR_TOPOLOGY_ID,
-            runtime_id: COMPACT_DEATHSTAR_RUNTIME_ID,
-            name: 'Compact / single-host',
-            node_count: 2,
-            description: 'Runs the selected service graph on one benchmark VM with a separate load generator.',
-        };
+    const topologyId = $('#deathstarTopology')?.value;
+    return deathstarTopologies.find(item => item.topology_id === topologyId) || null;
 }
 
 function isDistributedDeathstarbenchSelected() {
@@ -642,8 +645,8 @@ function isDistributedDeathstarbenchSelected() {
     const topology = selectedDeathstarTopology();
     return Boolean(
         selected
-        && topology.topology_id === DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID
-        && topology.runtime_id === DISTRIBUTED_DEATHSTAR_RUNTIME_ID
+        && topology?.topology_id === DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID
+        && topology?.runtime_id === DISTRIBUTED_DEATHSTAR_RUNTIME_ID
     );
 }
 
@@ -651,21 +654,17 @@ function enforceDeathstarTopologyValues({newlySelected = false} = {}) {
     const checkbox = $('input[data-kind="bench"][value="deathstarbench"]');
     const topologySelect = $('#deathstarTopology');
     if (!checkbox || !topologySelect) return;
-    if (!checkbox.checked && topologySelect.value === DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID) {
-        topologySelect.value = COMPACT_DEATHSTAR_TOPOLOGY_ID;
-        topologySelect.dataset.previousTopology = COMPACT_DEATHSTAR_TOPOLOGY_ID;
-    }
     const distributed = isDistributedDeathstarbenchSelected();
     if (distributed) {
         $('#deathstarWorkload').value = 'social_network';
         if (newlySelected) $('#deathstarConnections').value = '4';
-        if ($('#additional').dataset.compactChecked === undefined) {
-            $('#additional').dataset.compactChecked = String($('#additional').checked);
+        if ($('#additional').dataset.deathstarPreviousAdditional === undefined) {
+            $('#additional').dataset.deathstarPreviousAdditional = String($('#additional').checked);
         }
         $('#additional').checked = false;
-    } else if ($('#additional').dataset.compactChecked !== undefined) {
-        $('#additional').checked = $('#additional').dataset.compactChecked === 'true';
-        delete $('#additional').dataset.compactChecked;
+    } else if ($('#additional').dataset.deathstarPreviousAdditional !== undefined) {
+        $('#additional').checked = $('#additional').dataset.deathstarPreviousAdditional === 'true';
+        delete $('#additional').dataset.deathstarPreviousAdditional;
     }
     updateDeathstarWorkloadDescription();
 }
@@ -673,7 +672,8 @@ function enforceDeathstarTopologyValues({newlySelected = false} = {}) {
 function updateDeathstarTopologyPresentation() {
     const topology = selectedDeathstarTopology();
     const distributed = isDistributedDeathstarbenchSelected();
-    $('#deathstarTopologyDescription').textContent = topology.description || '';
+    $('#deathstarTopologyDescription').textContent = topology?.description || '';
+    $('#deathstarAvailabilityWarning').hidden = Boolean(topology);
     $('#deathstarDistributedWarning').hidden = !distributed;
     setProviderOnlyElement(
         '#ociDefinedTagsField',
@@ -683,34 +683,22 @@ function updateDeathstarTopologyPresentation() {
 }
 
 function handleDeathstarTopologyChange() {
-    const select = $('#deathstarTopology');
-    const previous = select.dataset.previousTopology || COMPACT_DEATHSTAR_TOPOLOGY_ID;
-    const newlySelected = (
-        select.value === DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID
-        && previous !== DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID
-    );
-    select.dataset.previousTopology = select.value;
     const checkbox = $('input[data-kind="bench"][value="deathstarbench"]');
-    if (checkbox) checkbox.checked = true;
-    enforceDeathstarTopologyValues({newlySelected});
-    applyProviderBenchmarkSupport();
-}
-
-function handleDeathstarSelectionChange() {
+    if (checkbox) checkbox.checked = Boolean(selectedDeathstarTopology());
     enforceDeathstarTopologyValues();
     applyProviderBenchmarkSupport();
 }
 
+function handleDeathstarSelectionChange() {
+    const selected = $('input[data-kind="bench"][value="deathstarbench"]')?.checked;
+    if (selected) $('#deathstarLegacyPlanWarning').hidden = true;
+    enforceDeathstarTopologyValues({newlySelected: Boolean(selected)});
+    applyProviderBenchmarkSupport();
+}
+
 function setDeathstarValues(options = deathstarDefaults) {
-    const requestedTopology = options.topology_id || COMPACT_DEATHSTAR_TOPOLOGY_ID;
-    const topologyAvailable = deathstarTopologies.some(
-        item => item.topology_id === requestedTopology,
-    );
-    $('#deathstarTopology').value = topologyAvailable
-        ? requestedTopology
-        : COMPACT_DEATHSTAR_TOPOLOGY_ID;
-    $('#deathstarTopology').dataset.previousTopology = $('#deathstarTopology').value;
-    $('#deathstarWorkload').value = options.workload || deathstarDefaults.workload;
+    $('#deathstarTopology').value = deathstarTopologies[0]?.topology_id || '';
+    $('#deathstarWorkload').value = 'social_network';
     if (!$('#deathstarWorkload').value && deathstarWorkloads.length) {
         $('#deathstarWorkload').value = deathstarWorkloads[0].id;
     }
@@ -720,6 +708,20 @@ function setDeathstarValues(options = deathstarDefaults) {
     $('#deathstarConnections').value = options.connections ?? deathstarDefaults.connections;
     $('#deathstarRequestRate').value = options.request_rate ?? deathstarDefaults.request_rate;
     updateDeathstarWorkloadDescription();
+}
+
+function restoreDeathstarSelection(plan) {
+    const requested = (plan.benchmarks || []).includes('deathstarbench');
+    const options = plan.deathstarbench || {};
+    const retired = requested && (
+        options.topology_id !== DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID
+        || options.runtime_id !== DISTRIBUTED_DEATHSTAR_RUNTIME_ID
+        || options.workload !== 'social_network'
+    );
+    const checkbox = $('input[data-kind="bench"][value="deathstarbench"]');
+    if (checkbox) checkbox.checked = requested && !retired;
+    setDeathstarValues(requested && !retired ? options : deathstarDefaults);
+    $('#deathstarLegacyPlanWarning').hidden = !retired;
 }
 
 function toggleDeathstarSettings() {
@@ -798,28 +800,14 @@ function renderCatalog(catalog) {
     ).join('');
     setApachebenchValues();
 
-    const compactTopologyFallback = {
-        topology_id: COMPACT_DEATHSTAR_TOPOLOGY_ID,
-        runtime_id: COMPACT_DEATHSTAR_RUNTIME_ID,
-        name: 'Compact / single-host',
-        description: 'Runs the selected service graph on one benchmark VM with a separate load generator.',
-        node_count: 2,
-        released: true,
-    };
-    const topologyCatalog = Array.isArray(catalog.deathstarbench_topologies)
-        ? catalog.deathstarbench_topologies
-        : [compactTopologyFallback];
-    deathstarTopologies = topologyCatalog.filter(topology => topology.released === true);
-    if (!deathstarTopologies.some(
-        topology => topology.topology_id === COMPACT_DEATHSTAR_TOPOLOGY_ID,
-    )) {
-        deathstarTopologies.unshift(compactTopologyFallback);
-    }
+    deathstarTopologies = selectableDeathstarTopologies(catalog);
     $('#deathstarTopology').innerHTML = deathstarTopologies.map(topology =>
         `<option value="${escape(topology.topology_id)}">${escape(topology.name)} — ` +
         `${escape(topology.node_count)} VMs</option>`,
     ).join('');
-    deathstarWorkloads = catalog.deathstarbench_workloads || [];
+    deathstarWorkloads = (catalog.deathstarbench_workloads || []).filter(
+        workload => workload.id === 'social_network',
+    );
     $('#deathstarWorkload').innerHTML = deathstarWorkloads.map(workload =>
         `<option value="${workload.id}">${workload.name}</option>`,
     ).join('');
@@ -834,7 +822,10 @@ function renderCatalog(catalog) {
     const apachebenchCheckbox = $('input[data-kind="bench"][value="apachebench"]');
     if (apachebenchCheckbox) apachebenchCheckbox.addEventListener('change', toggleApachebenchSettings);
     const deathstarCheckbox = $('input[data-kind="bench"][value="deathstarbench"]');
-    if (deathstarCheckbox) deathstarCheckbox.addEventListener('change', handleDeathstarSelectionChange);
+    if (deathstarCheckbox) {
+        deathstarCheckbox.addEventListener('change', handleDeathstarSelectionChange);
+        deathstarCheckbox.disabled = !selectedDeathstarTopology();
+    }
     $('#deathstarTopology').addEventListener('change', handleDeathstarTopologyChange);
     $('#deathstarWorkload').addEventListener('change', updateDeathstarWorkloadDescription);
     toggleSysbenchSettings();
@@ -1106,8 +1097,11 @@ $('#publicKeyFile').addEventListener('change', async event => {
 });
 
 function deathstarOptions(selected) {
-    if (!selected) return { ...deathstarDefaults };
+    // Inactive distributed defaults must not alter ordinary benchmark plans
+    // or classify their saved resources as distributed infrastructure.
+    if (!selected) return undefined;
     const topology = selectedDeathstarTopology();
+    if (!topology) throw Error('Distributed DeathStarBench is currently unavailable.');
     return {
         topology_id: topology.topology_id,
         runtime_id: topology.runtime_id,
@@ -1271,6 +1265,10 @@ $('#planForm').addEventListener('submit', async event => {
     }
     const selected = kind => $$(`input[data-kind=${kind}]:checked`).map(input => input.value);
     const selectedBenchmarks = selected('bench');
+    if (selectedBenchmarks.includes('deathstarbench') && !selectedDeathstarTopology()) {
+        alert('Distributed DeathStarBench is currently unavailable.');
+        return;
+    }
     const sysbench = sysbenchOptions(selectedBenchmarks.includes('sysbench'));
     const iperf3 = iperf3Options(selectedBenchmarks.includes('iperf3'));
     const phoronix = phoronixOptions(selectedBenchmarks.includes('phoronix'));
@@ -1694,7 +1692,7 @@ async function resetToPlan() {
     $('#keyFile').value = '';
     $('#publicKeyFile').value = '';
     delete $('#additional').dataset.ociChecked;
-    delete $('#additional').dataset.compactChecked;
+    delete $('#additional').dataset.deathstarPreviousAdditional;
     delete $('#dataSize').dataset.userEdited;
     delete $('#dataSize').dataset.gcpHyperdiskDefaultApplied;
     setSysbenchValues();
@@ -1702,6 +1700,7 @@ async function resetToPlan() {
     setPhoronixValues();
     setApachebenchValues();
     setDeathstarValues();
+    $('#deathstarLegacyPlanWarning').hidden = true;
     $('#ociDefinedTags').value = '{}';
     toggleSysbenchSettings();
     toggleIperf3Settings();
@@ -1715,7 +1714,11 @@ async function resetToPlan() {
 
 async function restorePlan(plan) {
     const provider = plan.provider || 'oci';
-    delete $('#additional').dataset.compactChecked;
+    // Provider discovery reapplies benchmark support. Clear the old selection
+    // first so it cannot recreate a volume override before saved fields load.
+    const deathstarCheckbox = $('input[data-kind="bench"][value="deathstarbench"]');
+    if (deathstarCheckbox) deathstarCheckbox.checked = false;
+    delete $('#additional').dataset.deathstarPreviousAdditional;
     delete $('#dataSize').dataset.userEdited;
     delete $('#dataSize').dataset.gcpHyperdiskDefaultApplied;
     $('#provider').value = provider;
@@ -1781,7 +1784,7 @@ async function restorePlan(plan) {
     setIperf3Values(iperf3OptionsFromPlan(plan));
     setPhoronixValues(phoronixOptionsFromPlan(plan));
     setApachebenchValues(apachebenchOptionsFromPlan(plan));
-    setDeathstarValues(plan.deathstarbench || deathstarDefaults);
+    restoreDeathstarSelection(plan);
     applyProviderBenchmarkSupport();
     toggleSysbenchSettings();
     toggleIperf3Settings();

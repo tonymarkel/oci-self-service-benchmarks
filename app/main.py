@@ -1920,6 +1920,11 @@ def catalog():
         if item.get('topology_id') == DISTRIBUTED_TIERED_TOPOLOGY_ID:
             item['released'] = distributed_released
         deathstarbench_topologies.append(item)
+    selectable_deathstarbench_workloads = {
+        workload
+        for topology in deathstarbench_topologies
+        for workload in topology['workloads']
+    }
     return {
         'benchmarks': BENCHMARKS,
         'llm_benchmarks': LLM_BENCHMARKS,
@@ -1927,7 +1932,10 @@ def catalog():
         'iperf3_protocols': IPERF3_PROTOCOLS,
         'phoronix_profiles': PHORONIX_PROFILES,
         'apachebench_workloads': APACHEBENCH_WORKLOADS,
-        'deathstarbench_workloads': DEATHSTARBENCH_WORKLOADS,
+        'deathstarbench_workloads': [
+            workload for workload in DEATHSTARBENCH_WORKLOADS
+            if workload['id'] in selectable_deathstarbench_workloads
+        ],
         'deathstarbench_topologies': deathstarbench_topologies,
     }
 

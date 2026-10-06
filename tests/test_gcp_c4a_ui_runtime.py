@@ -78,7 +78,7 @@ class GcpC4aPlanContractTests(unittest.TestCase):
 
 class GcpHyperdiskUiContractTests(unittest.TestCase):
     def test_form_describes_machine_derived_hyperdisk_storage_and_networking(self):
-        self.assertIn('<script src="/static/app.js?v=36"></script>', INDEX)
+        self.assertIn('<script src="/static/app.js?v=37"></script>', INDEX)
         self.assertIn('C4, C4A, and C4D use Hyperdisk Balanced', INDEX)
         self.assertIn('aria-live="polite"', INDEX)
         self.assertIn('function updateGcpStorageHint(shape = null)', JAVASCRIPT)

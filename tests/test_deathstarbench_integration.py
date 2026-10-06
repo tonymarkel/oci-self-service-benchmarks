@@ -28,13 +28,43 @@ def plan(**overrides):
 
 
 class CatalogAndNetworkTests(unittest.TestCase):
-    def test_catalog_exposes_all_released_workloads(self):
+    def test_catalog_offers_only_distributed_social_network(self):
         payload = main.catalog()
 
         self.assertEqual(
             {item['id'] for item in payload['deathstarbench_workloads']},
-            {'media_microservices', 'hotel_reservation', 'social_network'},
+            {'social_network'},
         )
+        self.assertEqual(
+            [
+                (item['topology_id'], item['runtime_id'])
+                for item in payload['deathstarbench_topologies']
+            ],
+            [('distributed_tiered_v1', 'k3s_v1')],
+        )
+        self.assertEqual(
+            payload['deathstarbench_topologies'][0]['workloads'],
+            ['social_network'],
+        )
+
+    def test_legacy_single_host_plans_and_report_names_remain_available(self):
+        for workload, label in (
+            ('media_microservices', 'Media Microservices'),
+            ('hotel_reservation', 'Hotel Reservation'),
+            ('social_network', 'Social Network'),
+        ):
+            with self.subTest(workload=workload):
+                selected = plan(deathstarbench={
+                    'topology_id': 'single_host_v1',
+                    'runtime_id': 'podman_compose_v1',
+                    'workload': workload,
+                })
+
+                self.assertEqual(selected.deathstarbench.topology_id, 'single_host_v1')
+                self.assertEqual(
+                    main.benchmark_result_name('deathstarbench', selected),
+                    f'DeathStarBench — {label}',
+                )
 
     def test_frontend_ports_are_private_subnet_only_and_optional(self):
         normal = main.benchmark_security_rules(False)

@@ -1,11 +1,10 @@
 from .deathstarbench_contract import (
     DISTRIBUTED_TIERED_PROFILE,
-    SINGLE_HOST_PROFILE,
 )
 
 
 BENCHMARKS = [
-    {"id": "deathstarbench", "category": "Comprehensive", "name": "DeathStarBench", "description": "Runs a selectable cloud-microservices workload in a compact two-VM Podman deployment or a released five-VM K3s tiered topology.", "requires_data": False},
+    {"id": "deathstarbench", "category": "Comprehensive", "name": "DeathStarBench", "description": "Runs Social Network across a five-VM K3s topology with separate application, database, cache, control, and load-generator roles.", "requires_data": False},
     {"id": "apachebench", "category": "Comprehensive", "name": "ApacheBench", "description": "Measures Apache HTTP Server throughput and latency over the private VCN from a separate load-generator VM.", "requires_data": False},
     {"id": "sysbench", "category": "Comprehensive", "name": "Sysbench", "description": "Runs one or more selectable CPU, memory, and file I/O workloads."},
     {"id": "phoronix", "category": "Comprehensive", "name": "Phoronix Test Suite", "description": "Runs one or more selectable, pinned OpenBenchmarking CPU and memory profiles.", "requires_data": False},
@@ -106,6 +105,8 @@ PHORONIX_PROFILES = [
 ]
 
 
+# Retain legacy workload names for historical reports. The public catalog
+# limits new selections to the workloads declared by advertised topologies.
 DEATHSTARBENCH_WORKLOADS = [
     {
         "id": "media_microservices",
@@ -141,18 +142,6 @@ def _deathstarbench_topology(profile, *, description, workloads):
 
 
 DEATHSTARBENCH_TOPOLOGIES = [
-    _deathstarbench_topology(
-        SINGLE_HOST_PROFILE,
-        description=(
-            "Runs the selected service graph on one benchmark VM with native "
-            "Podman and uses a separate load-generator VM."
-        ),
-        workloads=(
-            "media_microservices",
-            "hotel_reservation",
-            "social_network",
-        ),
-    ),
     _deathstarbench_topology(
         DISTRIBUTED_TIERED_PROFILE,
         description=(

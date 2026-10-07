@@ -19,9 +19,11 @@ representative crash, response-loss, cleanup, and signal evidence described
 below. Azure, AWS, and OCI have now completed the representative checkpoint
 failure matrix described below.
 
-`distributed_tiered_v1` is released for normal cloud provisioning. The plan
-model and UI expose the exact Social Network/K3s contract, and the normal
-API lifecycle routes create, run, stop/restart cleanup, and manual destroy
+`distributed_tiered_v1` is released for normal cloud provisioning. The browser
+offers only this exact five-node Social Network/K3s contract for new
+DeathStarBench runs and defaults to it. The plan model retains legacy compact
+API compatibility, and the normal API lifecycle routes create, run,
+stop/restart cleanup, and manual destroy
 through the distributed controllers. Public preflight requires the runtime
 profile, image lock, published immutable load driver, component asset, and
 NetworkPolicy asset to be released as one coherent bundle; a mixed transition
@@ -53,9 +55,19 @@ results, and passed terminal whole-graph deletion with no recoverable resources.
 
 ## Benchmark modes
 
-`single_host_v1` remains the backward-compatible default. It measures the
-selected compute shape as a consolidated Podman host while a separate fixed
-x86 load generator sends private-network traffic.
+The browser offers only `distributed_tiered_v1` / `k3s_v1` with the Social
+Network workload. It provisions five VMs and a dedicated database disk, and
+DeathStarBench cannot be combined with another benchmark in that plan.
+
+`single_host_v1` / `podman_compose_v1` remains the backward-compatible backend
+plan default for legacy API clients. Its execution, saved reports, comparisons,
+and stop/destroy cleanup remain supported, but it is no longer offered in the
+browser form. It measures the selected compute shape as a consolidated Podman
+host while a separate fixed x86 load generator sends private-network traffic.
+Restoring a saved compact plan in the browser deselects DeathStarBench and
+shows a notice requiring explicit re-selection of the five-VM mode. Other
+benchmark and storage selections are retained; no automatic topology migration
+or historical-report rewrite occurs.
 
 `distributed_tiered_v1` uses this fixed five-node graph:
 
@@ -1540,7 +1552,8 @@ absence, while any ambiguity leaves the durable graph available to
 11. **Planned:** advanced per-role shape selection and later topology
    revisions.
 
-The UI exposes only released profiles. Both compact mode and the exact
-five-node distributed Social Network/K3s profile are normal UI/API options;
+The UI offers only the released five-node distributed Social Network/K3s
+profile for new DeathStarBench selections. Legacy compact API contracts and
+saved-run reporting and cleanup remain supported;
 unknown topology/runtime pairs and partially transitioned release bundles
 continue to fail closed.

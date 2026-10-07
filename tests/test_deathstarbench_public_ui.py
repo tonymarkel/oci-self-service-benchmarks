@@ -37,21 +37,20 @@ class DeathStarBenchPublicUiTests(unittest.TestCase):
             (item['topology_id'], item['runtime_id']): item
             for item in DEATHSTARBENCH_TOPOLOGIES
         }
-        compact = entries[(
+        self.assertEqual(len(entries), 1)
+        self.assertNotIn((
             SINGLE_HOST_PROFILE.topology_id,
             SINGLE_HOST_PROFILE.runtime_id,
-        )]
+        ), entries)
         distributed = entries[(
             DISTRIBUTED_TIERED_PROFILE.topology_id,
             DISTRIBUTED_TIERED_PROFILE.runtime_id,
         )]
 
-        self.assertEqual(compact['released'], SINGLE_HOST_PROFILE.released)
         self.assertEqual(
             distributed['released'],
             DISTRIBUTED_TIERED_PROFILE.released,
         )
-        self.assertEqual(compact['node_count'], 2)
         self.assertEqual(distributed['node_count'], 5)
         self.assertEqual(distributed['workloads'], ['social_network'])
         self.assertEqual(
@@ -86,11 +85,14 @@ class DeathStarBenchPublicUiTests(unittest.TestCase):
             JAVASCRIPT,
         )
         self.assertIn(
-            'topologyCatalog.filter(topology => topology.released === true)',
+            'deathstarTopologies = selectableDeathstarTopologies(catalog)',
             JAVASCRIPT,
         )
-        self.assertIn('COMPACT_DEATHSTAR_TOPOLOGY_ID', JAVASCRIPT)
+        self.assertIn('topology?.released === true', JAVASCRIPT)
+        self.assertNotIn('compactTopologyFallback', JAVASCRIPT)
+        self.assertNotIn('COMPACT_DEATHSTAR_TOPOLOGY_ID', JAVASCRIPT)
         self.assertIn('DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID', JAVASCRIPT)
+        self.assertIn('deathstarAvailabilityWarning', INDEX)
 
     def test_distributed_selection_enforces_exclusive_social_network_plan(self):
         self.assertIn("input.value === 'deathstarbench'", JAVASCRIPT)
@@ -110,9 +112,11 @@ class DeathStarBenchPublicUiTests(unittest.TestCase):
         self.assertIn('tags = JSON.parse(source)', JAVASCRIPT)
         self.assertIn('OCI defined tags must be valid JSON.', JAVASCRIPT)
         self.assertIn(
-            'options.topology_id || COMPACT_DEATHSTAR_TOPOLOGY_ID',
+            'restoreDeathstarSelection(plan)',
             JAVASCRIPT,
         )
+        self.assertIn('deathstarLegacyPlanWarning', INDEX)
+        self.assertIn('was deselected from this saved plan', INDEX)
         self.assertIn(
             "JSON.stringify(plan.oci_defined_tags || {}, null, 2)",
             JAVASCRIPT,
@@ -196,7 +200,7 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(values['searchable'])
 
     def test_changed_scripts_are_cache_busted(self):
-        self.assertIn('/static/app.js?v=36', INDEX)
+        self.assertIn('/static/app.js?v=37', INDEX)
         self.assertIn('/static/history.js?v=18', HISTORY_HTML)
 
 

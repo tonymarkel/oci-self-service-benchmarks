@@ -1,0 +1,557 @@
+{
+  "schema_version": 2,
+  "namespace": "deathstarbench-hotel",
+  "upstream_revision": "6ecb09706140f8730b5385c08f1386c654c3c526",
+  "workload_revision": "hotel-reservation-6ecb097-workload-v1",
+  "released": false,
+  "components": [
+    {
+      "command": [
+        "/go/bin/attractions"
+      ],
+      "environment": {
+        "GC": "100",
+        "JAEGER_SAMPLE_RATIO": "0.01",
+        "LOG_LEVEL": "INFO",
+        "MEMC_TIMEOUT": "2",
+        "TLS": "0"
+      },
+      "external_traffic_policy": null,
+      "image_key": "hotel-reservation",
+      "name": "attractions",
+      "ports": [
+        {
+          "container_port": 8089,
+          "name": "grpc",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 8089
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": [
+        "consul",
+        "agent",
+        "-dev",
+        "-client=0.0.0.0"
+      ],
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "consul",
+      "name": "consul",
+      "ports": [
+        {
+          "container_port": 8500,
+          "name": "consul-http",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 8500
+        }
+      ],
+      "role": "control",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": [
+        "/go/bin/frontend"
+      ],
+      "environment": {
+        "GC": "100",
+        "JAEGER_SAMPLE_RATIO": "0.01",
+        "LOG_LEVEL": "INFO",
+        "MEMC_TIMEOUT": "2",
+        "TLS": "0"
+      },
+      "external_traffic_policy": "Local",
+      "image_key": "hotel-reservation",
+      "name": "frontend",
+      "ports": [
+        {
+          "container_port": 5000,
+          "name": "http",
+          "node_port": 8080,
+          "protocol": "TCP",
+          "service_port": 8080
+        }
+      ],
+      "role": "application",
+      "service_type": "NodePort",
+      "storage_subdir": null
+    },
+    {
+      "command": [
+        "/go/bin/geo"
+      ],
+      "environment": {
+        "GC": "100",
+        "JAEGER_SAMPLE_RATIO": "0.01",
+        "LOG_LEVEL": "INFO",
+        "MEMC_TIMEOUT": "2",
+        "TLS": "0"
+      },
+      "external_traffic_policy": null,
+      "image_key": "hotel-reservation",
+      "name": "geo",
+      "ports": [
+        {
+          "container_port": 8083,
+          "name": "grpc",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 8083
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "jaeger",
+      "name": "jaeger",
+      "ports": [
+        {
+          "container_port": 6831,
+          "name": "jaeger-compact",
+          "node_port": null,
+          "protocol": "UDP",
+          "service_port": 6831
+        },
+        {
+          "container_port": 16686,
+          "name": "jaeger-admin",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 16686
+        }
+      ],
+      "role": "control",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "memcached",
+      "name": "memcached-profile",
+      "ports": [
+        {
+          "container_port": 11211,
+          "name": "memcached",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 11211
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "memcached",
+      "name": "memcached-rate",
+      "ports": [
+        {
+          "container_port": 11211,
+          "name": "memcached",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 11211
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "memcached",
+      "name": "memcached-reserve",
+      "ports": [
+        {
+          "container_port": 11211,
+          "name": "memcached",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 11211
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "memcached",
+      "name": "memcached-review",
+      "ports": [
+        {
+          "container_port": 11211,
+          "name": "memcached",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 11211
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "mongodb-attractions",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "mongodb-attractions"
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "mongodb-geo",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "mongodb-geo"
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "mongodb-profile",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "mongodb-profile"
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "mongodb-rate",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "mongodb-rate"
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "mongodb-recommendation",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "mongodb-recommendation"
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "mongodb-reservation",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "mongodb-reservation"
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "mongodb-review",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "mongodb-review"
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "mongodb-user",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "mongodb-user"
+    },
+    {
+      "command": [
+        "/go/bin/profile"
+      ],
+      "environment": {
+        "GC": "100",
+        "JAEGER_SAMPLE_RATIO": "0.01",
+        "LOG_LEVEL": "INFO",
+        "MEMC_TIMEOUT": "2",
+        "TLS": "0"
+      },
+      "external_traffic_policy": null,
+      "image_key": "hotel-reservation",
+      "name": "profile",
+      "ports": [
+        {
+          "container_port": 8081,
+          "name": "grpc",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 8081
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": [
+        "/go/bin/rate"
+      ],
+      "environment": {
+        "GC": "100",
+        "JAEGER_SAMPLE_RATIO": "0.01",
+        "LOG_LEVEL": "INFO",
+        "MEMC_TIMEOUT": "2",
+        "TLS": "0"
+      },
+      "external_traffic_policy": null,
+      "image_key": "hotel-reservation",
+      "name": "rate",
+      "ports": [
+        {
+          "container_port": 8084,
+          "name": "grpc",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 8084
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": [
+        "/go/bin/recommendation"
+      ],
+      "environment": {
+        "GC": "100",
+        "JAEGER_SAMPLE_RATIO": "0.01",
+        "LOG_LEVEL": "INFO",
+        "MEMC_TIMEOUT": "2",
+        "TLS": "0"
+      },
+      "external_traffic_policy": null,
+      "image_key": "hotel-reservation",
+      "name": "recommendation",
+      "ports": [
+        {
+          "container_port": 8085,
+          "name": "grpc",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 8085
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": [
+        "/go/bin/reservation"
+      ],
+      "environment": {
+        "GC": "100",
+        "JAEGER_SAMPLE_RATIO": "0.01",
+        "LOG_LEVEL": "INFO",
+        "MEMC_TIMEOUT": "2",
+        "TLS": "0"
+      },
+      "external_traffic_policy": null,
+      "image_key": "hotel-reservation",
+      "name": "reservation",
+      "ports": [
+        {
+          "container_port": 8087,
+          "name": "grpc",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 8087
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": [
+        "/go/bin/review"
+      ],
+      "environment": {
+        "GC": "100",
+        "JAEGER_SAMPLE_RATIO": "0.01",
+        "LOG_LEVEL": "INFO",
+        "MEMC_TIMEOUT": "2",
+        "TLS": "0"
+      },
+      "external_traffic_policy": null,
+      "image_key": "hotel-reservation",
+      "name": "review",
+      "ports": [
+        {
+          "container_port": 8088,
+          "name": "grpc",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 8088
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": [
+        "/go/bin/search"
+      ],
+      "environment": {
+        "GC": "100",
+        "JAEGER_SAMPLE_RATIO": "0.01",
+        "LOG_LEVEL": "INFO",
+        "MEMC_TIMEOUT": "2",
+        "TLS": "0"
+      },
+      "external_traffic_policy": null,
+      "image_key": "hotel-reservation",
+      "name": "search",
+      "ports": [
+        {
+          "container_port": 8082,
+          "name": "grpc",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 8082
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": [
+        "/go/bin/user"
+      ],
+      "environment": {
+        "GC": "100",
+        "JAEGER_SAMPLE_RATIO": "0.01",
+        "LOG_LEVEL": "INFO",
+        "MEMC_TIMEOUT": "2",
+        "TLS": "0"
+      },
+      "external_traffic_policy": null,
+      "image_key": "hotel-reservation",
+      "name": "user",
+      "ports": [
+        {
+          "container_port": 8086,
+          "name": "grpc",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 8086
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    }
+  ]
+}

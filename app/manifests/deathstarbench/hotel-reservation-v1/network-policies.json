@@ -1,0 +1,255 @@
+{
+  "schema_version": 2,
+  "namespace": "deathstarbench-hotel",
+  "upstream_revision": "6ecb09706140f8730b5385c08f1386c654c3c526",
+  "workload_revision": "hotel-reservation-6ecb097-workload-v1",
+  "released": false,
+  "edges": [
+    {
+      "source": "attractions",
+      "destination": "consul",
+      "protocol": "TCP",
+      "port": 8500
+    },
+    {
+      "source": "attractions",
+      "destination": "jaeger",
+      "protocol": "UDP",
+      "port": 6831
+    },
+    {
+      "source": "attractions",
+      "destination": "mongodb-attractions",
+      "protocol": "TCP",
+      "port": 27017
+    },
+    {
+      "source": "frontend",
+      "destination": "attractions",
+      "protocol": "TCP",
+      "port": 8089
+    },
+    {
+      "source": "frontend",
+      "destination": "consul",
+      "protocol": "TCP",
+      "port": 8500
+    },
+    {
+      "source": "frontend",
+      "destination": "jaeger",
+      "protocol": "UDP",
+      "port": 6831
+    },
+    {
+      "source": "frontend",
+      "destination": "profile",
+      "protocol": "TCP",
+      "port": 8081
+    },
+    {
+      "source": "frontend",
+      "destination": "recommendation",
+      "protocol": "TCP",
+      "port": 8085
+    },
+    {
+      "source": "frontend",
+      "destination": "reservation",
+      "protocol": "TCP",
+      "port": 8087
+    },
+    {
+      "source": "frontend",
+      "destination": "review",
+      "protocol": "TCP",
+      "port": 8088
+    },
+    {
+      "source": "frontend",
+      "destination": "search",
+      "protocol": "TCP",
+      "port": 8082
+    },
+    {
+      "source": "frontend",
+      "destination": "user",
+      "protocol": "TCP",
+      "port": 8086
+    },
+    {
+      "source": "geo",
+      "destination": "consul",
+      "protocol": "TCP",
+      "port": 8500
+    },
+    {
+      "source": "geo",
+      "destination": "jaeger",
+      "protocol": "UDP",
+      "port": 6831
+    },
+    {
+      "source": "geo",
+      "destination": "mongodb-geo",
+      "protocol": "TCP",
+      "port": 27017
+    },
+    {
+      "source": "profile",
+      "destination": "consul",
+      "protocol": "TCP",
+      "port": 8500
+    },
+    {
+      "source": "profile",
+      "destination": "jaeger",
+      "protocol": "UDP",
+      "port": 6831
+    },
+    {
+      "source": "profile",
+      "destination": "memcached-profile",
+      "protocol": "TCP",
+      "port": 11211
+    },
+    {
+      "source": "profile",
+      "destination": "mongodb-profile",
+      "protocol": "TCP",
+      "port": 27017
+    },
+    {
+      "source": "rate",
+      "destination": "consul",
+      "protocol": "TCP",
+      "port": 8500
+    },
+    {
+      "source": "rate",
+      "destination": "jaeger",
+      "protocol": "UDP",
+      "port": 6831
+    },
+    {
+      "source": "rate",
+      "destination": "memcached-rate",
+      "protocol": "TCP",
+      "port": 11211
+    },
+    {
+      "source": "rate",
+      "destination": "mongodb-rate",
+      "protocol": "TCP",
+      "port": 27017
+    },
+    {
+      "source": "recommendation",
+      "destination": "consul",
+      "protocol": "TCP",
+      "port": 8500
+    },
+    {
+      "source": "recommendation",
+      "destination": "jaeger",
+      "protocol": "UDP",
+      "port": 6831
+    },
+    {
+      "source": "recommendation",
+      "destination": "mongodb-recommendation",
+      "protocol": "TCP",
+      "port": 27017
+    },
+    {
+      "source": "reservation",
+      "destination": "consul",
+      "protocol": "TCP",
+      "port": 8500
+    },
+    {
+      "source": "reservation",
+      "destination": "jaeger",
+      "protocol": "UDP",
+      "port": 6831
+    },
+    {
+      "source": "reservation",
+      "destination": "memcached-reserve",
+      "protocol": "TCP",
+      "port": 11211
+    },
+    {
+      "source": "reservation",
+      "destination": "mongodb-reservation",
+      "protocol": "TCP",
+      "port": 27017
+    },
+    {
+      "source": "review",
+      "destination": "consul",
+      "protocol": "TCP",
+      "port": 8500
+    },
+    {
+      "source": "review",
+      "destination": "jaeger",
+      "protocol": "UDP",
+      "port": 6831
+    },
+    {
+      "source": "review",
+      "destination": "memcached-review",
+      "protocol": "TCP",
+      "port": 11211
+    },
+    {
+      "source": "review",
+      "destination": "mongodb-review",
+      "protocol": "TCP",
+      "port": 27017
+    },
+    {
+      "source": "search",
+      "destination": "consul",
+      "protocol": "TCP",
+      "port": 8500
+    },
+    {
+      "source": "search",
+      "destination": "geo",
+      "protocol": "TCP",
+      "port": 8083
+    },
+    {
+      "source": "search",
+      "destination": "jaeger",
+      "protocol": "UDP",
+      "port": 6831
+    },
+    {
+      "source": "search",
+      "destination": "rate",
+      "protocol": "TCP",
+      "port": 8084
+    },
+    {
+      "source": "user",
+      "destination": "consul",
+      "protocol": "TCP",
+      "port": 8500
+    },
+    {
+      "source": "user",
+      "destination": "jaeger",
+      "protocol": "UDP",
+      "port": 6831
+    },
+    {
+      "source": "user",
+      "destination": "mongodb-user",
+      "protocol": "TCP",
+      "port": 27017
+    }
+  ]
+}

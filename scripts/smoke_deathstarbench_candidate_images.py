@@ -66,7 +66,7 @@ def _command(arguments: list[str], *, timeout: int = 120, stdout_file=None) -> b
     except subprocess.CalledProcessError as error:
         # These bounded offline commands do not carry credentials. Preserve
         # useful linkage/config diagnostics, never environment or file bodies.
-        diagnostic = (error.stderr or b"").decode("utf-8", errors="replace")[-2000:]
+        diagnostic = ((error.stdout or b"") + (error.stderr or b"")).decode("utf-8", errors="replace")[-2000:]
         raise PreparationError(f"Candidate image inspection command {arguments[0]} failed ({error.returncode}): {diagnostic}") from None
     except (OSError, subprocess.TimeoutExpired):
         raise PreparationError("Candidate image inspection command failed.") from None
@@ -357,8 +357,9 @@ def _inspect_filesystem(fs: ImageFilesystem, workload: str, key: str, architectu
 
 def _ldd_command(paths: list[str]) -> list[str]:
     quoted = " ".join(shlex.quote(path) for path in paths)
-    return ["/bin/sh", "-c", 'set -eu; for binary in ' + quoted + '; do output=$(ldd "$binary" 2>&1); '
-            'case "$output" in *"not found"*) exit 1;; esac; printf "%s\\n" "$output"; done']
+    return ["/bin/sh", "-c", 'set -eu; for binary in ' + quoted + '; do status=0; output=$(ldd "$binary" 2>&1) || status=$?; '
+            'printf "%s\\n%s\\n" "$binary" "$output"; test "$status" -eq 0; '
+            'case "$output" in *"not found"*) exit 1;; esac; done']
 
 
 def inspection_plan(workload: str, key: str, context: Path, identities: dict) -> list[tuple[list[str], tuple[str, ...]]]:

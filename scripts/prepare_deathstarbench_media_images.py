@@ -3,8 +3,8 @@
 
 This is an offline source-preparation step, not an image builder, publisher,
 dataset initializer or release attestation. Runtime source is baked into the
-contexts. Mutable Xenial repositories and upstream build downloads still
-prevent a claim of byte-reproducible image rebuilds.
+contexts. Base images and build source archives are immutable, but mutable
+Xenial package repositories still prevent byte-reproducible image rebuilds.
 """
 
 from __future__ import annotations
@@ -32,10 +32,48 @@ from scripts.prepare_deathstarbench_social_images import (
 
 SOURCE_ROOT = "mediaMicroservices"
 NAMESPACE = "deathstarbench-media"
-PREPARATION_REVISION = "media-microservices-6ecb097-contexts-candidate-v1"
+PREPARATION_REVISION = "media-microservices-6ecb097-contexts-candidate-v2"
 INITIALIZER_REVISION = "media-microservices-6ecb097-initializer-candidate-v1"
 LICENSE_NAME = "LICENSE.deathstarbench"
 LICENSE_DESTINATION = "/usr/share/licenses/deathstarbench/LICENSE"
+BUILD_ASSETS = Path(__file__).resolve().parent / "assets/deathstarbench/media"
+
+# Verified against the official Docker registry's raw manifest bytes. The
+# immutable index selects the corresponding native platform image; tags are
+# not consulted by the builder. These are identities, not security approvals
+# for Xenial, which remains an old, explicitly gated benchmark dependency.
+UBUNTU_BASE = "docker.io/library/ubuntu@sha256:1f1a2d56de1d604801a9671f301190704c25d604a416f59e03c04f5c6ffee0d6"
+UBUNTU_PLATFORM_DIGESTS = {
+    "linux/amd64": "sha256:a3785f78ab8547ae2710c89e627783cfa7ee7824d3468cae6835c9f4eae23ff7",
+    "linux/arm64": "sha256:f4c51ba054967fd4b06715f1b67078efbe9ca152e8be98d8f3c1f4d08c6042f8",
+}
+
+# Each archive was downloaded from the upstream project's release endpoint,
+# hashed independently, and inspected before recording this lock. cpp_redis's
+# tacopie entry is its exact 4.3.1 gitlink, not the submodule's current HEAD.
+# Fetches remain build-time operations, with a checksum check before tar.
+BUILD_SOURCES = {
+    "mongo": ("https://github.com/mongodb/mongo-c-driver/releases/download/1.14.0/mongo-c-driver-1.14.0.tar.gz", "ebe9694f7fa6477e594f19507877bbaa0b72747682541cf0cf9a6c29187e97e8"),
+    "thrift": ("https://codeload.github.com/apache/thrift/tar.gz/refs/tags/v0.12.0", "b7452d1873c6c43a580d2b4ae38cfaf8fa098ee6dc2925bae98dce0c010b1366"),
+    "json": ("https://codeload.github.com/nlohmann/json/tar.gz/refs/tags/v3.6.1", "80c45b090e40bf3d7a7f2a6e9f36206d3ff710acfa8d8cc1f8c763bb3075e22e"),
+    "yaml": ("https://codeload.github.com/jbeder/yaml-cpp/tar.gz/refs/tags/yaml-cpp-0.6.2", "e4d8560e163c3d875fd5d9e5542b5fd5bec810febdcba61481fe5fc4e6b1fd05"),
+    "opentracing": ("https://codeload.github.com/opentracing/opentracing-cpp/tar.gz/refs/tags/v1.5.1", "015c4187f7a6426a2b5196f0ccd982aa87f010cf61f507ae3ce5c90523f92301"),
+    "jaeger": ("https://codeload.github.com/jaegertracing/jaeger-client-cpp/tar.gz/refs/tags/v0.4.2", "21257af93a64fee42c04ca6262d292b2e4e0b7b0660c511db357b32fd42ef5d3"),
+    "jwt": ("https://codeload.github.com/arun11299/cpp-jwt/tar.gz/refs/tags/v1.1.1", "6dbf93969ec48d97ecb6c157014985846df8c01995a0011c21f4e2c146594922"),
+    "redis": ("https://codeload.github.com/cpp-redis/cpp_redis/tar.gz/bbe38a7f83de943ffcc90271092d689ae02b3489", "c138a5517cbb579d059611538e1ffa0e0204d78609b937ab9a80933678c80d89"),
+    "tacopie": ("https://codeload.github.com/cpp-redis/tacopie/tar.gz/243089d84a5a8032b85e81cae237b823df99abee", "19a6af00b00a57172907fbf361f8acb7779f3812312a7060fdb52c4badaf4b95"),
+    "hmac": ("https://codeload.github.com/jkeys089/lua-resty-hmac/tar.gz/23da759b69f208576526c8ac21b7c5ad66740321", "e15c6441d29f4289ed1ec205363c19f7cce989a95a70a650b6e4d0b2a2a57126"),
+    "openssl": ("https://www.openssl.org/source/old/1.1.0/openssl-1.1.0j.tar.gz", "31bec6c203ce1a8e93d5994f4ed304c63ccf07676118b6634edded12ad1b3246"),
+    "pcre": ("https://ftp.exim.org/pub/pcre/pcre-8.42.tar.gz", "69acbc2fbdefb955d42a4c606dfde800c2885711d2979e356c0636efde9ec3b5"),
+    "nginx": ("https://codeload.github.com/opentracing-contrib/nginx-opentracing/tar.gz/refs/tags/v0.8.0", "b2159297814d5df153cf45f355bcd8ffdb71f2468e8149ad549d4f9c0cdc81ad"),
+    "openresty": ("https://openresty.org/download/openresty-1.15.8.1rc1.tar.gz", "dfbb0038fd5829014efaf1ab7f269e60ebcf7d53220262a96b4c2b9e42ea7226"),
+    "luarocks": ("https://luarocks.github.io/luarocks/releases/luarocks-3.5.0.tar.gz", "701d0cc0c7e97cc2cf2c2f4068fce45e52a8854f5dc6c9e49e2014202eec9a4f"),
+}
+NATIVE_BUILD_GUARD = (
+    "ARG BUILDPLATFORM\nARG TARGETPLATFORM\n"
+    'RUN test -n "${BUILDPLATFORM}" && test "${BUILDPLATFORM}" = "${TARGETPLATFORM}" \\\n'
+    '    && case "${TARGETPLATFORM}" in linux/amd64|linux/arm64) ;; *) exit 1 ;; esac\n'
+)
 
 # Hashes of the original pinned files, not guessed hashes of patched outputs.
 UPSTREAM_ANCHORS = {
@@ -77,13 +115,28 @@ PATCHED_SOURCE_PATHS = {
 }
 
 BUILD_RISKS = (
-    "Ubuntu Xenial base references are mutable tags, not verified platform digests.",
     "Xenial apt repositories are mutable and package versions are not fully pinned.",
-    "Upstream dependency downloads and build-time Git references are not all checksum-pinned.",
+    "The pinned Xenial and legacy library versions are not a modern production-security baseline.",
+    "Native amd64 and arm64 image builds and architecture smoke tests are required before qualification.",
     "Supporting image tags still require verified platform digests before runtime qualification.",
     "No images were built, published, anonymously pulled, or smoke-tested by this preparation step.",
     "Initializer sources are prepared only; no dataset or semantic readiness is attested.",
 )
+
+
+def _write_build_inputs(destination: Path) -> None:
+    build = destination / "build"
+    build.mkdir()
+    for name in ("build-dependencies.sh", "build-openresty.sh"):
+        (build / name).write_bytes((BUILD_ASSETS / name).read_bytes())
+    (build / "source.env").write_text("".join(
+        f"{name.upper()}_URL='{url}'\n{name.upper()}_SHA256='{digest}'\n"
+        for name, (url, digest) in sorted(BUILD_SOURCES.items())
+    ), encoding="utf-8")
+    (build / "source-lock.json").write_text(json.dumps({
+        "schema_version": 1, "candidate_only": True,
+        "sources": {name: {"url": url, "sha256": digest} for name, (url, digest) in BUILD_SOURCES.items()},
+    }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _read(upstream: Path, relative: str) -> str:
@@ -119,13 +172,22 @@ def _write_app(upstream: Path, destination: Path) -> None:
     # A deliberately minimal context does not carry datasets, registration
     # scripts, Helm init containers, host-socket DNS helpers or private keys.
     (destination / ".dockerignore").write_text(".git\n", encoding="utf-8")
-    dependencies = replace_exact(
-        _read(upstream, "docker/thrift-microservice-deps/cpp/Dockerfile"),
-        "FROM ubuntu:16.04", "FROM docker.io/library/ubuntu:16.04 AS media-dependencies",
-        label="Media dependency base",
-    )
-    if dependencies.count("ARG LIB_MONGOC_VERSION=1.14.0") != 1:
+    original_dependencies = _read(upstream, "docker/thrift-microservice-deps/cpp/Dockerfile")
+    if original_dependencies.count("ARG LIB_MONGOC_VERSION=1.14.0") != 1:
         raise PreparationError("Media mongo-c-driver 1.14.0 dependency anchor drifted.")
+    _write_build_inputs(destination)
+    dependencies = (
+        f"FROM {UBUNTU_BASE} AS media-dependencies\n" + NATIVE_BUILD_GUARD
+        + "ARG LIB_MONGOC_VERSION=1.14.0\n"
+        + 'RUN test "${LIB_MONGOC_VERSION}" = 1.14.0\n'
+        + "RUN DEBIAN_FRONTEND=noninteractive apt-get update \\\n"
+        + "    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \\\n"
+        + "        ca-certificates g++ cmake curl libmemcached-dev automake bison flex \\\n"
+        + "        libboost-all-dev libevent-dev libssl-dev libtool make pkg-config\n"
+        + "COPY build /tmp/media-build\n"
+        + "RUN sh /tmp/media-build/build-dependencies.sh app\n"
+        + 'ENV LD_LIBRARY_PATH="/usr/local/lib"\n'
+    )
     application = replace_exact(
         _read(upstream, "Dockerfile"),
         "FROM yg397/thrift-microservice-deps:xenial", "FROM media-dependencies",
@@ -149,6 +211,23 @@ def _render_nginx(upstream: Path) -> str:
     if not text.startswith(header) or not text.endswith(footer):
         raise PreparationError("Media Nginx Helm wrapper drifted.")
     text = text[len(header):-len(footer)]
+    text = replace_exact(
+        text, "error_log  logs/error.log;", "error_log stderr warn;",
+        label="Media nonroot stderr logging",
+    )
+    text = replace_exact(
+        text, "worker_processes  auto;", "worker_processes  auto;\npid /tmp/nginx.pid;",
+        label="Media read-only runtime PID path",
+    )
+    text = replace_exact(
+        text, "http {\n", "http {\n"
+        "  client_body_temp_path /tmp/client-body;\n"
+        "  proxy_temp_path /tmp/proxy;\n"
+        "  fastcgi_temp_path /tmp/fastcgi;\n"
+        "  scgi_temp_path /tmp/scgi;\n"
+        "  uwsgi_temp_path /tmp/uwsgi;\n",
+        label="Media read-only runtime request temporary paths",
+    )
     text = replace_exact(
         text, "  resolver {{ .Values.global.nginx.resolverName }} ipv6=off;",
         f"  resolver {K3S_CLUSTER_DNS_IP} valid=10s ipv6=off;",
@@ -205,19 +284,22 @@ def _write_frontend(upstream: Path, destination: Path) -> None:
     (runtime / "jaeger-config.json").write_text(
         json.dumps(tracing, indent=2, sort_keys=True) + "\n", encoding="utf-8",
     )
+    _write_build_inputs(destination)
+    original = _read(upstream, "docker/openresty-thrift/xenial/Dockerfile")
+    if OPENRESTY_ROCKS_ORIGINAL not in original:
+        raise PreparationError("Media OpenResty source-rock stage drifted.")
+    source = (BUILD_ASSETS / "Dockerfile.frontend").read_text(encoding="utf-8")
     source = replace_exact(
-        _read(upstream, "docker/openresty-thrift/xenial/Dockerfile"),
-        'ARG RESTY_IMAGE_BASE="ubuntu"', 'ARG RESTY_IMAGE_BASE="docker.io/library/ubuntu"',
-        label="Media OpenResty base",
+        source, "@UBUNTU_BASE@", UBUNTU_BASE,
+        label="Media immutable OpenResty base",
     )
     source = replace_exact(
-        source, OPENRESTY_ROCKS_ORIGINAL, OPENRESTY_ROCKS_PINNED,
+        source, f"FROM {UBUNTU_BASE}\n", f"FROM {UBUNTU_BASE}\n" + NATIVE_BUILD_GUARD,
+        label="Media native frontend build guard",
+    )
+    source = replace_exact(
+        source, "@JWT_INSTALL@", OPENRESTY_ROCKS_PINNED,
         label="Media checksum-pinned LuaRocks installation",
-    )
-    source = replace_exact(
-        source, "http://ftp.cs.stanford.edu/pub/exim/pcre/pcre-${RESTY_PCRE_VERSION}.tar.gz",
-        "https://sourceforge.net/projects/pcre/files/pcre/${RESTY_PCRE_VERSION}/pcre-${RESTY_PCRE_VERSION}.tar.gz/download",
-        label="Media legacy PCRE download",
     )
     source += (
         "\n# Bake the Media runtime; no pod-start Git clone or Helm init container.\n"
@@ -322,6 +404,8 @@ def prepare_contexts(upstream: Path, output: Path) -> dict[str, object]:
                 "context_sha256": tree_sha256(destination / name),
                 "recipe_sha256": sha256(destination / name / "Dockerfile.candidate"),
                 "license_sha256": sha256(destination / name / LICENSE_NAME),
+                "build_source_lock_sha256": sha256(destination / name / "build/source-lock.json"),
+                "build_inputs_sha256": tree_sha256(destination / name / "build"),
             }
             for name in ("app", "frontend")
         }
@@ -336,7 +420,13 @@ def prepare_contexts(upstream: Path, output: Path) -> dict[str, object]:
             "prepared_source_receipts": source_receipts,
             "runtime_git_clone": False, "runtime_source_baked_into_images": True,
             "byte_reproducible_rebuild": False,
-            "immutable_base_images_verified": False,
+            "immutable_base_images_verified": True,
+            "base_images": {"ubuntu_xenial": {"reference": UBUNTU_BASE, "platform_digests": dict(UBUNTU_PLATFORM_DIGESTS)}},
+            "build_source_archives_checksum_pinned": True,
+            "build_network_required": True,
+            "native_build_required": True,
+            "portable_cpu_build": True,
+            "frontend_runtime_writable_paths": ["/tmp"],
             "build_risks": list(BUILD_RISKS), "contexts": contexts,
             "third_party_images": {
                 "mongodb": THIRD_PARTY_IMAGES["mongo"],

@@ -232,6 +232,7 @@ class DeathStarBenchMediaPreparationTests(unittest.TestCase):
             self.assertLess(dependencies.index("sha256sum -c -"), dependencies.index('tar xzf "$name.tar.gz"'))
             self.assertNotIn("git clone", dependencies)
             self.assertNotIn("pip3 install", dependencies)
+            self.assertIn("rm -r /usr/local/include/jwt/test", dependencies)
             openresty = (build / "build-openresty.sh").read_text()
             self.assertLess(openresty.index("sha256sum -c -"), openresty.index('tar xzf "$name.tar.gz"'))
             self.assertIn('cp README.markdown "$licenses/hmac/README.markdown"', openresty)

@@ -55,6 +55,10 @@ elif [ "$1" = app ]; then
     fetch jwt "$JWT_URL" "$JWT_SHA256" cpp-jwt-1.1.1
     cp -R cpp-jwt-1.1.1/include/jwt /usr/local/include/
     rm -r /usr/local/include/jwt/json
+    # The archive bundles prebuilt JWT tests and their demo keys beneath its
+    # include directory. They are not headers or runtime assets (and the
+    # prebuilt binaries are x86-only); never copy them into either image.
+    rm -r /usr/local/include/jwt/test
     sed -i 's/#include "jwt\/json\/json.hpp"/#include <nlohmann\/json.hpp>/g' /usr/local/include/jwt/jwt.hpp
     fetch redis "$REDIS_URL" "$REDIS_SHA256" cpp_redis-bbe38a7f83de943ffcc90271092d689ae02b3489
     fetch tacopie "$TACOPIE_URL" "$TACOPIE_SHA256" tacopie-243089d84a5a8032b85e81cae237b823df99abee

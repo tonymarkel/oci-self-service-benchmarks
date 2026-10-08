@@ -1,0 +1,121 @@
+#!/bin/bash
+set -euo pipefail
+
+readonly root=/opt/deathstarbench-candidate-driver
+readonly artifact_manifest=$root/artifact-manifest.env
+readonly wrk_binary=$root/bin/wrk
+readonly luajit_binary=$root/luajit/bin/luajit
+readonly request_script=$root/share/request.lua
+readonly metrics_script=$root/share/metrics.lua
+readonly entrypoint=$root/bin/entrypoint
+
+fail() { printf '%s\n' "candidate-load-driver: $*" >&2; exit 64; }
+test -r "$artifact_manifest" || fail "artifact manifest is missing"
+# Generated from fixed hexadecimal and identifier inputs, never user data.
+# shellcheck disable=SC1090
+. "$artifact_manifest"
+
+require_uint() {
+  local label=$1 value=$2 minimum=$3 maximum=$4
+  [[ "$value" =~ ^[1-9][0-9]*$ && ${#value} -le 9 ]] || fail "$label must be a bounded positive integer"
+  (( value >= minimum && value <= maximum )) || fail "$label is out of range"
+}
+
+verify_artifact() {
+  [[ "$(uname -m)" == x86_64 ]] || fail "runtime architecture is not x86_64"
+  [[ -x "$wrk_binary" && -x "$luajit_binary" ]] || fail "wrk2/LuaJIT binary is missing"
+  local file expected
+  for file in "$wrk_binary" "$request_script" "$metrics_script" "$entrypoint"; do
+    case "$file" in
+      "$wrk_binary") expected=$WRK_BINARY_SHA256 ;;
+      "$request_script") expected=$REQUEST_SCRIPT_SHA256 ;;
+      "$metrics_script") expected=$METRICS_SCRIPT_SHA256 ;;
+      "$entrypoint") expected=$ENTRYPOINT_SHA256 ;;
+    esac
+    [[ -r "$file" && "$(sha256sum "$file" | awk '{print $1}')" == "$expected" ]] ||
+      fail "artifact digest mismatch: $file"
+  done
+  [[ "$(grep -Foc 'http://localhost:8080' "$request_script")" == 1 ]] || fail "request target anchor drifted"
+}
+
+configure_lua_environment() {
+  export LUA_PATH="$root/luasocket/share/lua/5.1/?.lua;$root/luasocket/share/lua/5.1/?/init.lua;;"
+  export LUA_CPATH="$root/luasocket/lib/lua/5.1/?.so;;"
+}
+
+runtime_smoke_check() {
+  local dependencies usage
+  command -v ldd >/dev/null || fail "ldd is missing"
+  dependencies=$(ldd "$wrk_binary" 2>&1) || fail "dynamic dependency inspection failed"
+  [[ "$dependencies" != *"not found"* ]] || fail "a dynamic library is missing"
+  if usage=$("$wrk_binary" 2>&1); then fail "wrk2 accepted an argument-free invocation"; fi
+  case "$usage" in *"Usage: wrk <options> <url>"*"-R, --rate"*) ;; *) fail "unexpected wrk2 interface" ;; esac
+  configure_lua_environment
+  "$luajit_binary" -e 'local socket=assert(require("socket")); assert(require("socket.core")); local mime=assert(require("mime")); assert(type(socket.gettime)=="function"); assert(type(mime.b64)=="function")' || fail "LuaSocket smoke check failed"
+  "$luajit_binary" -b "$request_script" /dev/null || fail "request script does not compile"
+  "$luajit_binary" -b "$metrics_script" /dev/null || fail "metrics script does not compile"
+}
+
+attest() {
+  verify_artifact
+  runtime_smoke_check
+  printf '%s\n' "CANDIDATE_DSB_LOAD_DRIVER_ARTIFACT schema=candidate-driver-v1 measurement_qualified=0 workload=$WORKLOAD_ID architecture=x86_64 platform=linux/amd64 revision=$LOAD_DRIVER_REVISION upstream_revision=$UPSTREAM_REVISION context_sha256=$CONTEXT_SHA256 wrk_binary_sha256=$WRK_BINARY_SHA256 wrk2_source_sha256=$WRK2_SOURCE_SHA256 luajit_revision=$LUAJIT_REVISION luasocket_source_sha256=$LUASOCKET_SOURCE_SHA256 original_request_script_sha256=$ORIGINAL_REQUEST_SCRIPT_SHA256 request_script_sha256=$REQUEST_SCRIPT_SHA256 metrics_script_sha256=$METRICS_SCRIPT_SHA256 entrypoint_sha256=$ENTRYPOINT_SHA256 seed_base=$SEED_BASE"
+}
+
+private_ipv4() {
+  local value=$1 first second third fourth octet
+  [[ "$value" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  # libc URL parsing can treat zero-prefixed octets as octal: 010.0.0.1 is
+  # 8.0.0.1, not RFC1918. Accept canonical decimal octets only.
+  for octet in "${BASH_REMATCH[@]:1}"; do
+    [[ "$octet" == 0 || "${octet:0:1}" != 0 ]] || return 1
+  done
+  first=$((10#${BASH_REMATCH[1]})); second=$((10#${BASH_REMATCH[2]}))
+  third=$((10#${BASH_REMATCH[3]})); fourth=$((10#${BASH_REMATCH[4]}))
+  (( first <= 255 && second <= 255 && third <= 255 && fourth <= 255 )) || return 1
+  (( first == 10 || (first == 172 && second >= 16 && second <= 31) || (first == 192 && second == 168) ))
+}
+
+run_driver() {
+  [[ $# == 12 ]] || fail "run requires exactly six named arguments"
+  [[ $1 == --target && $3 == --port && $5 == --threads && $7 == --connections &&
+     $9 == --rate && ${11} == --duration ]] || fail "arguments missing or out of order"
+  local target=$2 port=$4 threads=$6 connections=$8 rate=${10} duration=${12}
+  private_ipv4 "$target" || fail "target must be an RFC1918 IPv4 address"
+  [[ "$port" == 8080 ]] || fail "candidate NodePort must be exactly 8080"
+  require_uint threads "$threads" 1 1024
+  require_uint connections "$connections" 1 1000000
+  require_uint rate "$rate" 1 999999999
+  require_uint duration "$duration" 1 86400
+  (( connections >= threads && connections % threads == 0 )) || fail "connections must be divisible by threads"
+  (( rate >= threads && rate % threads == 0 )) || fail "rate must be divisible by threads"
+  verify_artifact
+  local hard_nofile required_nofile run_dir status
+  required_nofile=$((connections + 128)); hard_nofile=$(ulimit -Hn)
+  if [[ "$hard_nofile" != unlimited ]]; then
+    [[ "$hard_nofile" =~ ^[0-9]+$ ]] || fail "unable to read open-file hard limit"
+    (( hard_nofile >= required_nofile )) || fail "open-file hard limit is too low"
+  fi
+  ulimit -Sn "$required_nofile"
+  run_dir=$(mktemp -d /tmp/deathstarbench-candidate-driver.XXXXXXXX)
+  trap 'rm -rf "$run_dir"' EXIT
+  cp "$request_script" "$run_dir/request.lua"
+  sed -i "s|http://localhost:8080|http://$target:8080|g" "$run_dir/request.lua"
+  [[ "$(grep -Foc "http://$target:8080" "$run_dir/request.lua")" == 1 ]] || fail "target binding failed"
+  printf '\n' >> "$run_dir/request.lua"
+  cat "$metrics_script" >> "$run_dir/request.lua"
+  configure_lua_environment
+  printf 'CANDIDATE_DSB_LOADGEN_LOGICAL_CPUS=%s\n' "$(nproc)"
+  status=0
+  /usr/bin/time -v "$wrk_binary" -D exp -r -t "$threads" -c "$connections" -d "${duration}s" \
+    -L -s "$run_dir/request.lua" -R "$rate" "http://$target:8080/" || status=$?
+  rm -rf "$run_dir"
+  trap - EXIT
+  return "$status"
+}
+
+case ${1-} in
+  attest) [[ $# == 1 ]] || fail "attest accepts no arguments"; attest ;;
+  run) shift; run_driver "$@" ;;
+  *) fail "expected: attest | run --target ... --port 8080 --threads ... --connections ... --rate ... --duration ..." ;;
+esac

@@ -25,6 +25,17 @@ whose filenames contain `integration` use mocked or injected cloud clients;
 the pull-request workflow does not authenticate to a provider or create cloud
 resources.
 
+The separate candidate-artifact job checks out the exact audited DeathStarBench
+revision and recursive LuaJIT source, verifies a checksum-pinned LuaSocket rock,
+and prepares Hotel/Media artifacts twice. It runs Go correctness tests with the
+pinned native builder (network disabled, input read-only), and requires LuaJIT
+semantic harness tests against the actual prepared scripts. It uploads only
+source-preparation receipts; it does not publish images or qualify live cloud
+workloads. Local fixture tests do not require a container runtime or interpreter;
+the interpreter-backed gate is mandatory in this CI job. See the
+[workload expansion checkpoint](docs/deathstarbench-workload-expansion.md) for
+the local preparation command and remaining release blockers.
+
 ## Pull requests
 
 In the pull request description:
@@ -52,5 +63,6 @@ Add focused tests alongside a change. Provider changes should normally cover:
 - failure, cancellation, and cleanup paths; and
 - relevant form, history, report, or comparison behavior.
 
-The stable `Required CI` check summarizes the complete matrix and is the check
-that should be required before merging to `main`.
+The stable `Required CI` check summarizes the complete Python matrix and
+candidate-artifact preparation job and is the check that should be required
+before merging to `main`.

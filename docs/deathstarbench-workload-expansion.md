@@ -88,8 +88,10 @@ fresh partial output owned by the tool is removed.
   Lua and handlers, renders the K3s resolver/namespace, fixes the Jaeger flag,
   corrects `charactor` to `character`, and increases the request-body buffer.
   Prepared initializer scripts normalize null posters, retain the first
-  mapping for duplicate movie titles, propagate HTTP errors, and require an
-  explicit target. They have not been executed against a deployed workload.
+  mapping for duplicate movie titles, and propagate HTTP errors. The shell
+  registration scripts require an explicit target; the Python uploader retains
+  its upstream CLI default and still needs a validated runtime wrapper. They
+  have not been executed against a deployed workload.
 - `scripts/prepare_deathstarbench_candidate_load_driver.py` prepares distinct
   amd64 Hotel and Media driver contexts without changing Social Network's
   released driver. Both pin wrk2/LuaJIT/LuaSocket inputs and licenses; Hotel's

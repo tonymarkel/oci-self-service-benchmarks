@@ -31,6 +31,13 @@ fails before SSH validation, run-directory creation, or any cloud write.
 
 ## Public lifecycle qualification
 
+Hotel Reservation and Media Microservices are being added in separate reviewed
+workload slices. Their [foundation and release checklist](deathstarbench-workload-expansion.md)
+includes immutable workload profiles, audited service graphs, and offline
+candidate rendering. They are **not runnable or exposed in the public form
+yet**. Social Network remains the only released distributed workload; its
+images, revisions, results, and lifecycle are unchanged.
+
 On 2026-10-01, fresh runs through the normal `create_job` lifecycle completed
 the released five-node topology on every provider. Each run generated both the
 HTML report and structured results, then completed automatic cleanup with a

@@ -1,0 +1,652 @@
+{
+  "components": [
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "memcached",
+      "name": "cast-info-memcached",
+      "ports": [
+        {
+          "container_port": 11211,
+          "name": "memcached",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 11211
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "cast-info-mongodb",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "cast-info-mongodb"
+    },
+    {
+      "command": [
+        "CastInfoService"
+      ],
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "media-microservices",
+      "name": "cast-info-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "memcached",
+      "name": "compose-review-memcached",
+      "ports": [
+        {
+          "container_port": 11211,
+          "name": "memcached",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 11211
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": [
+        "ComposeReviewService"
+      ],
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "media-microservices",
+      "name": "compose-review-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {
+        "COLLECTOR_ZIPKIN_HTTP_PORT": "9411"
+      },
+      "external_traffic_policy": null,
+      "image_key": "jaeger",
+      "name": "jaeger",
+      "ports": [
+        {
+          "container_port": 6831,
+          "name": "jaeger-compact",
+          "node_port": null,
+          "protocol": "UDP",
+          "service_port": 6831
+        },
+        {
+          "container_port": 16686,
+          "name": "jaeger-admin",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 16686
+        }
+      ],
+      "role": "control",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "memcached",
+      "name": "movie-id-memcached",
+      "ports": [
+        {
+          "container_port": 11211,
+          "name": "memcached",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 11211
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "movie-id-mongodb",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "movie-id-mongodb"
+    },
+    {
+      "command": [
+        "MovieIdService"
+      ],
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "media-microservices",
+      "name": "movie-id-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "memcached",
+      "name": "movie-info-memcached",
+      "ports": [
+        {
+          "container_port": 11211,
+          "name": "memcached",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 11211
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "movie-info-mongodb",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "movie-info-mongodb"
+    },
+    {
+      "command": [
+        "MovieInfoService"
+      ],
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "media-microservices",
+      "name": "movie-info-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "movie-review-mongodb",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "movie-review-mongodb"
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "redis",
+      "name": "movie-review-redis",
+      "ports": [
+        {
+          "container_port": 6379,
+          "name": "redis",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 6379
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": [
+        "MovieReviewService"
+      ],
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "media-microservices",
+      "name": "movie-review-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {
+        "fqdn_suffix": ".deathstarbench-media.svc.cluster.local"
+      },
+      "external_traffic_policy": "Local",
+      "image_key": "nginx-web-server",
+      "name": "nginx-web-server",
+      "ports": [
+        {
+          "container_port": 8080,
+          "name": "http",
+          "node_port": 8080,
+          "protocol": "TCP",
+          "service_port": 8080
+        }
+      ],
+      "role": "application",
+      "service_type": "NodePort",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "memcached",
+      "name": "plot-memcached",
+      "ports": [
+        {
+          "container_port": 11211,
+          "name": "memcached",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 11211
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "plot-mongodb",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "plot-mongodb"
+    },
+    {
+      "command": [
+        "PlotService"
+      ],
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "media-microservices",
+      "name": "plot-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "redis",
+      "name": "rating-redis",
+      "ports": [
+        {
+          "container_port": 6379,
+          "name": "redis",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 6379
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": [
+        "RatingService"
+      ],
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "media-microservices",
+      "name": "rating-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "memcached",
+      "name": "review-storage-memcached",
+      "ports": [
+        {
+          "container_port": 11211,
+          "name": "memcached",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 11211
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "review-storage-mongodb",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "review-storage-mongodb"
+    },
+    {
+      "command": [
+        "ReviewStorageService"
+      ],
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "media-microservices",
+      "name": "review-storage-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": [
+        "TextService"
+      ],
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "media-microservices",
+      "name": "text-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": [
+        "UniqueIdService"
+      ],
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "media-microservices",
+      "name": "unique-id-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "memcached",
+      "name": "user-memcached",
+      "ports": [
+        {
+          "container_port": 11211,
+          "name": "memcached",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 11211
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "user-mongodb",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "user-mongodb"
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "mongodb",
+      "name": "user-review-mongodb",
+      "ports": [
+        {
+          "container_port": 27017,
+          "name": "mongodb",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 27017
+        }
+      ],
+      "role": "database",
+      "service_type": "ClusterIP",
+      "storage_subdir": "user-review-mongodb"
+    },
+    {
+      "command": null,
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "redis",
+      "name": "user-review-redis",
+      "ports": [
+        {
+          "container_port": 6379,
+          "name": "redis",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 6379
+        }
+      ],
+      "role": "cache",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": [
+        "UserReviewService"
+      ],
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "media-microservices",
+      "name": "user-review-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    },
+    {
+      "command": [
+        "UserService"
+      ],
+      "environment": {},
+      "external_traffic_policy": null,
+      "image_key": "media-microservices",
+      "name": "user-service",
+      "ports": [
+        {
+          "container_port": 9090,
+          "name": "thrift",
+          "node_port": null,
+          "protocol": "TCP",
+          "service_port": 9090
+        }
+      ],
+      "role": "application",
+      "service_type": "ClusterIP",
+      "storage_subdir": null
+    }
+  ],
+  "namespace": "deathstarbench-media",
+  "released": false,
+  "schema_version": 2,
+  "upstream_revision": "6ecb09706140f8730b5385c08f1386c654c3c526",
+  "workload_revision": "media-microservices-6ecb097-workload-v1"
+}

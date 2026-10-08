@@ -1,0 +1,303 @@
+{
+  "edges": [
+    {
+      "destination": "cast-info-memcached",
+      "port": 11211,
+      "protocol": "TCP",
+      "source": "cast-info-service"
+    },
+    {
+      "destination": "cast-info-mongodb",
+      "port": 27017,
+      "protocol": "TCP",
+      "source": "cast-info-service"
+    },
+    {
+      "destination": "jaeger",
+      "port": 6831,
+      "protocol": "UDP",
+      "source": "cast-info-service"
+    },
+    {
+      "destination": "compose-review-memcached",
+      "port": 11211,
+      "protocol": "TCP",
+      "source": "compose-review-service"
+    },
+    {
+      "destination": "jaeger",
+      "port": 6831,
+      "protocol": "UDP",
+      "source": "compose-review-service"
+    },
+    {
+      "destination": "movie-review-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "compose-review-service"
+    },
+    {
+      "destination": "review-storage-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "compose-review-service"
+    },
+    {
+      "destination": "user-review-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "compose-review-service"
+    },
+    {
+      "destination": "compose-review-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "movie-id-service"
+    },
+    {
+      "destination": "jaeger",
+      "port": 6831,
+      "protocol": "UDP",
+      "source": "movie-id-service"
+    },
+    {
+      "destination": "movie-id-memcached",
+      "port": 11211,
+      "protocol": "TCP",
+      "source": "movie-id-service"
+    },
+    {
+      "destination": "movie-id-mongodb",
+      "port": 27017,
+      "protocol": "TCP",
+      "source": "movie-id-service"
+    },
+    {
+      "destination": "rating-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "movie-id-service"
+    },
+    {
+      "destination": "jaeger",
+      "port": 6831,
+      "protocol": "UDP",
+      "source": "movie-info-service"
+    },
+    {
+      "destination": "movie-info-memcached",
+      "port": 11211,
+      "protocol": "TCP",
+      "source": "movie-info-service"
+    },
+    {
+      "destination": "movie-info-mongodb",
+      "port": 27017,
+      "protocol": "TCP",
+      "source": "movie-info-service"
+    },
+    {
+      "destination": "jaeger",
+      "port": 6831,
+      "protocol": "UDP",
+      "source": "movie-review-service"
+    },
+    {
+      "destination": "movie-review-mongodb",
+      "port": 27017,
+      "protocol": "TCP",
+      "source": "movie-review-service"
+    },
+    {
+      "destination": "movie-review-redis",
+      "port": 6379,
+      "protocol": "TCP",
+      "source": "movie-review-service"
+    },
+    {
+      "destination": "review-storage-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "movie-review-service"
+    },
+    {
+      "destination": "cast-info-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "nginx-web-server"
+    },
+    {
+      "destination": "jaeger",
+      "port": 6831,
+      "protocol": "UDP",
+      "source": "nginx-web-server"
+    },
+    {
+      "destination": "movie-id-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "nginx-web-server"
+    },
+    {
+      "destination": "movie-info-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "nginx-web-server"
+    },
+    {
+      "destination": "plot-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "nginx-web-server"
+    },
+    {
+      "destination": "text-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "nginx-web-server"
+    },
+    {
+      "destination": "unique-id-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "nginx-web-server"
+    },
+    {
+      "destination": "user-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "nginx-web-server"
+    },
+    {
+      "destination": "jaeger",
+      "port": 6831,
+      "protocol": "UDP",
+      "source": "plot-service"
+    },
+    {
+      "destination": "plot-memcached",
+      "port": 11211,
+      "protocol": "TCP",
+      "source": "plot-service"
+    },
+    {
+      "destination": "plot-mongodb",
+      "port": 27017,
+      "protocol": "TCP",
+      "source": "plot-service"
+    },
+    {
+      "destination": "compose-review-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "rating-service"
+    },
+    {
+      "destination": "jaeger",
+      "port": 6831,
+      "protocol": "UDP",
+      "source": "rating-service"
+    },
+    {
+      "destination": "rating-redis",
+      "port": 6379,
+      "protocol": "TCP",
+      "source": "rating-service"
+    },
+    {
+      "destination": "jaeger",
+      "port": 6831,
+      "protocol": "UDP",
+      "source": "review-storage-service"
+    },
+    {
+      "destination": "review-storage-memcached",
+      "port": 11211,
+      "protocol": "TCP",
+      "source": "review-storage-service"
+    },
+    {
+      "destination": "review-storage-mongodb",
+      "port": 27017,
+      "protocol": "TCP",
+      "source": "review-storage-service"
+    },
+    {
+      "destination": "compose-review-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "text-service"
+    },
+    {
+      "destination": "jaeger",
+      "port": 6831,
+      "protocol": "UDP",
+      "source": "text-service"
+    },
+    {
+      "destination": "compose-review-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "unique-id-service"
+    },
+    {
+      "destination": "jaeger",
+      "port": 6831,
+      "protocol": "UDP",
+      "source": "unique-id-service"
+    },
+    {
+      "destination": "jaeger",
+      "port": 6831,
+      "protocol": "UDP",
+      "source": "user-review-service"
+    },
+    {
+      "destination": "review-storage-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "user-review-service"
+    },
+    {
+      "destination": "user-review-mongodb",
+      "port": 27017,
+      "protocol": "TCP",
+      "source": "user-review-service"
+    },
+    {
+      "destination": "user-review-redis",
+      "port": 6379,
+      "protocol": "TCP",
+      "source": "user-review-service"
+    },
+    {
+      "destination": "compose-review-service",
+      "port": 9090,
+      "protocol": "TCP",
+      "source": "user-service"
+    },
+    {
+      "destination": "jaeger",
+      "port": 6831,
+      "protocol": "UDP",
+      "source": "user-service"
+    },
+    {
+      "destination": "user-memcached",
+      "port": 11211,
+      "protocol": "TCP",
+      "source": "user-service"
+    },
+    {
+      "destination": "user-mongodb",
+      "port": 27017,
+      "protocol": "TCP",
+      "source": "user-service"
+    }
+  ],
+  "namespace": "deathstarbench-media",
+  "released": false,
+  "schema_version": 2,
+  "upstream_revision": "6ecb09706140f8730b5385c08f1386c654c3c526",
+  "workload_revision": "media-microservices-6ecb097-workload-v1"
+}

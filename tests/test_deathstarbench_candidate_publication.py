@@ -100,6 +100,19 @@ class CandidatePublicationTests(unittest.TestCase):
                 publish.prepare("hotel_reservation", Path("unused"), Path("unused"), root)
             self.assertEqual(sentinel.read_text(), "keep")
 
+    def test_publication_input_rejects_duplicate_json_keys_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'receipt.json'
+            path.write_text('{"released": true, "released": false}')
+            with self.assertRaises(publish.CandidateImageLockError):
+                publish._read_document(path, 'publication input')
+            path.write_text('{}')
+            link = root / 'alias.json'
+            link.symlink_to(path)
+            with self.assertRaises(publish.CandidateImageLockError):
+                publish._read_document(link, 'publication input')
+
     def test_workflow_is_manual_native_and_remote_actions_pinned(self):
         called = (ROOT / '.github/workflows/deathstarbench-candidate-images.yml').read_text()
         caller = (ROOT / '.github/workflows/deathstarbench-social-images.yml').read_text()

@@ -23,6 +23,7 @@ if __package__ in (None, ""):
 from app.deathstarbench_workload_contract import distributed_workload_profile
 from scripts.deathstarbench_artifact_common import PreparationError, UPSTREAM_REVISION, sha256, tree_sha256
 from scripts.create_deathstarbench_candidate_image_lock import CUSTOM_KEYS, create_candidate_lock, CandidateImageLockError
+from scripts.create_deathstarbench_candidate_image_lock import _read_document
 from scripts.deathstarbench_candidate_registry import DIGEST, digest_bytes, inspect_manifest, inspect_blob, resolve_platform
 from scripts.inspect_deathstarbench_support_images import write_receipt
 from scripts.prepare_deathstarbench_candidate_load_driver import prepare_context
@@ -56,7 +57,7 @@ def candidate_name(owner: str, workload: str, context: str, run_id: str, attempt
 
 def prepared(root: Path, workload: str) -> tuple[Path, Path, dict, dict]:
     app, driver = root / "workload", root / "driver"
-    return app, driver, json.loads((app / "context-manifest.json").read_bytes()), json.loads((driver / "context-manifest.json").read_bytes())
+    return app, driver, _read_document(app / "context-manifest.json", "workload preparation"), _read_document(driver / "context-manifest.json", "driver preparation")
 
 
 def prepare(workload: str, upstream: Path, rock: Path, root: Path) -> None:
@@ -159,7 +160,7 @@ def assemble(workload: str, root: Path, records: list[dict], support: dict, owne
         metadata = output / f"{name}-index-metadata.json"
         subprocess.run(["docker", "buildx", "imagetools", "create", "--tag", tagged,
                         "--metadata-file", str(metadata), *sources], check=True, timeout=600)
-        descriptor = json.loads(metadata.read_bytes())["containerimage.descriptor"]
+        descriptor = _read_document(metadata, "index assembly metadata")["containerimage.descriptor"]
         digest = descriptor["digest"]
         if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
             raise PreparationError("Index assembly did not return a valid SHA-256 descriptor.")
@@ -220,8 +221,8 @@ def main() -> int:
             images["load_driver"] = args.driver_index
         write_receipt(args.output, native_record(args.workload, args.architecture, args.root, images))
     else:
-        assemble(args.workload, args.root, [json.loads(p.read_bytes()) for p in args.records],
-                 json.loads(args.support.read_bytes()), args.owner, args.run_id, args.attempt, args.output)
+        assemble(args.workload, args.root, [_read_document(p, "native publication record") for p in args.records],
+                 _read_document(args.support, "support inventory"), args.owner, args.run_id, args.attempt, args.output)
     return 0
 
 

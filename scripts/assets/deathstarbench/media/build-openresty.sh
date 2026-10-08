@@ -34,7 +34,10 @@ cd openresty-1.15.8.1rc1
     --with-http_xslt_module=dynamic --with-ipv6 --with-mail --with-mail_ssl_module \
     --with-md5-asm --with-pcre-jit --with-sha1-asm --with-stream --with-stream_ssl_module \
     --with-threads --add-dynamic-module="$work/nginx-opentracing-0.8.0/opentracing"
-make -j2
+# OpenSSL 1.1.0j's recursive install rewrites the same dependency Makefile
+# concurrently under parallel nginx builds. Serial compilation avoids the
+# observed Makefile.new race on both native architectures.
+make -j1
 make install
 cd "$work"
 fetch hmac "$HMAC_URL" "$HMAC_SHA256" lua-resty-hmac-23da759b69f208576526c8ac21b7c5ad66740321

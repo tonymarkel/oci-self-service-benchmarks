@@ -36,10 +36,19 @@ from scripts.inspect_deathstarbench_support_images import write_receipt
 
 HOTEL_PROGRAMS = ("attractions", "frontend", "geo", "profile", "rate", "recommendation", "reservation", "review", "search", "user")
 MEDIA_PROGRAMS = ("CastInfoService", "ComposeReviewService", "MovieIdService", "MovieInfoService", "MovieReviewService", "PageService", "PlotService", "RatingService", "ReviewStorageService", "TextService", "UniqueIdService", "UserReviewService", "UserService")
+MEDIA_DEPENDENCY_LICENSES = {
+    "media-microservices": ("thrift", "json", "yaml", "opentracing", "jaeger", "mongo", "jwt", "redis", "tacopie"),
+    "nginx-web-server": ("thrift", "json", "yaml", "opentracing", "jaeger", "openssl", "pcre", "nginx", "openresty", "hmac", "luarocks"),
+}
 ARCHITECTURES = {"x86_64": ("linux/amd64", 62), "aarch64": ("linux/arm64", 183)}
 IMAGE_KEYS = {"hotel_reservation": {"hotel-reservation", "load-driver"},
               "media_microservices": {"media-microservices", "nginx-web-server", "load-driver"}}
-PRIVATE_KEY = re.compile(rb"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----\r?\n[A-Za-z0-9+/=]{32,}")
+# Reject actual PEM material, not OpenSSL's binary parser-format strings.
+PRIVATE_KEY = re.compile(
+    rb"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----\r?\n"
+    rb"(?:Proc-Type: 4,ENCRYPTED\r?\nDEK-Info: [A-Z0-9-]+,[0-9A-F]+\r?\n\r?\n)?"
+    rb"[A-Za-z0-9+/=]{32,}"
+)
 CLONE = re.compile(r"\bgit\s+(?:-[^\s]+\s+)*(?:clone|pull|fetch)\b")
 MAX_FILE_BYTES = 256 * 1024 * 1024
 
@@ -49,7 +58,12 @@ def _command(arguments: list[str], *, timeout: int = 120, stdout_file=None) -> b
         result = subprocess.run(arguments, check=True, stdout=stdout_file or subprocess.PIPE,
                                 stderr=subprocess.PIPE, timeout=timeout)
         return result.stdout or b""
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    except subprocess.CalledProcessError as error:
+        # These bounded offline commands do not carry credentials. Preserve
+        # useful linkage/config diagnostics, never environment or file bodies.
+        diagnostic = (error.stderr or b"").decode("utf-8", errors="replace")[-2000:]
+        raise PreparationError(f"Candidate image inspection command {arguments[0]} failed ({error.returncode}): {diagnostic}") from None
+    except (OSError, subprocess.TimeoutExpired):
         raise PreparationError("Candidate image inspection command failed.") from None
 
 
@@ -248,8 +262,11 @@ def _baked_files(workload: str, key: str, context: Path) -> dict[str, Path]:
         files = {"/usr/share/licenses/deathstarbench/LICENSE": context / "LICENSE.deathstarbench",
                  "/usr/share/licenses/deathstarbench/OpenResty.COPYRIGHT": context / "COPYRIGHT",
                  "/usr/share/licenses/deathstarbench/lua-bridge-tracer.LICENSE": context / "lua-bridge-tracer/LICENSE",
+                 "/usr/local/openresty/lualib/json/json.lua": context / "lua-json/json.lua",
                  "/usr/local/openresty/nginx/conf/nginx.conf": context / "runtime/nginx.conf",
                  "/usr/local/openresty/nginx/jaeger-config.json": context / "runtime/jaeger-config.json"}
+        files.update({"/usr/local/openresty/lualib/thrift/" + p.relative_to(context / "lua-thrift").as_posix(): p
+                      for p in (context / "lua-thrift").rglob("*.lua") if p.is_file()})
         for source, target in (("runtime/gen-lua", "/gen-lua"), ("runtime/lua-scripts", "/usr/local/openresty/nginx/lua-scripts")):
             files.update({target + "/" + p.relative_to(context / source).as_posix(): p
                           for p in (context / source).rglob("*") if p.is_file()})
@@ -274,6 +291,17 @@ def _inspect_filesystem(fs: ImageFilesystem, workload: str, key: str, architectu
         if len(go_license) < 100 or b"Copyright" not in go_license:
             raise PreparationError("Scratch Hotel is missing its Go toolchain license.")
         files["/usr/share/licenses/go/LICENSE"] = hashlib.sha256(go_license).hexdigest()
+    license_files = {}
+    for dependency in MEDIA_DEPENDENCY_LICENSES.get(key, ()):
+        prefix = "usr/share/licenses/deathstarbench/dependencies/" + dependency + "/"
+        candidates = sorted(name for name, member in fs.members.items() if name.startswith(prefix) and member.isfile())
+        if not candidates:
+            raise PreparationError("A Media dependency license/notice directory is missing or empty.")
+        for name in candidates:
+            raw = fs.read(name)
+            if len(raw.strip()) < 20:
+                raise PreparationError("A baked Media dependency license/notice is empty or truncated.")
+            license_files["/" + name] = hashlib.sha256(raw).hexdigest()
     command = [*(image_config.get("Entrypoint") or []), *(image_config.get("Cmd") or [])]
     if CLONE.search(" ".join(command)):
         raise PreparationError("Runtime command clones mutable source.")
@@ -287,7 +315,7 @@ def _inspect_filesystem(fs: ImageFilesystem, workload: str, key: str, architectu
         if not member.isfile():
             continue
         if fs.has_private_key(name):
-            raise PreparationError("Runtime image contains a private/demo key.")
+            raise PreparationError(f"Runtime image contains a private/demo key in {name}.")
         if fs.prefix(name) == b"\x7fELF":
             identity = elf_identity(fs.read(name), architecture)
             if identity["interpreter"]:
@@ -303,7 +331,7 @@ def _inspect_filesystem(fs: ImageFilesystem, workload: str, key: str, architectu
             raise PreparationError("A required native executable is missing or not executable.")
         if key == "hotel-reservation" and not elves[path]["static"]:
             raise PreparationError("Scratch Hotel executables must be statically linked.")
-    return {"baked_file_sha256": files, "elf_artifacts": elves,
+    return {"baked_file_sha256": files, "dependency_license_sha256": license_files, "elf_artifacts": elves,
             "required_executables": required, "runtime_clone_detected": False,
             "private_key_detected": False}
 
@@ -312,6 +340,25 @@ def _ldd_command(paths: list[str]) -> list[str]:
     quoted = " ".join(shlex.quote(path) for path in paths)
     return ["/bin/sh", "-c", 'set -eu; for binary in ' + quoted + '; do output=$(ldd "$binary" 2>&1); '
             'case "$output" in *"not found"*) exit 1;; esac; printf "%s\\n" "$output"; done']
+
+
+def inspection_plan(workload: str, key: str, context: Path, identities: dict) -> list[tuple[list[str], tuple[str, ...]]]:
+    """Return exact, bounded offline commands shared with receipt validation."""
+    plan = []
+    dynamic = sorted(path for path, value in identities["elf_artifacts"].items() if value["dynamic_dependencies"])
+    if key != "hotel-reservation" and dynamic:
+        plan.append((_ldd_command(dynamic), ()))
+    if key == "nginx-web-server":
+        names = tuple(sorted(DISTRIBUTED_WORKLOAD_PROFILES[workload].expected_component_placement))
+        hosts = tuple(sorted({*names, *(name + ".deathstarbench-media.svc.cluster.local" for name in names)}))
+        plan.append((["/usr/local/openresty/bin/openresty", "-t"], hosts))
+        modules = [p.stem for p in sorted((context / "runtime/gen-lua").glob("*.lua"))]
+        lua = 'package.path="/gen-lua/?.lua;/usr/local/openresty/nginx/lua-scripts/?.lua;"..package.path; '
+        lua += '; '.join('assert(require(' + json.dumps(module) + '))' for module in ["Thrift", "liblualongnumber", "json", "resty.jwt", "opentracing_bridge_tracer", *modules])
+        plan.append((["/usr/local/openresty/bin/resty", "-e", lua], hosts))
+    elif key == "load-driver":
+        plan.append((["/opt/deathstarbench-candidate-driver/bin/entrypoint", "attest"], ()))
+    return plan
 
 
 def _driver_attestation(text: str, workload: str, context_hash: str, identities: dict) -> None:
@@ -382,22 +429,14 @@ def smoke_image(image: str, *, workload_id: str, image_key: str, architecture: s
     if image_key == "hotel-reservation":
         methods.append("scratch-static-linkage-no-service-startup")
     elif dynamic:
-        executions.append(_run_inspection(image, _ldd_command(sorted(dynamic))))
         methods.append("native-hardened-ldd-all-dynamic-ELFs")
+    executions = [_run_inspection(image, command, hosts=hosts)
+                  for command, hosts in inspection_plan(workload_id, image_key, context, identities)]
     attestation = None
     if image_key == "nginx-web-server":
-        names = tuple(sorted(DISTRIBUTED_WORKLOAD_PROFILES[workload_id].expected_component_placement))
-        hosts = tuple(sorted({*names, *(name + ".deathstarbench-media.svc.cluster.local" for name in names)}))
-        executions.append(_run_inspection(image, ["/usr/local/openresty/bin/openresty", "-t"], hosts=hosts))
-        modules = [p.stem for p in sorted((context / "runtime/gen-lua").glob("*.lua"))]
-        lua = 'package.path="/gen-lua/?.lua;/usr/local/openresty/nginx/lua-scripts/?.lua;"..package.path; '
-        lua += '; '.join('assert(require(' + json.dumps(module) + '))' for module in ["Thrift", "liblualongnumber", "json", "resty.jwt", "opentracing_bridge_tracer", *modules])
-        executions.append(_run_inspection(image, ["/usr/local/openresty/bin/resty", "-e", lua], hosts=hosts))
         methods.extend(["baked-nginx-config-syntax-with-explicit-mock-DNS", "baked-Lua-Thrift-module-loading-no-service-methods"])
     elif image_key == "load-driver":
-        execution = _run_inspection(image, ["/opt/deathstarbench-candidate-driver/bin/entrypoint", "attest"])
-        executions.append(execution)
-        attestation = execution["stdout"]
+        attestation = executions[-1]["stdout"]
         _driver_attestation(attestation, workload_id, tree_sha256(context), identities)
         methods.append("candidate-driver-offline-hardened-attestation")
     return {"schema_version": 1, "candidate_schema": "candidate-image-smoke-v1", "workload_id": workload_id,

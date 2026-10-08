@@ -237,6 +237,7 @@ class DeathStarBenchMediaPreparationTests(unittest.TestCase):
             self.assertIn('cp README.markdown "$licenses/hmac/README.markdown"', openresty)
             self.assertNotIn("raw.githubusercontent.com", openresty)
             self.assertIn("install lib/resty/*.lua", openresty)
+            self.assertIn("make -j1\nmake install", openresty)
             for script in (build / "build-dependencies.sh", build / "build-openresty.sh"):
                 subprocess.run(["sh", "-n", str(script)], check=True, capture_output=True)
 

@@ -132,6 +132,19 @@ def assemble(workload: str, root: Path, records: list[dict], support: dict, owne
     # The registry preflight below must happen before even the first index push.
     from scripts.create_deathstarbench_candidate_image_lock import preflight_native_candidate
     preflight_native_candidate(workload, app, driver, records, inspector=inspect_manifest, blob_inspector=inspect_blob)
+    # Validate every intended repository before publishing any of the indexes.
+    for name in CUSTOM_KEYS[workload]:
+        repository = candidate_name(owner, workload, name, run_id, attempt).split(":", 1)[0]
+        for record in platforms.values():
+            source = record["images"][name]["build_receipt"]["published_index_image"]
+            if source.split("@", 1)[0] != repository:
+                raise PreparationError("Native indexes must belong to the intended candidate repository.")
+    support_images = {}
+    for key, item in support["workloads"][workload]["images"].items():
+        support_images[key] = {"requested_image": item["requested_image"], "index_image": item["index_image"],
+                               "platforms": {"linux/amd64": {"image": item["image"]}}}
+    from scripts.create_deathstarbench_candidate_image_lock import validate_support_evidence
+    validate_support_evidence(workload, support_images, inspector=inspect_manifest, blob_inspector=inspect_blob)
     output.mkdir(parents=True)
     custom = {}
     for name in CUSTOM_KEYS[workload]:
@@ -157,10 +170,6 @@ def assemble(workload: str, root: Path, records: list[dict], support: dict, owne
         custom[name] = {"index_image": index, "platforms": {p: record["images"][name] for p, record in platforms.items()}}
     driver_image = platforms["linux/amd64"]["images"]["load_driver"]
     profile = distributed_workload_profile(workload)
-    support_images = {}
-    for key, item in support["workloads"][workload]["images"].items():
-        support_images[key] = {"requested_image": item["requested_image"], "index_image": item["index_image"],
-                               "platforms": {"linux/amd64": {"image": item["image"]}}}
     evidence = {"schema_version": 1, "candidate_schema": "candidate-publication-v1", "workload_id": workload,
                 "upstream_revision": UPSTREAM_REVISION, "workload_revision": profile.workload_revision,
                 "image_set_revision": profile.image_set_revision,

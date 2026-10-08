@@ -220,7 +220,8 @@ class CandidateLockTests(unittest.TestCase):
         else:
             for path in ("app/config/service-config.json", "app/config/jaeger-config.yml", "app/LICENSE.deathstarbench", "app/third_party/PicoSHA2/LICENSE",
                          "frontend/LICENSE.deathstarbench", "frontend/COPYRIGHT", "frontend/lua-bridge-tracer/LICENSE", "frontend/runtime/nginx.conf",
-                         "frontend/runtime/jaeger-config.json", "frontend/runtime/gen-lua/fixture.lua", "frontend/runtime/lua-scripts/fixture.lua"):
+                         "frontend/runtime/jaeger-config.json", "frontend/runtime/gen-lua/fixture.lua", "frontend/runtime/lua-scripts/fixture.lua",
+                         "frontend/lua-json/json.lua", "frontend/lua-thrift/Thrift.lua"):
                 write(self.workload_path / path, "fixture " + path + "\n")
         evidence = {"schema_version": 1, "candidate_schema": lock.SCHEMA, "workload_id": workload_id,
                     "upstream_revision": lock.UPSTREAM_REVISION, "workload_revision": profile.workload_revision,
@@ -257,8 +258,13 @@ class CandidateLockTests(unittest.TestCase):
                 elif runtime_key == "load-driver":
                     methods.append("candidate-driver-offline-hardened-attestation")
                 attestation = marker(driver_document) if context_name == "load_driver" else None
-                executions = [] if attestation is None else [{"command": ["/opt/deathstarbench-candidate-driver/bin/entrypoint", "attest"],
-                                                              "stdout": attestation, "stdout_sha256": hashlib.sha256(attestation.encode()).hexdigest(), "mock_dns": {}}]
+                artifacts = {"baked_file_sha256": baked,
+                             "dependency_license_sha256": {"/usr/share/licenses/deathstarbench/dependencies/" + name + "/LICENSE": "a" * 64
+                                                           for name in smoke_tool.MEDIA_DEPENDENCY_LICENSES.get(runtime_key, ())},
+                             "elf_artifacts": elves, "required_executables": required, "runtime_clone_detected": False, "private_key_detected": False}
+                executions = [{"command": command, "stdout": attestation or "", "stdout_sha256": hashlib.sha256((attestation or "").encode()).hexdigest(),
+                               "mock_dns": {host: "127.0.0.1" for host in hosts}}
+                              for command, hosts in smoke_tool.inspection_plan(workload_id, runtime_key, context, artifacts)]
                 smoke = {"schema_version": 1, "candidate_schema": "candidate-image-smoke-v1", "workload_id": workload_id,
                          "image_key": runtime_key, "image": images[platform], "platform": platform, "architecture": lock.ARCHITECTURES[platform],
                          "config_digest": configs[platform], "context_sha256": identity["context_sha256"], "methods": methods,
@@ -268,8 +274,7 @@ class CandidateLockTests(unittest.TestCase):
                          "native_builder": {"platform": platform, "architecture": lock.ARCHITECTURES[platform], "qemu_used": False},
                          "image_config": {"os": "linux", "architecture": platform.split("/")[1], "config_digest": configs[platform]},
                          "load_driver_attestation": attestation, "inspection_executions": executions,
-                         "artifact_identities": {"baked_file_sha256": baked, "elf_artifacts": elves, "required_executables": required,
-                                                 "runtime_clone_detected": False, "private_key_detected": False}}
+                         "artifact_identities": artifacts}
                 image_evidence["platforms"][platform] = {"image": images[platform], "build_receipt": build, "smoke_receipt": smoke}
             if context_name == "load_driver":
                 evidence["load_driver"] = image_evidence
@@ -443,6 +448,25 @@ class CandidateLockTests(unittest.TestCase):
         receipt["inspection_executions"][0]["stdout_sha256"] = "a" * 64
         with self.assertRaisesRegex(lock.CandidateImageLockError, "stdout bytes"):
             self.preflight(evidence, inputs, records)
+
+    def test_frontend_method_labels_cannot_replace_exact_executed_checks(self):
+        for case in ("missing", "command", "mock_dns", "lua_module", "dependency_notice"):
+            evidence, *inputs = self.fixture("media_microservices")
+            records = self.native_records(evidence)
+            receipt = records[0]["images"]["frontend"]["smoke_receipt"]
+            if case == "missing":
+                receipt["inspection_executions"] = []
+            elif case == "command":
+                receipt["inspection_executions"][0]["command"] = ["/bin/true"]
+            elif case == "mock_dns":
+                receipt["inspection_executions"][0]["mock_dns"] = {}
+            elif case == "lua_module":
+                receipt["inspection_executions"][1]["command"][-1] = "assert(true)"
+            else:
+                notice = next(iter(receipt["artifact_identities"]["dependency_license_sha256"]))
+                del receipt["artifact_identities"]["dependency_license_sha256"][notice]
+            with self.subTest(case=case), self.assertRaises(lock.CandidateImageLockError):
+                self.preflight(evidence, inputs, records)
 
 
 class LocalPreparationTests(unittest.TestCase):

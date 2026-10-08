@@ -66,6 +66,21 @@ def hotel_fixture(root):
     return context, files
 
 
+def media_fixture(root, key, *, machine=62):
+    context = root / "context"
+    for path in ("LICENSE.deathstarbench", "third_party/PicoSHA2/LICENSE", "config/service-config.json", "config/jaeger-config.yml",
+                 "COPYRIGHT", "lua-bridge-tracer/LICENSE", "runtime/nginx.conf", "runtime/jaeger-config.json", "lua-json/json.lua",
+                 "lua-thrift/Thrift.lua", "runtime/gen-lua/media_service_ttypes.lua", "runtime/lua-scripts/example.lua"):
+        write(context / path, "candidate context fixture " + path + "\n")
+    files = {path.lstrip("/"): original.read_bytes()
+             for path, original in smoke._baked_files("media_microservices", key, context).items()}
+    programs = ["usr/local/bin/" + name for name in smoke.MEDIA_PROGRAMS] if key == "media-microservices" else ["usr/local/openresty/nginx/sbin/nginx"]
+    files.update({name: (elf(machine), 0o755) for name in programs})
+    files.update({"usr/share/licenses/deathstarbench/dependencies/" + name + "/LICENSE": b"Copyright upstream; redistribution under this license.\n"
+                  for name in smoke.MEDIA_DEPENDENCY_LICENSES[key]})
+    return context, files
+
+
 class RegistryBytesTests(unittest.TestCase):
     def test_exact_platform_resolution_checks_manifest_and_config_bytes(self):
         cfg = encode({"os": "linux", "architecture": "amd64", "config": {"Env": []}})
@@ -222,6 +237,36 @@ class ImageFilesystemTests(unittest.TestCase):
             self.assertTrue(all(value["static"] for value in identities["elf_artifacts"].values()))
             self.assertIn("/usr/share/licenses/go/LICENSE", identities["baked_file_sha256"])
 
+    def test_media_arm_app_checks_all_thirteen_binaries_including_page_service(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context, files = media_fixture(root, "media-microservices", machine=183)
+            archive(root / "image.tar", files)
+            fs = smoke.ImageFilesystem(root / "image.tar")
+            self.addCleanup(fs.close)
+            identities = smoke._inspect_filesystem(fs, "media_microservices", "media-microservices", "aarch64", context, {})
+            self.assertEqual(len(identities["required_executables"]), 13)
+            self.assertIn("/usr/local/bin/PageService", identities["elf_artifacts"])
+            self.assertEqual(len(identities["dependency_license_sha256"]), 9)
+
+    def test_media_baked_lua_modules_and_all_dependency_licenses_are_bound(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context, files = media_fixture(root, "nginx-web-server")
+            archive(root / "image.tar", files)
+            fs = smoke.ImageFilesystem(root / "image.tar")
+            self.addCleanup(fs.close)
+            identities = smoke._inspect_filesystem(fs, "media_microservices", "nginx-web-server", "x86_64", context, {})
+            self.assertIn("/usr/local/openresty/lualib/json/json.lua", identities["baked_file_sha256"])
+            self.assertIn("/usr/local/openresty/lualib/thrift/Thrift.lua", identities["baked_file_sha256"])
+            self.assertEqual(len(identities["dependency_license_sha256"]), 11)
+            del files["usr/share/licenses/deathstarbench/dependencies/thrift/LICENSE"]
+            archive(root / "missing-license.tar", files)
+            missing = smoke.ImageFilesystem(root / "missing-license.tar")
+            self.addCleanup(missing.close)
+            with self.assertRaisesRegex(smoke.PreparationError, "license/notice"):
+                smoke._inspect_filesystem(missing, "media_microservices", "nginx-web-server", "x86_64", context, {})
+
     def test_wrong_arch_missing_binary_dynamic_hotel_config_drift_and_private_key_fail(self):
         for mutation in ("wrong-arch", "missing", "dynamic", "config", "key", "runtime-clone"):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
@@ -251,6 +296,20 @@ class ImageFilesystemTests(unittest.TestCase):
 
 
 class SmokeExecutionTests(unittest.TestCase):
+    def test_frontend_plan_checks_exact_baked_config_and_all_generated_modules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context, _ = media_fixture(root, "nginx-web-server")
+            identities = {"elf_artifacts": {"/usr/local/lib/example.so": {"dynamic_dependencies": True}}}
+            plan = smoke.inspection_plan("media_microservices", "nginx-web-server", context, identities)
+            self.assertEqual(plan[0], (smoke._ldd_command(["/usr/local/lib/example.so"]), ()))
+            self.assertEqual(plan[1][0], ["/usr/local/openresty/bin/openresty", "-t"])
+            self.assertEqual(plan[2][0][:2], ["/usr/local/openresty/bin/resty", "-e"])
+            self.assertIn('require("media_service_ttypes")', plan[2][0][2])
+            self.assertIn('require("opentracing_bridge_tracer")', plan[2][0][2])
+            self.assertTrue(plan[1][1])
+            self.assertEqual(plan[1][1], plan[2][1])
+
     def test_scratch_smoke_uses_only_stopped_owned_container_and_candidate_receipt(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -476,9 +476,9 @@ def _build_receipt(receipt: Any, workload_id: str, context_name: str, platform: 
 
 
 def _artifact_receipt(receipt: dict, workload_id: str, runtime_key: str, platform: str, context: Path) -> None:
-    from scripts.smoke_deathstarbench_candidate_images import _baked_files, HOTEL_PROGRAMS, MEDIA_PROGRAMS
+    from scripts.smoke_deathstarbench_candidate_images import _baked_files, HOTEL_PROGRAMS, MEDIA_PROGRAMS, MEDIA_DEPENDENCY_LICENSES, inspection_plan
     artifacts = _mapping(receipt.get("artifact_identities"), "smoke artifact identities", keys={
-        "baked_file_sha256", "elf_artifacts", "required_executables", "runtime_clone_detected", "private_key_detected"})
+        "baked_file_sha256", "dependency_license_sha256", "elf_artifacts", "required_executables", "runtime_clone_detected", "private_key_detected"})
     for key in ("runtime_clone_detected", "private_key_detected"):
         _equal(artifacts.get(key), False, f"smoke artifact {key}")
     try:
@@ -492,6 +492,21 @@ def _artifact_receipt(receipt: dict, workload_id: str, runtime_key: str, platfor
         _equal(_hex(files[name], "baked file"), sha256(path), f"smoke baked file {name}")
     if runtime_key == "hotel-reservation":
         _hex(files["/usr/share/licenses/go/LICENSE"], "in-image Go license")
+    # Notices copied from verified build archives are in-image identities, not
+    # context-file equality proofs. Keep them separate from source-baked files.
+    notices = _mapping(artifacts.get("dependency_license_sha256"), "in-image dependency notices")
+    expected_dependencies = set(MEDIA_DEPENDENCY_LICENSES.get(runtime_key, ()))
+    observed_dependencies = set()
+    prefix = "/usr/share/licenses/deathstarbench/dependencies/"
+    for path, digest in notices.items():
+        _require(isinstance(path, str) and path.startswith(prefix) and PurePosixPath(path).as_posix() == path
+                 and ".." not in PurePosixPath(path).parts and "\\" not in path and "\0" not in path,
+                 "Invalid dependency notice path.")
+        suffix = path.removeprefix(prefix)
+        _require("/" in suffix and bool(suffix.split("/", 1)[1]), "Missing dependency notice filename.")
+        observed_dependencies.add(suffix.split("/", 1)[0])
+        _hex(digest, "in-image dependency notice")
+    _require(observed_dependencies == expected_dependencies, "Incomplete or unexpected in-image dependency notice inventory.")
     expected_required = (["/go/bin/" + name for name in HOTEL_PROGRAMS] if runtime_key == "hotel-reservation" else
                          ["/usr/local/bin/" + name for name in MEDIA_PROGRAMS] if runtime_key == "media-microservices" else
                          ["/usr/local/openresty/nginx/sbin/nginx"] if runtime_key == "nginx-web-server" else
@@ -539,6 +554,11 @@ def _artifact_receipt(receipt: dict, workload_id: str, runtime_key: str, platfor
         _require(isinstance(execution["stdout"], str), "Inspection stdout must be text.")
         _equal(_hex(execution["stdout_sha256"], "inspection stdout"), hashlib.sha256(execution["stdout"].encode()).hexdigest(), "inspection stdout bytes")
         _mapping(execution["mock_dns"], "inspection mock DNS")
+    plan = inspection_plan(workload_id, runtime_key, context, artifacts)
+    _require(len(executions) == len(plan), "Missing or unexpected required inspection execution receipts.")
+    for execution, (command, hosts) in zip(executions, plan, strict=True):
+        _equal(execution["command"], command, "required native inspection command")
+        _equal(execution["mock_dns"], {host: "127.0.0.1" for host in hosts}, "required inspection mock DNS")
     if runtime_key == "load-driver":
         required_command = ["/opt/deathstarbench-candidate-driver/bin/entrypoint", "attest"]
         matching = [execution for execution in executions if execution["command"] == required_command]
@@ -619,6 +639,57 @@ def preflight_native_candidate(workload_id: str, workload_preparation: Path, dri
     return platforms
 
 
+def validate_support_evidence(workload_id: str, evidence: dict, *, inspector: Callable[[str], bytes],
+                              blob_inspector: Callable[[str, str], bytes]) -> dict:
+    """Read-only backing-image evidence preflight; tags identify candidates only.
+
+    The fixed requested candidate tag must currently resolve to its exact
+    recorded index. Config metadata is not an executed binary-version proof.
+    Only amd64 is required for the fixed database/cache/control support roles.
+    """
+    _require(workload_id in CUSTOM_KEYS, "Only Hotel/Media candidates are supported.")
+    from scripts.inspect_deathstarbench_support_images import SUPPORT_IMAGES, VERSION_ENV
+    profile = get_workload_profile(workload_id)
+    keys = set(profile.required_image_keys) - set(CUSTOM_KEYS[workload_id].values())
+    supplied = _mapping(evidence, "support images", keys=keys)
+    inspector = lru_cache(maxsize=128)(inspector)
+    blob_inspector = lru_cache(maxsize=128)(blob_inspector)
+    images = {}
+    for key, value in supplied.items():
+        value = _mapping(value, f"support {key}", keys={"requested_image", "index_image", "platforms"})
+        _equal(value["requested_image"], SUPPORT_IMAGES[workload_id][key], f"support {key} candidate source")
+        repository, digest = _reference(value["index_image"], f"support {key} index")
+        _equal(repository, _repository(value["requested_image"], label=key), f"support {key} repository")
+        _json_bytes(inspector(value["requested_image"]), f"support {key} candidate source", digest=digest)
+        platforms = _mapping(value["platforms"], f"support {key} platforms", keys={"linux/amd64"})
+        for item in platforms.values():
+            _mapping(item, f"support {key} platform", keys={"image"})
+        verified = verify_image_index(value["index_image"], {platform: item["image"] for platform, item in platforms.items()},
+                                      inspector=inspector, blob_inspector=blob_inspector, allow_other_platforms=True)
+        config = _json_bytes(blob_inspector(repository, verified["platforms"]["linux/amd64"]["config_digest"]), "support version metadata")
+        metadata = _mapping(config.get("config", {}), "support image config")
+        environment = {}
+        for entry in metadata.get("Env", []):
+            _require(isinstance(entry, str) and "=" in entry, "Invalid support config environment.")
+            name, value_env = entry.split("=", 1)
+            _require(name not in environment, "Duplicate support config environment variable.")
+            environment[name] = value_env
+        version = environment.get(VERSION_ENV.get(key))
+        source = "image-config-environment" if version is not None else None
+        labels = _mapping(metadata.get("Labels") or {}, "support config labels")
+        if version is None and "org.opencontainers.image.version" in labels:
+            _require(isinstance(labels["org.opencontainers.image.version"], str), "Invalid support version label.")
+            version = labels["org.opencontainers.image.version"].removeprefix("v")
+            source = "image-config-label"
+        candidate_version = SUPPORT_IMAGES[workload_id][key].rsplit(":", 1)[1]
+        if version is not None:
+            _equal(version, candidate_version, f"support {key} observed version metadata")
+        images[key] = {**verified, "requested_image": SUPPORT_IMAGES[workload_id][key], "candidate_version": candidate_version,
+                       "observed_version_metadata": version, "version_metadata_source": source,
+                       "binary_version_executed": False, "native_build_claimed": False, "runtime_qualified": False}
+    return images
+
+
 def create_candidate_lock(workload_id: str, workload_preparation: Path, driver_preparation: Path,
                           publication_evidence: dict, *, inspector: Callable[[str], bytes],
                           blob_inspector: Callable[[str, str], bytes]) -> dict:
@@ -656,22 +727,7 @@ def create_candidate_lock(workload_id: str, workload_preparation: Path, driver_p
             if context_name == "load_driver":
                 item["driver_attestation"] = _driver_binary_attestation(item["smoke_receipt"], driver_manifest)
         images[runtime_key] = {**verified, "prepared_identity": identity}
-    support_keys = set(profile.required_image_keys) - set(CUSTOM_KEYS[workload_id].values())
-    support = _mapping(evidence["support_images"], "support images", keys=support_keys)
-    from scripts.inspect_deathstarbench_support_images import SUPPORT_IMAGES
-    for key, value in support.items():
-        value = _mapping(value, f"support {key}", keys={"requested_image", "index_image", "platforms"})
-        _equal(value["requested_image"], SUPPORT_IMAGES[workload_id][key], f"support {key} candidate source")
-        repository, digest = _reference(value["index_image"], f"support {key} index")
-        _equal(repository, _repository(value["requested_image"], label=key), f"support {key} repository")
-        _json_bytes(inspector(value["requested_image"]), f"support {key} candidate source", digest=digest)
-        supplied = _mapping(value["platforms"], f"support {key} platforms", keys={"linux/amd64"})
-        for item in supplied.values():
-            _mapping(item, f"support {key} platform", keys={"image"})
-        images[key] = {**verify_image_index(value["index_image"], {platform: item["image"] for platform, item in supplied.items()},
-                                           inspector=inspector, blob_inspector=blob_inspector, allow_other_platforms=True),
-                       "requested_image": value["requested_image"], "native_build_claimed": False,
-                       "runtime_qualified": False}
+    images.update(validate_support_evidence(workload_id, evidence["support_images"], inspector=inspector, blob_inspector=blob_inspector))
     return {
         "schema_version": 1, "candidate_schema": LOCK_SCHEMA, "candidate_only": True, "released": False,
         "runtime_qualified": False, "measurement_qualified": False, "anonymous_pull_qualified": False,

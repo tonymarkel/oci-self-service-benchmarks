@@ -97,7 +97,7 @@ def fixture(root):
     write(media / "nginx-web-server/lua-scripts/wrk2-api/review/compose.lua", 'local k8s_suffix = os.getenv("fqdn_suffix")\n')
     write(media / "nginx-web-server/jaeger-config.json", '{"service_name":"nginx","diabled": false,"reporter":{"logSpans":true,"localAgentHostPort":"jaeger:6831"},"sampler":{"type":"const","param":"1"}}\n')
     write(media / "helm-chart/mediamicroservices/templates/configs/nginx/nginx.tpl", '{{- define "mediamicroservices.templates.nginx.nginx.conf"  }}\n'
-          + "worker_processes  auto;\nenv fqdn_suffix;\nevents {\n  worker_connections  1024;\n}\nhttp {\n"
+          + "worker_processes  auto;\nerror_log  logs/error.log;\nenv fqdn_suffix;\nevents {\n  worker_connections  1024;\n}\nhttp {\n"
           + "  # Docker default hostname resolver\n  # resolver 127.0.0.11 ipv6=off;\n"
           + "  resolver {{ .Values.global.nginx.resolverName }} ipv6=off;\n  server {\n    listen 8080;\n    lua_need_request_body on;\n  }\n}\n{{- end}}\n")
     write(media / "scripts/write_movie_info.py", INITIALIZER)
@@ -179,7 +179,7 @@ class DeathStarBenchMediaPreparationTests(unittest.TestCase):
         self.assertTrue(manifest["candidate_only"])
         self.assertFalse(manifest["released"])
         self.assertFalse(manifest["byte_reproducible_rebuild"])
-        self.assertFalse(manifest["immutable_base_images_verified"])
+        self.assertTrue(manifest["immutable_base_images_verified"])
         self.assertFalse(manifest["initializer"]["executed"])
         self.assertFalse(manifest["initializer"]["dataset_ready"])
         self.assertTrue(manifest["initializer"]["requires_journal_and_semantic_readiness"])
@@ -195,6 +195,53 @@ class DeathStarBenchMediaPreparationTests(unittest.TestCase):
         self.assertNotIn("social-network-microservices", app)
         self.assertIn("/media-microservices/config/service-config.json", app)
         self.assertIn("/usr/share/licenses/deathstarbench/LICENSE", app)
+
+    def test_native_portable_recipes_use_verified_bases_and_checksum_locked_sources(self):
+        manifest, output = self.prepare()
+        self.assertTrue(manifest["native_build_required"])
+        self.assertTrue(manifest["portable_cpu_build"])
+        self.assertTrue(manifest["build_network_required"])
+        self.assertTrue(manifest["build_source_archives_checksum_pinned"])
+        self.assertFalse(manifest["byte_reproducible_rebuild"])
+        self.assertEqual(manifest["base_images"]["ubuntu_xenial"]["reference"], prepare.UBUNTU_BASE)
+        self.assertEqual(set(manifest["base_images"]["ubuntu_xenial"]["platform_digests"]), {"linux/amd64", "linux/arm64"})
+        for name in ("app", "frontend"):
+            recipe = (output / name / "Dockerfile.candidate").read_text()
+            self.assertIn(prepare.UBUNTU_BASE, recipe)
+            self.assertIn(prepare.NATIVE_BUILD_GUARD, recipe)
+            self.assertNotIn("ubuntu:16.04", recipe)
+            self.assertNotIn("-march=native", recipe)
+            self.assertNotIn("-mcpu=native", recipe)
+            self.assertNotIn("git clone", recipe)
+            build = output / name / "build"
+            lock = json.loads((build / "source-lock.json").read_text())
+            environment = (build / "source.env").read_text()
+            self.assertTrue(lock["candidate_only"])
+            for source, (url, digest) in prepare.BUILD_SOURCES.items():
+                self.assertEqual(lock["sources"][source], {"url": url, "sha256": digest})
+                self.assertIn(url, environment)
+                self.assertIn(digest, environment)
+            self.assertEqual(manifest["contexts"][name]["build_source_lock_sha256"], common.sha256(build / "source-lock.json"))
+            self.assertEqual(manifest["contexts"][name]["build_inputs_sha256"], common.tree_sha256(build))
+            dependencies = (build / "build-dependencies.sh").read_text()
+            self.assertIn("-DHUNTER_ENABLED=OFF", dependencies)
+            self.assertIn("-DBUILD_STATIC_LIBS=ON", dependencies)
+            self.assertIn("-DBUILD_SHARED_LIBS=ON", dependencies)
+            self.assertIn("tacopie-243089d84a5a8032b85e81cae237b823df99abee", dependencies)
+            self.assertIn("printf '%s  %s\\n'", dependencies)
+            self.assertLess(dependencies.index("sha256sum -c -"), dependencies.index('tar xzf "$name.tar.gz"'))
+            self.assertNotIn("git clone", dependencies)
+            self.assertNotIn("pip3 install", dependencies)
+            self.assertIn("rm -r /usr/local/include/jwt/test", dependencies)
+            openresty = (build / "build-openresty.sh").read_text()
+            self.assertLess(openresty.index("sha256sum -c -"), openresty.index('tar xzf "$name.tar.gz"'))
+            self.assertIn('cp README.markdown "$licenses/hmac/README.markdown"', openresty)
+            self.assertNotIn("raw.githubusercontent.com", openresty)
+            self.assertIn("install lib/resty/*.lua", openresty)
+            self.assertIn("make -j1\nmake install", openresty)
+            for script in (build / "build-dependencies.sh", build / "build-openresty.sh"):
+                self.assertIn('"$directory"/LICENCE*', script.read_text())
+                subprocess.run(["sh", "-n", str(script)], check=True, capture_output=True)
 
     def test_runtime_bakes_media_sources_configuration_namespace_and_licenses(self):
         manifest, output = self.prepare()
@@ -218,6 +265,11 @@ class DeathStarBenchMediaPreparationTests(unittest.TestCase):
         self.assertNotIn("127.0.0.11", nginx)
         self.assertNotIn("{{", nginx)
         self.assertIn("env fqdn_suffix;", nginx)
+        self.assertIn("error_log stderr warn;", nginx)
+        self.assertIn("pid /tmp/nginx.pid;", nginx)
+        for directory in ("client-body", "proxy", "fastcgi", "scgi", "uwsgi"):
+            self.assertIn(f"/tmp/{directory};", nginx)
+        self.assertEqual(manifest["frontend_runtime_writable_paths"], ["/tmp"])
         handler = (output / "frontend/runtime/lua-scripts/wrk2-api/movie-info/write.lua").read_text()
         self.assertIn('new_cast["character"]=cast["character"]', handler)
         self.assertNotIn("charactor", handler)

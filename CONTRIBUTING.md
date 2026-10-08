@@ -36,6 +36,12 @@ the interpreter-backed gate is mandatory in this CI job. See the
 [workload expansion checkpoint](docs/deathstarbench-workload-expansion.md) for
 the local preparation command and remaining release blockers.
 
+Hotel/Media image publication is a separate maintainer-triggered workflow,
+using native x86/Arm runners and package-write permission only for explicit
+publication. It is never triggered by PR CI. Candidate locks do not enable
+either workload, and authenticated image pulls do not satisfy public-access
+qualification. See the [artifact checkpoint](docs/deathstarbench-workload-expansion.md#native-image-publication-checkpoint).
+
 ## Pull requests
 
 In the pull request description:

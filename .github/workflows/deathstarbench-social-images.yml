@@ -11,6 +11,9 @@ on:
         options:
           - load-driver
           - workload-images
+          - hotel-images
+          - media-images
+          - hotel-media-images
 
 permissions:
   contents: read
@@ -24,6 +27,12 @@ env:
   UPSTREAM_REVISION: 6ecb09706140f8730b5385c08f1386c654c3c526
 
 jobs:
+  publish-hotel-media:
+    if: contains(fromJSON('["hotel-images","media-images","hotel-media-images"]'), github.event.inputs.publication)
+    uses: ./.github/workflows/deathstarbench-candidate-images.yml
+    with:
+      selection: ${{ github.event.inputs.publication == 'hotel-images' && 'hotel_reservation' || github.event.inputs.publication == 'media-images' && 'media_microservices' || 'all' }}
+
   publish-load-driver:
     name: Build, publish, attest, and lock amd64 load driver
     if: github.event.inputs.publication == 'load-driver'

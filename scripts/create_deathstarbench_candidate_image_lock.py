@@ -16,6 +16,7 @@ import json
 import re
 import sys
 from collections.abc import Callable, Mapping
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -474,7 +475,80 @@ def _build_receipt(receipt: Any, workload_id: str, context_name: str, platform: 
     return dict(receipt)
 
 
-def _smoke_receipt(receipt: Any, workload_id: str, runtime_key: str, platform: str, image: dict, identity: dict) -> dict:
+def _artifact_receipt(receipt: dict, workload_id: str, runtime_key: str, platform: str, context: Path) -> None:
+    from scripts.smoke_deathstarbench_candidate_images import _baked_files, HOTEL_PROGRAMS, MEDIA_PROGRAMS
+    artifacts = _mapping(receipt.get("artifact_identities"), "smoke artifact identities", keys={
+        "baked_file_sha256", "elf_artifacts", "required_executables", "runtime_clone_detected", "private_key_detected"})
+    for key in ("runtime_clone_detected", "private_key_detected"):
+        _equal(artifacts.get(key), False, f"smoke artifact {key}")
+    try:
+        expected_files = _baked_files(workload_id, runtime_key, context)
+    except PreparationError as exc:
+        raise CandidateImageLockError("Smoke files cannot bind the prepared context.") from exc
+    files = _mapping(artifacts.get("baked_file_sha256"), "smoke baked files")
+    keys = set(expected_files) | ({"/usr/share/licenses/go/LICENSE"} if runtime_key == "hotel-reservation" else set())
+    _require(set(files) == keys, "Smoke baked-file inventory is incomplete or unexpected.")
+    for name, path in expected_files.items():
+        _equal(_hex(files[name], "baked file"), sha256(path), f"smoke baked file {name}")
+    if runtime_key == "hotel-reservation":
+        _hex(files["/usr/share/licenses/go/LICENSE"], "in-image Go license")
+    expected_required = (["/go/bin/" + name for name in HOTEL_PROGRAMS] if runtime_key == "hotel-reservation" else
+                         ["/usr/local/bin/" + name for name in MEDIA_PROGRAMS] if runtime_key == "media-microservices" else
+                         ["/usr/local/openresty/nginx/sbin/nginx"] if runtime_key == "nginx-web-server" else
+                         ["/opt/deathstarbench-candidate-driver/bin/wrk"])
+    _equal(artifacts.get("required_executables"), expected_required, "smoke required executable inventory")
+    elves = _mapping(artifacts.get("elf_artifacts"), "smoke ELF artifacts")
+    _require(bool(elves), "Smoke ELF artifact inventory is missing.")
+    for path, elf in elves.items():
+        _require(isinstance(path, str) and path.startswith("/") and PurePosixPath(path).as_posix() == path
+                 and ".." not in PurePosixPath(path).parts and "\\" not in path and "\0" not in path,
+                 "Invalid in-image ELF path.")
+        elf = _mapping(elf, "smoke ELF identity", keys={"sha256", "elf_class", "elf_type", "machine", "architecture", "interpreter", "dynamic_dependencies", "runnable", "static"})
+        _hex(elf["sha256"], "smoke ELF bytes")
+        for key, expected in {"elf_class": 64, "machine": 62 if platform == "linux/amd64" else 183,
+                              "architecture": ARCHITECTURES[platform]}.items():
+            _equal(elf[key], expected, f"smoke ELF {key}")
+        _require(type(elf["elf_type"]) is int and elf["elf_type"] in (1, 2, 3), "Invalid ELF object type.")
+        _require(elf["interpreter"] is None or (isinstance(elf["interpreter"], str) and elf["interpreter"].startswith("/")), "Invalid ELF interpreter.")
+        for key in ("dynamic_dependencies", "runnable", "static"):
+            _require(type(elf[key]) is bool, f"Invalid ELF {key}.")
+        _equal(elf["runnable"], elf["elf_type"] in (2, 3), "ELF runnable state")
+        _equal(elf["static"], elf["runnable"] and elf["interpreter"] is None and not elf["dynamic_dependencies"], "ELF static state")
+    for path in expected_required:
+        _require(path in elves and elves[path]["runnable"], "Smoke required executable is missing/not runnable.")
+        if runtime_key == "hotel-reservation":
+            _equal(elves[path]["static"], True, "scratch Hotel executable linkage")
+    methods = set(receipt["methods"])
+    expected_methods = {"stopped-container-export-no-host-extraction", "all-ELF64-native-architecture",
+                        "baked-config-script-license-hashes", "runtime-clone-and-private-key-screen"}
+    if runtime_key == "hotel-reservation":
+        expected_methods.add("scratch-static-linkage-no-service-startup")
+    elif any(elf["dynamic_dependencies"] for elf in elves.values()):
+        expected_methods.add("native-hardened-ldd-all-dynamic-ELFs")
+    if runtime_key == "nginx-web-server":
+        expected_methods.update({"baked-nginx-config-syntax-with-explicit-mock-DNS", "baked-Lua-Thrift-module-loading-no-service-methods"})
+    if runtime_key == "load-driver":
+        expected_methods.add("candidate-driver-offline-hardened-attestation")
+    _require(expected_methods <= methods, "Missing required native image smoke methods.")
+    executions = receipt.get("inspection_executions")
+    _require(isinstance(executions, list), "Missing image inspection execution receipts.")
+    for execution in executions:
+        execution = _mapping(execution, "image inspection execution", keys={"command", "stdout_sha256", "stdout", "mock_dns"})
+        command = execution["command"]
+        _require(isinstance(command, list) and bool(command) and all(isinstance(arg, str) and bool(arg) for arg in command), "Invalid inspection command receipt.")
+        _require(isinstance(execution["stdout"], str), "Inspection stdout must be text.")
+        _equal(_hex(execution["stdout_sha256"], "inspection stdout"), hashlib.sha256(execution["stdout"].encode()).hexdigest(), "inspection stdout bytes")
+        _mapping(execution["mock_dns"], "inspection mock DNS")
+    if runtime_key == "load-driver":
+        required_command = ["/opt/deathstarbench-candidate-driver/bin/entrypoint", "attest"]
+        matching = [execution for execution in executions if execution["command"] == required_command]
+        _require(len(matching) == 1, "Exactly one executed driver attestation receipt is required.")
+        _equal(matching[0]["stdout"], receipt.get("load_driver_attestation"), "driver attestation execution stdout")
+    else:
+        _equal(receipt.get("load_driver_attestation"), None, "non-driver attestation")
+
+
+def _smoke_receipt(receipt: Any, workload_id: str, runtime_key: str, platform: str, image: dict, identity: dict, context: Path) -> dict:
     receipt = _mapping(receipt, "candidate image smoke receipt")
     for key, expected in {"schema_version": 1, "candidate_schema": "candidate-image-smoke-v1", "workload_id": workload_id,
                           "image_key": runtime_key, "image": image["image"], "platform": platform,
@@ -488,14 +562,61 @@ def _smoke_receipt(receipt: Any, workload_id: str, runtime_key: str, platform: s
         _equal(controls.get(key), expected, f"smoke execution {key}")
     methods = receipt.get("methods")
     _require(isinstance(methods, list) and bool(methods) and all(isinstance(item, str) and bool(item) for item in methods), "Missing smoke methods.")
-    _mapping(receipt.get("artifact_identities"), "smoke artifact identities")
     native = _mapping(receipt.get("native_builder"), "smoke native builder", keys={"platform", "architecture", "qemu_used"})
     for key, expected in {"platform": platform, "architecture": ARCHITECTURES[platform], "qemu_used": False}.items():
         _equal(native.get(key), expected, f"smoke native builder {key}")
     config = _mapping(receipt.get("image_config"), "smoke config", keys={"os", "architecture", "config_digest"})
     for key, expected in {"os": "linux", "architecture": platform.split("/")[1], "config_digest": image["config_digest"]}.items():
         _equal(config.get(key), expected, f"smoke image config {key}")
+    _artifact_receipt(receipt, workload_id, runtime_key, platform, context)
     return dict(receipt)
+
+
+def _driver_binary_attestation(receipt: dict, driver_manifest: dict) -> dict:
+    attestation = parse_load_driver_attestation(receipt.get("load_driver_attestation"), driver_manifest)
+    identity = receipt["artifact_identities"]["elf_artifacts"]["/opt/deathstarbench-candidate-driver/bin/wrk"]
+    _equal(attestation["wrk_binary_sha256"], identity["sha256"], "driver attestation inspected binary hash")
+    return attestation
+
+
+def preflight_native_candidate(workload_id: str, workload_preparation: Path, driver_preparation: Path,
+                               records: list[dict], *, inspector: Callable[[str], bytes],
+                               blob_inspector: Callable[[str, str], bytes]) -> dict:
+    """Read-only full native evidence verification, before assembling/pushing indexes."""
+    _require(workload_id in CUSTOM_KEYS, "Only Hotel/Media candidates are supported.")
+    # Per-call caches are safe for content-addressed inputs, reduce registry
+    # traffic, and never retain authentication/state across parallel workloads.
+    inspector = lru_cache(maxsize=128)(inspector)
+    blob_inspector = lru_cache(maxsize=128)(blob_inspector)
+    _, contexts = _workload_preparation(workload_preparation, workload_id)
+    driver_manifest, driver_identity = _driver_preparation(driver_preparation, workload_id)
+    _require(isinstance(records, list) and len(records) == 2, "Both native platform records are required.")
+    platforms = {}
+    for record in records:
+        record = _mapping(record, "native publication record", keys={"schema_version", "candidate_schema", "workload_id", "platform", "images", "workload_preparation_manifest_sha256", "driver_preparation_manifest_sha256"})
+        platform = record["platform"]
+        _require(isinstance(platform, str) and platform in PLATFORMS and platform not in platforms, "Duplicate or unsupported native record platform.")
+        for key, expected in {"schema_version": 1, "candidate_schema": "candidate-native-publication-v1", "workload_id": workload_id,
+                              "workload_preparation_manifest_sha256": sha256(workload_preparation / "context-manifest.json"),
+                              "driver_preparation_manifest_sha256": sha256(driver_preparation / "context-manifest.json")}.items():
+            _equal(record.get(key), expected, f"native publication {key}")
+        expected_keys = set(contexts) | ({"load_driver"} if platform == "linux/amd64" else set())
+        images = _mapping(record["images"], "native publication images", keys=expected_keys)
+        verified_images = {}
+        for name, supplied in images.items():
+            supplied = _mapping(supplied, "native image receipt", keys={"image", "build_receipt", "smoke_receipt"})
+            build = _mapping(supplied["build_receipt"], "native build receipt")
+            image = verify_image_index(build.get("published_index_image"), {platform: supplied["image"]}, inspector=inspector, blob_inspector=blob_inspector)["platforms"][platform]
+            identity = driver_identity if name == "load_driver" else contexts[name]
+            key = "load-driver" if name == "load_driver" else CUSTOM_KEYS[workload_id][name]
+            context = driver_preparation / "context" if name == "load_driver" else workload_preparation / name
+            image["native_build_receipt"] = _build_receipt(build, workload_id, name, platform, image, identity, inspector, blob_inspector)
+            image["smoke_receipt"] = _smoke_receipt(supplied["smoke_receipt"], workload_id, key, platform, image, identity, context)
+            if name == "load_driver":
+                image["driver_attestation"] = _driver_binary_attestation(image["smoke_receipt"], driver_manifest)
+            verified_images[name] = image
+        platforms[platform] = verified_images
+    return platforms
 
 
 def create_candidate_lock(workload_id: str, workload_preparation: Path, driver_preparation: Path,
@@ -503,6 +624,8 @@ def create_candidate_lock(workload_id: str, workload_preparation: Path, driver_p
                           blob_inspector: Callable[[str, str], bytes]) -> dict:
     """Produce an unreleased artifact receipt, never a deployable public lock."""
     _require(workload_id in CUSTOM_KEYS, "Only Hotel/Media candidates are supported.")
+    inspector = lru_cache(maxsize=128)(inspector)
+    blob_inspector = lru_cache(maxsize=128)(blob_inspector)
     profile = get_workload_profile(workload_id)
     workload, contexts = _workload_preparation(workload_preparation, workload_id)
     driver_manifest, driver_identity = _driver_preparation(driver_preparation, workload_id)
@@ -528,9 +651,10 @@ def create_candidate_lock(workload_id: str, workload_preparation: Path, driver_p
         for platform, item in verified["platforms"].items():
             supplied = platforms[platform]
             item["native_build_receipt"] = _build_receipt(supplied["build_receipt"], workload_id, context_name, platform, item, identity, inspector, blob_inspector)
-            item["smoke_receipt"] = _smoke_receipt(supplied["smoke_receipt"], workload_id, runtime_key, platform, item, identity)
+            context = driver_preparation / "context" if context_name == "load_driver" else workload_preparation / context_name
+            item["smoke_receipt"] = _smoke_receipt(supplied["smoke_receipt"], workload_id, runtime_key, platform, item, identity, context)
             if context_name == "load_driver":
-                item["driver_attestation"] = parse_load_driver_attestation(item["smoke_receipt"].get("load_driver_attestation"), driver_manifest)
+                item["driver_attestation"] = _driver_binary_attestation(item["smoke_receipt"], driver_manifest)
         images[runtime_key] = {**verified, "prepared_identity": identity}
     support_keys = set(profile.required_image_keys) - set(CUSTOM_KEYS[workload_id].values())
     support = _mapping(evidence["support_images"], "support images", keys=support_keys)

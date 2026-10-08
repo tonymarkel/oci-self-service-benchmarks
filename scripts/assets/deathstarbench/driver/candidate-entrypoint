@@ -52,8 +52,11 @@ runtime_smoke_check() {
   case "$usage" in *"Usage: wrk <options> <url>"*"-R, --rate"*) ;; *) fail "unexpected wrk2 interface" ;; esac
   configure_lua_environment
   "$luajit_binary" -e 'local socket=assert(require("socket")); assert(require("socket.core")); local mime=assert(require("mime")); assert(type(socket.gettime)=="function"); assert(type(mime.b64)=="function")' || fail "LuaSocket smoke check failed"
-  "$luajit_binary" -b "$request_script" /dev/null || fail "request script does not compile"
-  "$luajit_binary" -b "$metrics_script" /dev/null || fail "metrics script does not compile"
+  # loadfile parses without executing either workload. LuaJIT -b depends on
+  # relocatable jit.* utility modules which are not required by the wrk runtime.
+  # Do not append a script argument to -e: that would execute the workload.
+  SCRIPT_TO_CHECK="$request_script" "$luajit_binary" -e 'assert(loadfile(os.getenv("SCRIPT_TO_CHECK")))' || fail "request script does not compile"
+  SCRIPT_TO_CHECK="$metrics_script" "$luajit_binary" -e 'assert(loadfile(os.getenv("SCRIPT_TO_CHECK")))' || fail "metrics script does not compile"
 }
 
 attest() {

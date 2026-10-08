@@ -198,6 +198,7 @@ class CandidateLockTests(unittest.TestCase):
         self.registry = RegistryFixture()
 
     def fixture(self, workload_id="hotel_reservation"):
+        from scripts import smoke_deathstarbench_candidate_images as smoke_tool
         profile = lock.get_workload_profile(workload_id)
         identities = {name: {"context_sha256": "d" * 64, "recipe_sha256": "e" * 64,
                              "deathstarbench_license_sha256": "f" * 64} for name in lock.CUSTOM_KEYS[workload_id]}
@@ -207,6 +208,20 @@ class CandidateLockTests(unittest.TestCase):
                            "original_request_script_sha256": profile.request_script_sha256,
                            "prepared_request_script_sha256": "5" * 64, "metrics_script_sha256": "6" * 64,
                            "entrypoint_sha256": "7" * 64}
+        driver_context = self.driver_path / "context"
+        for name, field in (("request.lua", "prepared_request_script_sha256"), ("metrics.lua", "metrics_script_sha256"), ("entrypoint", "entrypoint_sha256")):
+            write(driver_context / name, "fixture " + name + "\n")
+            driver_document[field] = lock.sha256(driver_context / name)
+        for name in ("DeathStarBench-LICENSE", "LuaSocket-LICENSE", "LuaJIT-COPYRIGHT", "wrk2-LICENSE"):
+            write(driver_context / "licenses" / name, "fixture license " + name + "\n")
+        if workload_id == "hotel_reservation":
+            for path in ("app/config.json", "app/LICENSE.deathstarbench", "app/licenses/vendor/fixture/LICENSE"):
+                write(self.workload_path / path, "fixture " + path + "\n")
+        else:
+            for path in ("app/config/service-config.json", "app/config/jaeger-config.yml", "app/LICENSE.deathstarbench", "app/third_party/PicoSHA2/LICENSE",
+                         "frontend/LICENSE.deathstarbench", "frontend/COPYRIGHT", "frontend/lua-bridge-tracer/LICENSE", "frontend/runtime/nginx.conf",
+                         "frontend/runtime/jaeger-config.json", "frontend/runtime/gen-lua/fixture.lua", "frontend/runtime/lua-scripts/fixture.lua"):
+                write(self.workload_path / path, "fixture " + path + "\n")
         evidence = {"schema_version": 1, "candidate_schema": lock.SCHEMA, "workload_id": workload_id,
                     "upstream_revision": lock.UPSTREAM_REVISION, "workload_revision": profile.workload_revision,
                     "image_set_revision": profile.image_set_revision,
@@ -223,16 +238,38 @@ class CandidateLockTests(unittest.TestCase):
                 build = {"schema_version": 1, "workload_id": workload_id, "context_name": context_name,
                          "platform": platform, "context_sha256": identity["context_sha256"], "recipe_sha256": identity["recipe_sha256"],
                          "runner_architecture": lock.ARCHITECTURES[platform], "qemu_used": False, "published_index_image": native[platform]}
+                context = driver_context if context_name == "load_driver" else self.workload_path / context_name
+                baked = {path: lock.sha256(source) for path, source in smoke_tool._baked_files(workload_id, runtime_key, context).items()}
+                if runtime_key == "hotel-reservation":
+                    baked["/usr/share/licenses/go/LICENSE"] = "a" * 64
+                required = (["/go/bin/" + name for name in smoke_tool.HOTEL_PROGRAMS] if runtime_key == "hotel-reservation" else
+                            ["/usr/local/bin/" + name for name in smoke_tool.MEDIA_PROGRAMS] if runtime_key == "media-microservices" else
+                            ["/usr/local/openresty/nginx/sbin/nginx"] if runtime_key == "nginx-web-server" else
+                            ["/opt/deathstarbench-candidate-driver/bin/wrk"])
+                elves = {path: {"sha256": "b" * 64, "elf_class": 64, "elf_type": 2, "machine": 62 if platform == "linux/amd64" else 183,
+                                "architecture": lock.ARCHITECTURES[platform], "interpreter": None, "dynamic_dependencies": False, "runnable": True, "static": True}
+                         for path in required}
+                methods = ["stopped-container-export-no-host-extraction", "all-ELF64-native-architecture", "baked-config-script-license-hashes", "runtime-clone-and-private-key-screen"]
+                if runtime_key == "hotel-reservation":
+                    methods.append("scratch-static-linkage-no-service-startup")
+                elif runtime_key == "nginx-web-server":
+                    methods.extend(["baked-nginx-config-syntax-with-explicit-mock-DNS", "baked-Lua-Thrift-module-loading-no-service-methods"])
+                elif runtime_key == "load-driver":
+                    methods.append("candidate-driver-offline-hardened-attestation")
+                attestation = marker(driver_document) if context_name == "load_driver" else None
+                executions = [] if attestation is None else [{"command": ["/opt/deathstarbench-candidate-driver/bin/entrypoint", "attest"],
+                                                              "stdout": attestation, "stdout_sha256": hashlib.sha256(attestation.encode()).hexdigest(), "mock_dns": {}}]
                 smoke = {"schema_version": 1, "candidate_schema": "candidate-image-smoke-v1", "workload_id": workload_id,
                          "image_key": runtime_key, "image": images[platform], "platform": platform, "architecture": lock.ARCHITECTURES[platform],
-                         "config_digest": configs[platform], "context_sha256": identity["context_sha256"], "methods": ["fixture-inspection"],
+                         "config_digest": configs[platform], "context_sha256": identity["context_sha256"], "methods": methods,
                          "candidate_only": True, "released": False, "runtime_semantics_qualified": False,
                          "smoke_execution": {"passed": True, "network": "none", "read_only": True, "user": "65532:65532",
                                              "drop_capabilities": ["ALL"], "no_new_privileges": True},
                          "native_builder": {"platform": platform, "architecture": lock.ARCHITECTURES[platform], "qemu_used": False},
                          "image_config": {"os": "linux", "architecture": platform.split("/")[1], "config_digest": configs[platform]},
-                         "load_driver_attestation": marker(driver_document) if context_name == "load_driver" else None,
-                         "artifact_identities": {"fixture": "8" * 64}}
+                         "load_driver_attestation": attestation, "inspection_executions": executions,
+                         "artifact_identities": {"baked_file_sha256": baked, "elf_artifacts": elves, "required_executables": required,
+                                                 "runtime_clone_detected": False, "private_key_detected": False}}
                 image_evidence["platforms"][platform] = {"image": images[platform], "build_receipt": build, "smoke_receipt": smoke}
             if context_name == "load_driver":
                 evidence["load_driver"] = image_evidence
@@ -251,6 +288,26 @@ class CandidateLockTests(unittest.TestCase):
              mock.patch.object(lock, "_driver_preparation", return_value=(driver_document, driver_identity)):
             return lock.create_candidate_lock(evidence["workload_id"], self.workload_path, self.driver_path, evidence,
                                               inspector=self.registry.inspect, blob_inspector=self.registry.blob)
+
+    def native_records(self, evidence):
+        records = []
+        for platform in lock.PLATFORMS:
+            images = {key: copy.deepcopy(value["platforms"][platform]) for key, value in evidence["custom_images"].items()}
+            if platform == "linux/amd64":
+                images["load_driver"] = copy.deepcopy(evidence["load_driver"]["platforms"][platform])
+            records.append({"schema_version": 1, "candidate_schema": "candidate-native-publication-v1", "workload_id": evidence["workload_id"],
+                            "platform": platform, "images": images,
+                            "workload_preparation_manifest_sha256": evidence["workload_preparation_manifest_sha256"],
+                            "driver_preparation_manifest_sha256": evidence["driver_preparation_manifest_sha256"]})
+        return records
+
+    def preflight(self, evidence, inputs, records=None):
+        identities, driver_document, driver_identity = inputs
+        with mock.patch.object(lock, "_workload_preparation", return_value=({"prepared": True}, identities)), \
+             mock.patch.object(lock, "_driver_preparation", return_value=(driver_document, driver_identity)):
+            return lock.preflight_native_candidate(evidence["workload_id"], self.workload_path, self.driver_path,
+                                                    records or self.native_records(evidence),
+                                                    inspector=self.registry.inspect, blob_inspector=self.registry.blob)
 
     def test_both_workloads_lock_native_images_and_driver_without_promotion(self):
         for workload in lock.CUSTOM_KEYS:
@@ -331,6 +388,61 @@ class CandidateLockTests(unittest.TestCase):
         arm_build["published_index_image"] = evidence["custom_images"]["app"]["platforms"]["linux/amd64"]["build_receipt"]["published_index_image"]
         with self.assertRaisesRegex(lock.CandidateImageLockError, "runtime platform"):
             self.create(evidence, *inputs)
+
+    def test_full_readonly_preflight_checks_both_original_native_records(self):
+        for workload in lock.CUSTOM_KEYS:
+            with self.subTest(workload=workload):
+                evidence, *inputs = self.fixture(workload)
+                result = self.preflight(evidence, inputs)
+                self.assertEqual(set(result), set(lock.PLATFORMS))
+                self.assertIn("load_driver", result["linux/amd64"])
+                self.assertNotIn("load_driver", result["linux/arm64"])
+
+    def test_preflight_rejects_hash_mismatch_duplicate_platform_and_arm_driver(self):
+        for case in ("source_hash", "duplicate", "arm_driver"):
+            evidence, *inputs = self.fixture()
+            records = self.native_records(evidence)
+            if case == "source_hash":
+                records[0]["workload_preparation_manifest_sha256"] = "a" * 64
+            elif case == "duplicate":
+                records[1]["platform"] = "linux/amd64"
+            else:
+                records[1]["images"]["load_driver"] = records[0]["images"]["load_driver"]
+            with self.subTest(case=case), self.assertRaises(lock.CandidateImageLockError):
+                self.preflight(evidence, inputs, records)
+
+    def test_preflight_requires_native_elf_baked_files_and_all_executables(self):
+        for case in ("elf_arch", "baked_sha", "missing_binary", "private_key", "clone", "unknown_file"):
+            evidence, *inputs = self.fixture()
+            records = self.native_records(evidence)
+            artifacts = records[0]["images"]["app"]["smoke_receipt"]["artifact_identities"]
+            if case == "elf_arch":
+                artifacts["elf_artifacts"]["/go/bin/frontend"]["machine"] = 183
+            elif case == "baked_sha":
+                artifacts["baked_file_sha256"]["/workspace/config.json"] = "a" * 64
+            elif case == "missing_binary":
+                del artifacts["elf_artifacts"]["/go/bin/frontend"]
+            elif case == "private_key":
+                artifacts["private_key_detected"] = True
+            elif case == "clone":
+                artifacts["runtime_clone_detected"] = True
+            else:
+                artifacts["baked_file_sha256"]["/unexpected/runtime-file"] = "a" * 64
+            with self.subTest(case=case), self.assertRaises(lock.CandidateImageLockError):
+                self.preflight(evidence, inputs, records)
+
+    def test_driver_marker_binary_identity_and_execution_receipt_must_reconcile(self):
+        evidence, *inputs = self.fixture()
+        records = self.native_records(evidence)
+        receipt = records[0]["images"]["load_driver"]["smoke_receipt"]
+        changed = receipt["load_driver_attestation"].replace("wrk_binary_sha256=" + "b" * 64, "wrk_binary_sha256=" + "c" * 64)
+        receipt["load_driver_attestation"] = changed
+        receipt["inspection_executions"][0].update(stdout=changed, stdout_sha256=hashlib.sha256(changed.encode()).hexdigest())
+        with self.assertRaisesRegex(lock.CandidateImageLockError, "inspected binary hash"):
+            self.preflight(evidence, inputs, records)
+        receipt["inspection_executions"][0]["stdout_sha256"] = "a" * 64
+        with self.assertRaisesRegex(lock.CandidateImageLockError, "stdout bytes"):
+            self.preflight(evidence, inputs, records)
 
 
 class LocalPreparationTests(unittest.TestCase):

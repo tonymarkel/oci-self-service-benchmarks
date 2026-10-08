@@ -103,6 +103,7 @@ def _request(registry: str, repository: str, kind: str, selector: str) -> tuple[
     try:
         return _open(url, headers)
     except urllib.error.HTTPError as exc:
+        exc.close()
         if exc.code != 401:
             raise PreparationError("Registry inspection was denied or unavailable.") from None
         challenge = exc.headers.get("WWW-Authenticate", "")
@@ -120,13 +121,14 @@ def _request(registry: str, repository: str, kind: str, selector: str) -> tuple[
                 credentials = base64.b64encode((username + ":" + supplied).encode()).decode("ascii")
                 token_headers["Authorization"] = "Basic " + credentials
             raw_token, _ = _open(allowed_realm + "?" + query, token_headers)
-            token = json.loads(raw_token).get("token") or json.loads(raw_token).get("access_token")
+            token_document = json.loads(raw_token)
+            token = token_document.get("token") or token_document.get("access_token")
             if not isinstance(token, str) or not token or any(c in token for c in "\r\n") or len(token) > 16384:
-                raise PreparationError("Anonymous registry bearer token is invalid.")
+                raise PreparationError("Registry bearer token is invalid.")
             headers["Authorization"] = "Bearer " + token
             return _open(url, headers)
-        except (urllib.error.URLError, ValueError, TypeError):
-            raise PreparationError("Anonymous registry inspection failed.") from None
+        except (urllib.error.URLError, ValueError, TypeError, AttributeError):
+            raise PreparationError("Registry inspection failed.") from None
     except urllib.error.URLError:
         raise PreparationError("Registry inspection is unavailable.") from None
 
@@ -168,7 +170,7 @@ def resolve_platform(reference: str, platform: str) -> dict[str, object]:
         if "manifests" in document:
             candidates = [m for m in document["manifests"] if m.get("platform", {}).get("os") == "linux"
                           and m.get("platform", {}).get("architecture") == platform.split("/")[1]
-                          and m.get("platform", {}).get("variant", "") in {"", "v8"}]
+                          and m.get("platform", {}).get("variant", "") in ({"", "v8"} if platform == "linux/arm64" else {""})]
             if len(candidates) != 1:
                 raise PreparationError("OCI index lacks exactly one compatible requested platform.")
             descriptor = candidates[0]

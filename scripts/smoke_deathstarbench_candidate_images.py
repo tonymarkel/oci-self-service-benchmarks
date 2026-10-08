@@ -66,13 +66,17 @@ class ImageFilesystem:
     def __init__(self, archive: Path):
         self.archive = tarfile.open(archive, mode="r:")
         self.members = {}
-        for member in self.archive.getmembers():
-            name = _normalized(member.name)
-            if name == ".":
-                continue
-            if name in self.members:
-                raise PreparationError("Duplicate container archive member.")
-            self.members[name] = member
+        try:
+            for member in self.archive.getmembers():
+                name = _normalized(member.name)
+                if name == ".":
+                    continue
+                if name in self.members:
+                    raise PreparationError("Duplicate container archive member.")
+                self.members[name] = member
+        except Exception:
+            self.archive.close()
+            raise
 
     def close(self):
         self.archive.close()
@@ -80,13 +84,24 @@ class ImageFilesystem:
     def _resolve(self, name: str) -> tarfile.TarInfo:
         name = _normalized(name.lstrip("/"))
         for _ in range(40):
-            member = self.members.get(name)
-            if member is None:
-                raise PreparationError("Required baked file is missing from the image.")
-            if not (member.issym() or member.islnk()):
+            parts = name.split("/")
+            # Ubuntu's usrmerge exports /lib and /lib64 as directory symlinks.
+            # Resolve each virtual ancestor without touching the host filesystem.
+            link = next((("/".join(parts[:i]), self.members["/".join(parts[:i])], parts[i:])
+                         for i in range(1, len(parts) + 1)
+                         if "/".join(parts[:i]) in self.members
+                         and (self.members["/".join(parts[:i])].issym()
+                              or self.members["/".join(parts[:i])].islnk())), None)
+            if link is None:
+                member = self.members.get(name)
+                if member is None:
+                    raise PreparationError("Required baked file is missing from the image.")
                 return member
+            link_name, member, suffix = link
             target = member.linkname
-            combined = target.lstrip("/") if target.startswith("/") or member.islnk() else str(PurePosixPath(name).parent / target)
+            combined = target.lstrip("/") if target.startswith("/") or member.islnk() else str(PurePosixPath(link_name).parent / target)
+            if suffix:
+                combined += "/" + "/".join(suffix)
             parts = []
             for part in combined.split("/"):
                 if part in {"", "."}:
@@ -107,7 +122,8 @@ class ImageFilesystem:
         stream = self.archive.extractfile(member)
         if stream is None:
             raise PreparationError("Container file is unreadable.")
-        data = stream.read(MAX_FILE_BYTES + 1)
+        with stream:
+            data = stream.read(MAX_FILE_BYTES + 1)
         if len(data) != member.size:
             raise PreparationError("Container file bytes differ from its archive descriptor.")
         return data
@@ -117,7 +133,10 @@ class ImageFilesystem:
         if not member.isfile():
             return b""
         stream = self.archive.extractfile(member)
-        return stream.read(length) if stream else b""
+        if stream is None:
+            return b""
+        with stream:
+            return stream.read(length)
 
     def has_private_key(self, name: str) -> bool:
         member = self._resolve(name)
@@ -126,12 +145,13 @@ class ImageFilesystem:
         stream = self.archive.extractfile(member)
         if stream is None:
             raise PreparationError("Runtime key screening could not read a regular file.")
-        overlap = b""
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            data = overlap + chunk
-            if PRIVATE_KEY.search(data):
-                return True
-            overlap = data[-256:]
+        with stream:
+            overlap = b""
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                data = overlap + chunk
+                if PRIVATE_KEY.search(data):
+                    return True
+                overlap = data[-256:]
         return False
 
 
@@ -368,7 +388,7 @@ def smoke_image(image: str, *, workload_id: str, image_key: str, architecture: s
     if image_key == "nginx-web-server":
         names = tuple(sorted(DISTRIBUTED_WORKLOAD_PROFILES[workload_id].expected_component_placement))
         hosts = tuple(sorted({*names, *(name + ".deathstarbench-media.svc.cluster.local" for name in names)}))
-        executions.append(_run_inspection(image, ["/usr/local/openresty/bin/openresty", "-t", "-g", "pid /tmp/nginx.pid;"], hosts=hosts))
+        executions.append(_run_inspection(image, ["/usr/local/openresty/bin/openresty", "-t"], hosts=hosts))
         modules = [p.stem for p in sorted((context / "runtime/gen-lua").glob("*.lua"))]
         lua = 'package.path="/gen-lua/?.lua;/usr/local/openresty/nginx/lua-scripts/?.lua;"..package.path; '
         lua += '; '.join('assert(require(' + json.dumps(module) + '))' for module in ["Thrift", "liblualongnumber", "json", "resty.jwt", "opentracing_bridge_tracer", *modules])

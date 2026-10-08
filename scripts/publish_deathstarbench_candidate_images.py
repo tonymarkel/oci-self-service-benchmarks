@@ -125,8 +125,13 @@ def assemble(workload: str, root: Path, records: list[dict], support: dict, owne
              run_id: str, attempt: str, output: Path) -> dict:
     if output.exists() or output.is_symlink():
         raise PreparationError("Publication output must be a fresh directory.")
+    if output.resolve().is_relative_to(root.resolve()):
+        raise PreparationError("Publication output must be outside prepared source inputs.")
     platforms = validate_records(workload, root, records)
     app, driver, _, _ = prepared(root, workload)
+    # The registry preflight below must happen before even the first index push.
+    from scripts.create_deathstarbench_candidate_image_lock import preflight_native_candidate
+    preflight_native_candidate(workload, app, driver, records, inspector=inspect_manifest, blob_inspector=inspect_blob)
     output.mkdir(parents=True)
     custom = {}
     for name in CUSTOM_KEYS[workload]:

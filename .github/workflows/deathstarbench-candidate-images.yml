@@ -188,9 +188,27 @@ jobs:
           if [ "$ARCHITECTURE" = amd64 ]; then args+=(--driver-index "${LOAD_DRIVER_TAG%:*}@${DRIVER_DIGEST}"); fi
           python3 scripts/publish_deathstarbench_candidate_images.py record-native --workload "$WORKLOAD" \
             --architecture "$ARCHITECTURE" --root .build/prepared "${args[@]}" --output .build/evidence/native.json
-          cp .build/prepared/workload/context-manifest.json .build/evidence/workload-preparation.json
-          cp .build/prepared/driver/context-manifest.json .build/evidence/driver-preparation.json
+      - name: Preserve available preparation and build identities even on failure
+        if: always()
+        env:
+          APP_METADATA: ${{ steps.app.outputs.metadata }}
+          FRONTEND_METADATA: ${{ steps.frontend.outputs.metadata }}
+          DRIVER_METADATA: ${{ steps.driver.outputs.metadata }}
+        run: |
+          mkdir -p .build/evidence
+          for part in workload driver; do
+            if [ -f ".build/prepared/${part}/context-manifest.json" ]; then
+              cp ".build/prepared/${part}/context-manifest.json" ".build/evidence/${part}-preparation.json"
+            fi
+          done
+          python3 - <<'PY'
+          import json, os
+          metadata = {part: json.loads(os.environ[part + '_METADATA']) for part in ('APP', 'FRONTEND', 'DRIVER') if os.environ.get(part + '_METADATA')}
+          with open('.build/evidence/build-metadata.json', 'x') as out:
+              json.dump({'candidate_only': True, 'runtime_qualified': False, 'build_metadata': metadata}, out, indent=2, sort_keys=True)
+          PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
         with:
           name: candidate-native-${{ matrix.workload }}-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: .build/evidence/*.json

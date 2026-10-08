@@ -1,10 +1,11 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-08: **source-prepared candidates, not public benchmarks**.
+Status, 2026-10-08: **native artifact candidates, not public benchmarks**.
 Social Network is still the only released distributed workload. The audited
 foundations now have drift-checked application/frontend, initializer, and
-load-driver preparation tools. No new image publication, cloud provisioning,
-dataset initialization, live measurement, or cleanup qualification is claimed.
+load-driver preparation tools, plus an explicit native publication pipeline.
+No cloud provisioning, dataset initialization, live measurement, or cleanup
+qualification is claimed by the artifact pipeline.
 
 ## Completed foundation
 
@@ -120,23 +121,77 @@ the actual prepared driver scripts. Uploaded receipts attest source preparation
 only—not image builds, public pulls, live endpoints, or release readiness.
 
 Deterministic context preparation is **not byte-reproducible image rebuilding**.
-Media still uses mutable Xenial bases/repositories and incompletely pinned
-dependency downloads. Driver package repositories also remain mutable. No
-candidate image has been built or published by these tools. Hotel still needs
+Media now pins its Xenial base index/platform manifests and individually
+checksum-verifies dependency archives before extraction. Hidden Hunter and
+`resty.string/master` downloads are removed. Xenial apt repositories and driver
+RPM repositories remain mutable; these legacy dependencies are not a security
+support or reproducible-rebuild claim. Hotel still needs
 guarded one-shot seeding, restart/duplicate handling, atomic capacity semantics,
 and a post-warmup dataset policy: reservations change persistent inventory.
 The Lua harness simulates response callbacks and worker aggregation; wrk2
 does not expose request identity to its response callback, so body checks are
 not complete endpoint-specific or persistent-transaction proof.
 
+## Native image publication checkpoint
+
+The existing manual image workflow has three additional publication choices:
+`hotel-images`, `media-images`, and `hotel-media-images`. They call
+`.github/workflows/deathstarbench-candidate-images.yml` at the caller's exact
+commit. PR and push CI do not publish images or require cloud credentials.
+
+```bash
+gh workflow run deathstarbench-social-images.yml \
+  --ref YOUR_REVIEWED_BRANCH --field publication=hotel-media-images
+```
+
+The workflow uses separate native `ubuntu-24.04` and `ubuntu-24.04-arm`
+workers, checks host and Docker-daemon architectures, and does not install QEMU.
+Hotel and Media applications, plus Media's frontend, build for both platforms;
+the two workload-specific drivers and backing roles remain x86-only. Unique
+run/attempt tags use separate `deathstarbench-hotel-*` and
+`deathstarbench-media-*` packages, without changing Social Network artifacts.
+SBOM and BuildKit provenance accompany original pushed indexes; operator/CI
+receipts are not cryptographically signed native-build proof.
+
+Image checks pull exact platform digests and inspect stopped-container exports
+without extracting untrusted paths onto the host. Every ELF is checked for the
+expected architecture, and baked configuration, scripts, and licenses are
+hashed against prepared inputs. Hotel's ten scratch binaries must be static;
+they are not started because upstream startup mutates MongoDB. Media's thirteen
+installed C++ binaries (including the undeployed `PageService`) and frontend
+libraries receive native linkage checks. The frontend parses its actual baked
+nginx configuration and loads Lua/Thrift modules with explicit mock DNS, not a
+substitute configuration or live dependencies. Executed checks use user 65532,
+a read-only filesystem, no network, no capabilities, and no-new-privileges.
+Driver checks bind binary/request/metric/entrypoint identities to their offline
+attestation. None of these checks is a transaction or dataset-readiness test.
+
+`scripts/publish_deathstarbench_candidate_images.py` independently regenerates
+preparation on the assembly worker, validates both original native receipts
+before index mutation, and retains original native indexes when producing a
+dual-platform index. `scripts/create_deathstarbench_candidate_image_lock.py`
+verifies raw index, runtime-manifest, and configuration bytes against registry
+SHA-256 descriptors. The resulting `candidate-artifact-lock-v1` records exact
+source/context/recipe, patch, binary, initializer, license, and x86 backing-image
+identities. It is deliberately **not** the deployable public runtime-lock schema.
+
+New GHCR packages may be private. Publishing with `GITHUB_TOKEN`, registry
+manifest inspection, and authenticated pulls do not prove anonymous layer
+access. Package owners must make candidates public before isolated empty-auth
+layer-pull and smoke qualification. This gate remains explicitly false until
+independently completed. Every generated candidate lock also keeps `released`,
+runtime, measurement, dataset, denied-edge, and cleanup qualification false.
+Failure artifacts retain available preparation/build identities without
+inventing successful smoke results.
+
 ## Next review slices and release prerequisites
 
-1. **Built and published immutable artifacts.** Resolve the recorded mutable
-   Media/build dependencies, verify backing-image versions and platform
-   manifests, and build/smoke-test native amd64/arm64 application/frontend
-   images and workload-specific x86 load drivers. Publish exact platform
-   manifests with source, patched script, binary, context, license, and
-   anonymous-pull evidence. Preparation receipts alone cannot satisfy this gate.
+1. **Immutable artifacts and public access.** Complete native publication and
+   retain the generated locks, build receipts, and offline smoke evidence.
+   Independently qualify anonymous pulls of every exact platform digest before
+   runtime adoption. Version tags/configuration metadata alone are not executed
+   backing-image version or CPU-compatibility proof. Preparation receipts alone
+   cannot satisfy this gate.
 2. **Workload-aware execution and measurement.** Pass the selected immutable
    profile through deployment/readiness, network qualification, database
    preparation, run-bound lock snapshots, journals, recovery, and cleanup.

@@ -13,7 +13,7 @@ fetch() {
     printf '%s  %s\n' "$expected" "$name.tar.gz" | sha256sum -c -
     tar xzf "$name.tar.gz"
     mkdir -p "$licenses/$name"
-    for candidate in "$directory"/LICENSE* "$directory"/COPYING* "$directory"/COPYRIGHT* "$directory"/NOTICE*; do
+    for candidate in "$directory"/LICENSE* "$directory"/LICENCE* "$directory"/COPYING* "$directory"/COPYRIGHT* "$directory"/NOTICE*; do
         if [ -f "$candidate" ]; then cp "$candidate" "$licenses/$name/"; fi
     done
 }

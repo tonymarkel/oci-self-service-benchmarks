@@ -468,6 +468,51 @@ class CandidateLockTests(unittest.TestCase):
             with self.subTest(case=case), self.assertRaises(lock.CandidateImageLockError):
                 self.preflight(evidence, inputs, records)
 
+    def test_dynamic_elf_ldd_method_label_requires_its_exact_execution(self):
+        evidence, *inputs = self.fixture("media_microservices")
+        records = self.native_records(evidence)
+        receipt = records[0]["images"]["app"]["smoke_receipt"]
+        elf = next(iter(receipt["artifact_identities"]["elf_artifacts"].values()))
+        elf.update(dynamic_dependencies=True, interpreter="/lib64/ld-linux-x86-64.so.2", static=False)
+        receipt["methods"].append("native-hardened-ldd-all-dynamic-ELFs")
+        with self.assertRaisesRegex(lock.CandidateImageLockError, "inspection execution receipts"):
+            self.preflight(evidence, inputs, records)
+
+    def test_support_preflight_records_candidates_not_binary_or_pull_qualification(self):
+        evidence, *_ = self.fixture()
+        result = lock.validate_support_evidence("hotel_reservation", evidence["support_images"],
+                                                inspector=self.registry.inspect, blob_inspector=self.registry.blob)
+        self.assertEqual(result["mongodb"]["candidate_version"], "5.0.31")
+        self.assertIsNone(result["mongodb"]["observed_version_metadata"])
+        self.assertFalse(result["mongodb"]["binary_version_executed"])
+        self.assertFalse(result["mongodb"]["runtime_qualified"])
+
+    def test_support_preflight_rejects_conflicting_actual_config_version_metadata(self):
+        evidence, *_ = self.fixture()
+        item = evidence["support_images"]["mongodb"]
+        repository = item["index_image"].split("@")[0]
+        config = encoded({"os": "linux", "architecture": "amd64", "config": {"Env": ["MONGO_VERSION=4.4.6"]}})
+        config_digest = digest(config)
+        self.registry.blobs[(repository, config_digest)] = config
+        old_image = item["platforms"]["linux/amd64"]["image"]
+        manifest = json.loads(self.registry.manifests[old_image])
+        manifest["config"].update(digest=config_digest, size=len(config))
+        manifest_raw = encoded(manifest)
+        image_digest = digest(manifest_raw)
+        new_image = repository + "@" + image_digest
+        self.registry.manifests[new_image] = manifest_raw
+        index = json.loads(self.registry.manifests[item["index_image"]])
+        index["manifests"][0].update(digest=image_digest, size=len(manifest_raw))
+        index_raw = encoded(index)
+        new_index = repository + "@" + digest(index_raw)
+        self.registry.manifests[new_index] = index_raw
+        self.registry.manifests[item["requested_image"]] = index_raw
+        item["index_image"] = new_index
+        item["platforms"]["linux/amd64"]["image"] = new_image
+        with self.assertRaisesRegex(lock.CandidateImageLockError, "observed version metadata"):
+            lock.validate_support_evidence("hotel_reservation", evidence["support_images"],
+                                            inspector=self.registry.inspect, blob_inspector=self.registry.blob)
+
 
 class LocalPreparationTests(unittest.TestCase):
     def setUp(self):

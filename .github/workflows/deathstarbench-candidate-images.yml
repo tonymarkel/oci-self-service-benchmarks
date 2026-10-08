@@ -131,6 +131,8 @@ jobs:
           pull: true
           push: true
           tags: ${{ env.APP_TAG }}
+          cache-from: type=gha,scope=dsb-candidate-${{ matrix.workload }}-app-${{ matrix.architecture }}
+          cache-to: type=gha,mode=max,scope=dsb-candidate-${{ matrix.workload }}-app-${{ matrix.architecture }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -150,6 +152,8 @@ jobs:
           pull: true
           push: true
           tags: ${{ env.FRONTEND_TAG }}
+          cache-from: type=gha,scope=dsb-candidate-media-frontend-${{ matrix.architecture }}
+          cache-to: type=gha,mode=max,scope=dsb-candidate-media-frontend-${{ matrix.architecture }}
           build-args: |
             OCI_SOURCE_REPOSITORY=${{ github.server_url }}/${{ github.repository }}
             OCI_SOURCE_REVISION=${{ github.sha }}
@@ -166,6 +170,8 @@ jobs:
           pull: true
           push: true
           tags: ${{ env.LOAD_DRIVER_TAG }}
+          cache-from: type=gha,scope=dsb-candidate-${{ matrix.workload }}-driver-amd64
+          cache-to: type=gha,mode=max,scope=dsb-candidate-${{ matrix.workload }}-driver-amd64
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}

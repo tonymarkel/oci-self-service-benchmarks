@@ -669,14 +669,17 @@ def validate_support_evidence(workload_id: str, evidence: dict, *, inspector: Ca
         config = _json_bytes(blob_inspector(repository, verified["platforms"]["linux/amd64"]["config_digest"]), "support version metadata")
         metadata = _mapping(config.get("config", {}), "support image config")
         environment = {}
-        for entry in metadata.get("Env", []):
+        env_entries = metadata.get("Env")
+        _require(env_entries is None or isinstance(env_entries, list), "Invalid support config environment list.")
+        for entry in env_entries or []:
             _require(isinstance(entry, str) and "=" in entry, "Invalid support config environment.")
             name, value_env = entry.split("=", 1)
             _require(name not in environment, "Duplicate support config environment variable.")
             environment[name] = value_env
         version = environment.get(VERSION_ENV.get(key))
         source = "image-config-environment" if version is not None else None
-        labels = _mapping(metadata.get("Labels") or {}, "support config labels")
+        labels = metadata.get("Labels")
+        labels = {} if labels is None else _mapping(labels, "support config labels")
         if version is None and "org.opencontainers.image.version" in labels:
             _require(isinstance(labels["org.opencontainers.image.version"], str), "Invalid support version label.")
             version = labels["org.opencontainers.image.version"].removeprefix("v")

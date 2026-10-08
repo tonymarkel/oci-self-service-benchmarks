@@ -239,6 +239,7 @@ class DeathStarBenchMediaPreparationTests(unittest.TestCase):
             self.assertIn("install lib/resty/*.lua", openresty)
             self.assertIn("make -j1\nmake install", openresty)
             for script in (build / "build-dependencies.sh", build / "build-openresty.sh"):
+                self.assertIn('"$directory"/LICENCE*', script.read_text())
                 subprocess.run(["sh", "-n", str(script)], check=True, capture_output=True)
 
     def test_runtime_bakes_media_sources_configuration_namespace_and_licenses(self):

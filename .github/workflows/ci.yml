@@ -60,11 +60,84 @@ jobs:
           PYTHON_BIN: python
         run: scripts/check.sh
 
+  candidate-artifacts:
+    name: Candidate artifact preparation (no release)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Check out the exact audited upstream and recursive LuaJIT source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: delimitrou/DeathStarBench
+          ref: 6ecb09706140f8730b5385c08f1386c654c3c526
+          path: .build/upstream
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+
+      - name: Install CI-only Lua interpreter and Python test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y luajit
+          python -m pip install -r requirements.txt
+
+      - name: Acquire checksum-pinned LuaSocket source input
+        run: |
+          curl --fail --location --retry 3 --output .build/luasocket-3.1.0-1.src.rock https://luarocks.org/manifests/lunarmodules/luasocket-3.1.0-1.src.rock
+          printf '%s  %s\n' f4a207f50a3f99ad65def8e29c54ac9aac668b216476f7fae3fae92413398ed2 .build/luasocket-3.1.0-1.src.rock | sha256sum --check -
+
+      - name: Verify twice-prepared pinned workload and driver receipts
+        run: |
+          python scripts/validate_deathstarbench_candidate_artifacts.py --upstream .build/upstream --luasocket-rock .build/luasocket-3.1.0-1.src.rock --output .build/candidates
+
+      - name: Execute Hotel correctness tests with pinned native Go and no network
+        run: |
+          docker run --rm --network=none --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges --tmpfs /tmp:rw,exec,nosuid,nodev,size=2g \
+            -v "$PWD/.build/candidates/first/hotel/app:/workspace:ro" -w /workspace \
+            -e TLS=false -e CGO_ENABLED=0 -e GO111MODULE=on -e GOTOOLCHAIN=local \
+            -e GOPROXY=off -e GOSUMDB=off -e GOCACHE=/tmp/go-cache -e GOPATH=/tmp/go \
+            docker.io/library/golang:1.21.13-bookworm@sha256:c6a5b9308b3f3095e8fde83c8bf4d68bd101fce606c1a0a1394522542509dda9 \
+            go test -mod=vendor -vet=off ./services/reservation ./services/frontend ./cmd/user
+
+      - name: Execute candidate Lua semantics against actual prepared scripts
+        env:
+          DSB_LUA_BIN: /usr/bin/luajit
+          DSB_REQUIRE_LUA: "1"
+          DSB_HOTEL_DRIVER_CONTEXT: ${{ github.workspace }}/.build/candidates/first/hotel-driver/context
+          DSB_MEDIA_DRIVER_CONTEXT: ${{ github.workspace }}/.build/candidates/first/media-driver/context
+        run: python -m unittest tests.test_deathstarbench_candidate_load_driver -v
+
+      - name: Retain preparation receipts (not image or live qualification evidence)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: deathstarbench-candidate-preparation
+          path: |
+            .build/candidates/preparation-validation.json
+            .build/candidates/first/*/context-manifest.json
+          if-no-files-found: error
+          # Only the receipt paths above, never all hidden build inputs.
+          include-hidden-files: true
+          retention-days: 14
+
   required:
     name: Required CI
     if: always()
     needs:
       - test
+      - candidate-artifacts
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -72,4 +145,5 @@ jobs:
       - name: Confirm every test job passed
         env:
           TEST_RESULT: ${{ needs.test.result }}
-        run: test "$TEST_RESULT" = "success"
+          ARTIFACT_RESULT: ${{ needs.candidate-artifacts.result }}
+        run: test "$TEST_RESULT" = "success" && test "$ARTIFACT_RESULT" = "success"

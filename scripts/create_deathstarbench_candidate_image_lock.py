@@ -513,6 +513,12 @@ def _artifact_receipt(receipt: dict, workload_id: str, runtime_key: str, platfor
                          ["/opt/deathstarbench-candidate-driver/bin/wrk"])
     _equal(artifacts.get("required_executables"), expected_required, "smoke required executable inventory")
     elves = _mapping(artifacts.get("elf_artifacts"), "smoke ELF artifacts")
+    from scripts.deathstarbench_public_crypto_fixtures import PUBLIC_PEM_SHA256, system_gnutls_path
+    public_selftests = _mapping(receipt.get("public_crypto_selftest_pem_sha256", {}), "public cryptographic self-test vectors")
+    for path, hashes in public_selftests.items():
+        _require(system_gnutls_path(path) and path in elves, "Public self-test material must belong to the inspected native system GnuTLS ELF.")
+        _require(isinstance(hashes, list) and bool(hashes) and all(isinstance(value, str) for value in hashes) and hashes == sorted(set(hashes))
+                 and set(hashes) <= PUBLIC_PEM_SHA256, "Unexpected or incomplete public crypto self-test identities.")
     _require(bool(elves), "Smoke ELF artifact inventory is missing.")
     for path, elf in elves.items():
         _require(isinstance(path, str) and path.startswith("/") and PurePosixPath(path).as_posix() == path

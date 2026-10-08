@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import io
 import json
 import os
@@ -293,6 +294,26 @@ class ImageFilesystemTests(unittest.TestCase):
         for data in (b"not elf", elf()[:70], elf(183)):
             with self.assertRaises(smoke.PreparationError):
                 smoke.elf_identity(data, "x86_64")
+
+    def test_only_exact_public_selftest_keys_inside_system_gnutls_are_allowed(self):
+        key = b"-----BEGIN RSA PRIVATE KEY-----\n" + b"A" * 64 + b"\n-----END RSA PRIVATE KEY-----"
+        identity = hashlib.sha256(key).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'image.tar'
+            archive(path, {
+                'usr/lib64/libgnutls.so.30.40.4': elf() + key,
+                'workspace/config.pem': key,
+                'usr/lib64/libgnutls.so.30.99': elf() + key.replace(b'A' * 64, b'B' * 64),
+                'usr/lib64/libcrypto.so.3': elf() + b'-----BEGIN PRIVATE KEY-----\x00format string',
+            })
+            fs = smoke.ImageFilesystem(path)
+            self.addCleanup(fs.close)
+            with mock.patch.object(smoke, 'PUBLIC_PEM_SHA256', frozenset({identity})):
+                self.assertFalse(fs.has_private_key('usr/lib64/libgnutls.so.30.40.4'))
+                self.assertEqual(fs.public_crypto_selftest_pem_sha256, {'/usr/lib64/libgnutls.so.30.40.4': [identity]})
+                self.assertTrue(fs.has_private_key('workspace/config.pem'))
+                self.assertTrue(fs.has_private_key('usr/lib64/libgnutls.so.30.99'))
+                self.assertFalse(fs.has_private_key('usr/lib64/libcrypto.so.3'))
 
 
 class SmokeExecutionTests(unittest.TestCase):

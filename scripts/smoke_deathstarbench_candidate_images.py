@@ -32,6 +32,7 @@ from scripts.deathstarbench_candidate_registry import (
     DIGEST, digest_bytes, inspect_manifest, inspect_blob, parse_reference, resolve_platform,
 )
 from scripts.inspect_deathstarbench_support_images import write_receipt
+from scripts.deathstarbench_public_crypto_fixtures import PUBLIC_PEM_SHA256, system_gnutls_path
 
 
 HOTEL_PROGRAMS = ("attractions", "frontend", "geo", "profile", "rate", "recommendation", "reservation", "review", "search", "user")
@@ -48,6 +49,10 @@ PRIVATE_KEY = re.compile(
     rb"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----\r?\n"
     rb"(?:Proc-Type: 4,ENCRYPTED\r?\nDEK-Info: [A-Z0-9-]+,[0-9A-F]+\r?\n\r?\n)?"
     rb"[A-Za-z0-9+/=]{32,}"
+)
+COMPLETE_PRIVATE_KEY = re.compile(
+    rb"-----BEGIN ((?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY)-----\r?\n"
+    rb"[A-Za-z0-9+/=\r\n]{32,65536}-----END \1-----"
 )
 CLONE = re.compile(r"\bgit\s+(?:-[^\s]+\s+)*(?:clone|pull|fetch)\b")
 MAX_FILE_BYTES = 256 * 1024 * 1024
@@ -80,6 +85,7 @@ class ImageFilesystem:
     def __init__(self, archive: Path):
         self.archive = tarfile.open(archive, mode="r:")
         self.members = {}
+        self.public_crypto_selftest_pem_sha256 = {}
         try:
             for member in self.archive.getmembers():
                 name = _normalized(member.name)
@@ -164,7 +170,20 @@ class ImageFilesystem:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 data = overlap + chunk
                 if PRIVATE_KEY.search(data):
-                    return True
+                    # GnuTLS deliberately embeds public FIPS known-answer PEM
+                    # vectors. Never exempt a whole library or a bare marker.
+                    if not system_gnutls_path(name) or self.prefix(name) != b"\x7fELF":
+                        return True
+                    raw = self.read(name)
+                    prefixes = list(PRIVATE_KEY.finditer(raw))
+                    keys = list(COMPLETE_PRIVATE_KEY.finditer(raw))
+                    if {match.start() for match in prefixes} != {match.start() for match in keys}:
+                        return True
+                    identities = sorted({hashlib.sha256(match.group().replace(b"\r\n", b"\n").strip()).hexdigest() for match in keys})
+                    if not identities or not set(identities) <= PUBLIC_PEM_SHA256:
+                        return True
+                    self.public_crypto_selftest_pem_sha256["/" + name] = identities
+                    return False
                 overlap = data[-256:]
         return False
 
@@ -421,6 +440,7 @@ def smoke_image(image: str, *, workload_id: str, image_key: str, architecture: s
             fs = ImageFilesystem(archive)
             try:
                 identities = _inspect_filesystem(fs, workload_id, image_key, architecture, context, verified["config"].get("config", {}))
+                public_crypto_selftests = fs.public_crypto_selftest_pem_sha256
             finally:
                 fs.close()
         finally:
@@ -448,8 +468,10 @@ def smoke_image(image: str, *, workload_id: str, image_key: str, architecture: s
             "smoke_execution": {"passed": True, "network": "none", "read_only": True, "user": "65532:65532",
                                 "drop_capabilities": ["ALL"], "no_new_privileges": True},
             "load_driver_attestation": attestation, "artifact_identities": identities, "inspection_executions": executions,
+            "public_crypto_selftest_pem_sha256": public_crypto_selftests,
             "limitations": ["No database/cache/network service was contacted and no dataset or persistent transaction was qualified.",
                             "Scratch Hotel checks inspect binaries without starting seed-mutating application services.",
+                            "Only SHA-bound public GnuTLS self-test PEMs inside system-library ELFs are exempted from the unexpected-key screen; these are never application credentials.",
                             "Frontend mock DNS permits syntax/module checks only, not live endpoint connectivity."]}
 
 

@@ -105,7 +105,7 @@ jobs:
       - name: Execute Hotel correctness tests with pinned native Go and no network
         run: |
           docker run --rm --network=none --read-only --cap-drop=ALL \
-            --security-opt=no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,size=2g \
+            --security-opt=no-new-privileges --tmpfs /tmp:rw,exec,nosuid,nodev,size=2g \
             -v "$PWD/.build/candidates/first/hotel/app:/workspace:ro" -w /workspace \
             -e TLS=false -e CGO_ENABLED=0 -e GO111MODULE=on -e GOTOOLCHAIN=local \
             -e GOPROXY=off -e GOSUMDB=off -e GOCACHE=/tmp/go-cache -e GOPATH=/tmp/go \

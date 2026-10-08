@@ -116,6 +116,9 @@ class CandidateArtifactValidationTests(unittest.TestCase):
         self.assertIn("validate_deathstarbench_candidate_artifacts.py", text)
         self.assertIn("--network=none", text)
         self.assertIn("--read-only", text)
+        # Docker tmpfs defaults to noexec; Go must execute its freshly compiled
+        # test binaries. This is a CI builder mount, not a driver runtime mount.
+        self.assertIn("--tmpfs /tmp:rw,exec,nosuid,nodev,size=2g", text)
         self.assertIn("GOPROXY=off", text)
         self.assertNotIn("packages: write", text)
         self.assertNotIn("secrets.", text)

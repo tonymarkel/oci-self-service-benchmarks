@@ -1,6 +1,6 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-08: **native artifact candidates, not public benchmarks**.
+Status, 2026-10-13: **published native artifact candidates, not public benchmarks**.
 Social Network is still the only released distributed workload. The audited
 foundations now have drift-checked application/frontend, initializer, and
 load-driver preparation tools, plus an explicit native publication pipeline.
@@ -88,6 +88,10 @@ fresh partial output owned by the tool is removed.
   retains Media's own mongo-c-driver 1.14.0 dependency recipe, bakes generated
   Lua and handlers, renders the K3s resolver/namespace, fixes the Jaeger flag,
   corrects `charactor` to `character`, and increases the request-body buffer.
+  Preparation v3 omits the three unused, obsolete global-API Lua clients for
+  ComposeReview, Rating, and ReviewStorage. Exact original hashes and a
+  versioned exclusion receipt are retained; copied Lua references and aliases
+  fail validation. Their C++ backend services remain unchanged.
   Prepared initializer scripts normalize null posters, retain the first
   mapping for duplicate movie titles, and propagate HTTP errors. The shell
   registration scripts require an explicit target; the Python uploader retains
@@ -163,8 +167,11 @@ libraries receive native linkage checks. A versioned linkage scope records the
 sorted workload/custom-library targets; their recursive loader dependencies
 must resolve. Unrelated OS tools are not executed or promoted to workload
 requirements, but still receive the same all-ELF architecture and unexpected-key
-screening. The frontend parses its actual baked
-nginx configuration and loads Lua/Thrift modules with explicit mock DNS, not a
+screening. The frontend also verifies excluded clients are absent from the
+image, including dangling or cyclic leaf links and aliased parent directories.
+It parses its actual baked nginx configuration and loads Lua/Thrift modules,
+the binary protocol, and all three native Thrift helpers in OpenResty's Lua
+host with explicit mock DNS, not a
 substitute configuration or live dependencies. Executed checks use user 65532,
 a read-only filesystem, no network, no capabilities, and no-new-privileges.
 Driver checks bind binary/request/metric/entrypoint identities to their offline
@@ -187,6 +194,31 @@ independently completed. Every generated candidate lock also keeps `released`,
 runtime, measurement, dataset, denied-edge, and cleanup qualification false.
 Failure artifacts retain available preparation/build identities without
 inventing successful smoke results.
+
+### Retained native publication evidence
+
+Both workload pipelines completed successfully on 2026-10-13:
+
+- Hotel Reservation: [run 38414696606](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38414696606),
+  source commit `1dbc03ca4b104a2fba4fc6a4c3c0bb7e22690ca7`.
+- Media Microservices: [run 38416925449](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38416925449),
+  source commit `86f0869e4bbd940b52c3eaa3b4ac360be8b7e96a`.
+
+The [retained summary](qualification/deathstarbench-hotel-media-candidate-images-v1.json)
+records exact app/frontend/driver and backing-image references, platform/config
+digests, native smoke observations, preparation identities, workflow source
+commits, and downloaded lock/publication-file hashes. Complete receipts remain
+in each workflow's `candidate-lock-*` artifact for its 90-day retention window;
+the summary is not a substitute runtime lock. Archive digests reported by
+GitHub are distinguished from hashes computed for the extracted JSON files.
+
+Every public/runtime/measurement/dataset/network/cleanup gate remains closed.
+The application and UI still offer Social Network only. The next integration
+slice must bind these exact candidate artifacts to explicit per-run workload
+identities, profile-specific database storage and readiness, and journaled
+initialization/measurement/recovery before exposing either new UI choice.
+Media's TMDB dataset also needs documented rights clearance or a reviewed,
+versioned synthetic replacement; artifact hashes do not establish data rights.
 
 ## Next review slices and release prerequisites
 

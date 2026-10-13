@@ -1,0 +1,396 @@
+{
+  "schema_version": 1,
+  "record_type": "candidate-native-publication-summary-v1",
+  "recorded_date": "2026-10-13",
+  "candidate_only": true,
+  "released": false,
+  "public_ui_enabled": false,
+  "cloud_resources_provisioned": false,
+  "full_artifact_retention_days": 90,
+  "limitations": [
+    "This summary is not a deployable runtime lock, signed native-build proof, legal clearance, or byte-reproducible rebuild claim.",
+    "Backing image entries were manifest/config verified, not started or semantically qualified.",
+    "Authenticated native pulls/smoke do not establish anonymous layer access; that separate release gate remains false.",
+    "Dataset, Kubernetes/cloud execution, network-policy negative paths, measurement, and recovery/cleanup qualification remain incomplete.",
+    "The original complete lock and publication receipts are retained in the linked workflow artifacts; file and artifact archive hashes are distinct.",
+    "File hashes were computed after download; archive digests are reported by the GitHub artifact API."
+  ],
+  "workloads": {
+    "hotel_reservation": {
+      "workflow_run_id": 38414696606,
+      "workflow_run_attempt": 1,
+      "workflow_url": "https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38414696606",
+      "workflow_commit": "1dbc03ca4b104a2fba4fc6a4c3c0bb7e22690ca7",
+      "artifact": {
+        "name": "candidate-lock-hotel_reservation-38414696606-1",
+        "artifact_id": 11824195478,
+        "candidate_lock_file_sha256": "a53ceb377feef1a064d990dbc403deccd8d761b8bd70db2e912af69df3d3e86f",
+        "publication_file_sha256": "bef00c72962b3f26393eadbc8e4149888bf6c019e7d7299d32985d5da2eb6ea8",
+        "github_reported_archive_sha256": "a0679d45c634b079c68e7cc74c61f0bd43d6351ac509a92e5ce35d021e469d81"
+      },
+      "evidence": {
+        "workload_id": "hotel_reservation",
+        "upstream_revision": "6ecb09706140f8730b5385c08f1386c654c3c526",
+        "workload_revision": "hotel-reservation-6ecb097-workload-v1",
+        "image_set_revision": "hotel-reservation-images-v1",
+        "load_driver_revision": "wrk2-6ecb097-hotel-oci-amd64-candidate-v1",
+        "released": false,
+        "runtime_qualified": false,
+        "measurement_qualified": false,
+        "anonymous_pull_qualified": false,
+        "qualification": {
+          "anonymous_pull": {
+            "qualified": false,
+            "required_method": "isolated-client-with-empty-auth-layer-pull-and-smoke-v1"
+          },
+          "cleanup_ready": false,
+          "cloud_runtime_ready": false,
+          "dataset_ready": false,
+          "denied_edges_ready": false,
+          "native_build": "operator-ci-receipts-not-signed-provenance-v1",
+          "publication": "raw-index-platform-manifest-config-bytes-verified-v1"
+        },
+        "preparation": {
+          "workload_manifest_sha256": "366f7f387ac54a9cc6738b5553dc0c01b4f9ccf0cc412dfcb3340adfaa0c5adf",
+          "driver_manifest_sha256": "e043e8d4ac7e9c341c1e4fec2e55ceb6150e86d1a94e26b56a4dbca970b385ae"
+        },
+        "images": {
+          "consul": {
+            "index_image": "docker.io/hashicorp/consul@sha256:9e69b807722ffe0308386b2df9c2943702c2d97eacfcb35c4ccc387042f5991c",
+            "platforms": {
+              "linux/amd64": {
+                "image": "docker.io/hashicorp/consul@sha256:5290ee6943eeac0350f193c8dc52ff27eb1042dd6f39ee597068e779c0ce4a9f",
+                "config_digest": "sha256:a2d7cadf7261c768ecdbea5e04da19adc262c249647feb774116ace24fc8dd7d",
+                "native_builder": null,
+                "offline_smoke_passed": null,
+                "smoke_methods": null
+              }
+            }
+          },
+          "hotel-reservation": {
+            "index_image": "ghcr.io/tonymarkel/deathstarbench-hotel-app@sha256:0a00df1dfbf917340db94a6281bb9475483ec009e8c45461119e4d81b754c10a",
+            "platforms": {
+              "linux/amd64": {
+                "image": "ghcr.io/tonymarkel/deathstarbench-hotel-app@sha256:4b95713e61229cdc95148b80cdbd760e3c7809824845dd28d730addf8c487017",
+                "config_digest": "sha256:bb4a7f30d47b091d246b95ae76be1b48af2d3916bff9f3b0c6fb904773681498",
+                "native_builder": {
+                  "architecture": "x86_64",
+                  "platform": "linux/amd64",
+                  "qemu_used": false
+                },
+                "offline_smoke_passed": true,
+                "smoke_methods": [
+                  "stopped-container-export-no-host-extraction",
+                  "all-ELF64-native-architecture",
+                  "baked-config-script-license-hashes",
+                  "runtime-clone-and-private-key-screen",
+                  "scratch-static-linkage-no-service-startup"
+                ]
+              },
+              "linux/arm64": {
+                "image": "ghcr.io/tonymarkel/deathstarbench-hotel-app@sha256:14ff6ba619bf5b11b4628f28265d1bbbef7539e3c9ee2fb72e03cdadd71df336",
+                "config_digest": "sha256:51a62b68f81d950b3b43986e50de4664af6ea508fbcfa23d90487b1e6f1b954f",
+                "native_builder": {
+                  "architecture": "aarch64",
+                  "platform": "linux/arm64",
+                  "qemu_used": false
+                },
+                "offline_smoke_passed": true,
+                "smoke_methods": [
+                  "stopped-container-export-no-host-extraction",
+                  "all-ELF64-native-architecture",
+                  "baked-config-script-license-hashes",
+                  "runtime-clone-and-private-key-screen",
+                  "scratch-static-linkage-no-service-startup"
+                ]
+              }
+            }
+          },
+          "jaeger": {
+            "index_image": "docker.io/jaegertracing/all-in-one@sha256:8f165334f418ca53691ce358c19b4244226ed35c5d18408c5acf305af2065fb9",
+            "platforms": {
+              "linux/amd64": {
+                "image": "docker.io/jaegertracing/all-in-one@sha256:f1f9682412cfca7a2d4c3f612f8eb79216222ca791589b04485d71a0b6bc80b9",
+                "config_digest": "sha256:ac00178dac959e32934c9b78a28b83bbc39cb4eba158a700de37eb7dd3ddcf00",
+                "native_builder": null,
+                "offline_smoke_passed": null,
+                "smoke_methods": null
+              }
+            }
+          },
+          "load-driver": {
+            "index_image": "ghcr.io/tonymarkel/deathstarbench-hotel-load-driver@sha256:3c06a3835413991c01ade9f38d3499fec946355b398cc9a8a705d8a46ef8c26d",
+            "platforms": {
+              "linux/amd64": {
+                "image": "ghcr.io/tonymarkel/deathstarbench-hotel-load-driver@sha256:911e797bffcabe968d05424d05e4bee0ced19718544e7d44e064881d0f4326b4",
+                "config_digest": "sha256:755e2e49d4e260925901a733ce8fff1e54d1d8e09f62e849d7283ef9b6d6f57b",
+                "native_builder": {
+                  "architecture": "x86_64",
+                  "platform": "linux/amd64",
+                  "qemu_used": false
+                },
+                "offline_smoke_passed": true,
+                "smoke_methods": [
+                  "stopped-container-export-no-host-extraction",
+                  "all-ELF64-native-architecture",
+                  "baked-config-script-license-hashes",
+                  "runtime-clone-and-private-key-screen",
+                  "native-hardened-ldd-workload-custom-ELFs-v1",
+                  "candidate-driver-offline-hardened-attestation"
+                ]
+              }
+            }
+          },
+          "memcached": {
+            "index_image": "docker.io/library/memcached@sha256:09eaba8e0b136af2f1d8a4985b4fda74ce2793f95ea66d82fbe5769c05b42ea3",
+            "platforms": {
+              "linux/amd64": {
+                "image": "docker.io/library/memcached@sha256:405390d9c38a0e3d59f34088c2265a710da10e5e9f3cdeb4fb5264c829509aa5",
+                "config_digest": "sha256:10895cbae2201dbd8d84c3c9047f79424e9ed1ccbe25884d1b4d795d0ac6d5fb",
+                "native_builder": null,
+                "offline_smoke_passed": null,
+                "smoke_methods": null
+              }
+            }
+          },
+          "mongodb": {
+            "index_image": "docker.io/library/mongo@sha256:54bcd8da3ea5eec561b68c605046c55c6b304387dc4c2bf5b3a5f5064fbb7495",
+            "platforms": {
+              "linux/amd64": {
+                "image": "docker.io/library/mongo@sha256:f7a950ee4a1cc048300cd3b3da3e939974eb8278525101ac917dbed1a3ce3d51",
+                "config_digest": "sha256:beb911888cf2ce29dacbed625afe591a50d9d6bb05a1beff90412255ce50f02e",
+                "native_builder": null,
+                "offline_smoke_passed": null,
+                "smoke_methods": null
+              }
+            }
+          }
+        }
+      }
+    },
+    "media_microservices": {
+      "workflow_run_id": 38416925449,
+      "workflow_run_attempt": 1,
+      "workflow_url": "https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38416925449",
+      "workflow_commit": "86f0869e4bbd940b52c3eaa3b4ac360be8b7e96a",
+      "artifact": {
+        "name": "candidate-lock-media_microservices-38416925449-1",
+        "artifact_id": 11824089439,
+        "candidate_lock_file_sha256": "87bae12245f733a954a03d947d15aae50122c9ef9dab743278c116e81d350f73",
+        "publication_file_sha256": "b0d9bda79df8831a189fd0f6aa42b5c486c3122e030d78b8caf049f7eb3d5abf",
+        "github_reported_archive_sha256": "95a61eb60eda3cafa36f9528ed48f0327bebd9dc3842d526058730087c940cc1"
+      },
+      "evidence": {
+        "workload_id": "media_microservices",
+        "upstream_revision": "6ecb09706140f8730b5385c08f1386c654c3c526",
+        "workload_revision": "media-microservices-6ecb097-workload-v1",
+        "image_set_revision": "media-microservices-images-v1",
+        "load_driver_revision": "wrk2-6ecb097-media-oci-amd64-candidate-v1",
+        "released": false,
+        "runtime_qualified": false,
+        "measurement_qualified": false,
+        "anonymous_pull_qualified": false,
+        "qualification": {
+          "anonymous_pull": {
+            "qualified": false,
+            "required_method": "isolated-client-with-empty-auth-layer-pull-and-smoke-v1"
+          },
+          "cleanup_ready": false,
+          "cloud_runtime_ready": false,
+          "dataset_ready": false,
+          "denied_edges_ready": false,
+          "native_build": "operator-ci-receipts-not-signed-provenance-v1",
+          "publication": "raw-index-platform-manifest-config-bytes-verified-v1"
+        },
+        "preparation": {
+          "workload_manifest_sha256": "fa37d9d64bbde58546940b71ebaaea90a9a1571df9ceb23f002b53caf881a452",
+          "driver_manifest_sha256": "daf9ee96545c142932f50c86b23e344e92be6442a38b3f446fd85b11a1e0ff43",
+          "preparation_revision": "media-microservices-6ecb097-contexts-candidate-v3",
+          "frontend_source_exclusions": {
+            "files": [
+              {
+                "excluded_prepared_path": "frontend/runtime/gen-lua/media_service_ComposeReviewService.lua",
+                "module": "media_service_ComposeReviewService",
+                "original_path": "mediaMicroservices/gen-lua/media_service_ComposeReviewService.lua",
+                "original_sha256": "b7e274625bc3eb5a9c7412d7281c998c971c6809bb5b4c7a780e8a8a2ab0d09c",
+                "reason": "Unused legacy global-API Lua client incompatible with the pinned table-exporting Thrift runtime; no prepared frontend Lua references it, and its C++ backend service remains included."
+              },
+              {
+                "excluded_prepared_path": "frontend/runtime/gen-lua/media_service_RatingService.lua",
+                "module": "media_service_RatingService",
+                "original_path": "mediaMicroservices/gen-lua/media_service_RatingService.lua",
+                "original_sha256": "7dd9be0184ee05dbb48bf8d7bf9fe43bcaceaf7cf11ca6b879a4aa5f9f6a1e47",
+                "reason": "Unused legacy global-API Lua client incompatible with the pinned table-exporting Thrift runtime; no prepared frontend Lua references it, and its C++ backend service remains included."
+              },
+              {
+                "excluded_prepared_path": "frontend/runtime/gen-lua/media_service_ReviewStorageService.lua",
+                "module": "media_service_ReviewStorageService",
+                "original_path": "mediaMicroservices/gen-lua/media_service_ReviewStorageService.lua",
+                "original_sha256": "0d81b9d83ecd42b150e90072d3a2e9a8e74e048df17cb76927a4aca1e9558661",
+                "reason": "Unused legacy global-API Lua client incompatible with the pinned table-exporting Thrift runtime; no prepared frontend Lua references it, and its C++ backend service remains included."
+              }
+            ],
+            "revision": "unused-global-api-lua-clients-v1"
+          }
+        },
+        "images": {
+          "jaeger": {
+            "index_image": "docker.io/jaegertracing/all-in-one@sha256:8f165334f418ca53691ce358c19b4244226ed35c5d18408c5acf305af2065fb9",
+            "platforms": {
+              "linux/amd64": {
+                "image": "docker.io/jaegertracing/all-in-one@sha256:f1f9682412cfca7a2d4c3f612f8eb79216222ca791589b04485d71a0b6bc80b9",
+                "config_digest": "sha256:ac00178dac959e32934c9b78a28b83bbc39cb4eba158a700de37eb7dd3ddcf00",
+                "native_builder": null,
+                "offline_smoke_passed": null,
+                "smoke_methods": null
+              }
+            }
+          },
+          "load-driver": {
+            "index_image": "ghcr.io/tonymarkel/deathstarbench-media-load-driver@sha256:f225b0c07d0b362174f3a50c489945fb047dfa7eac54ade15ad23fd4c8d50776",
+            "platforms": {
+              "linux/amd64": {
+                "image": "ghcr.io/tonymarkel/deathstarbench-media-load-driver@sha256:d32ef0131a1e42be92b23f010db603d7da8b24ad0a7a8378df19f941ceb5c8f2",
+                "config_digest": "sha256:0af2280f5b9f815ac6a5ee1bc619d686fd330806c060e1eec5d3a77148b3a14c",
+                "native_builder": {
+                  "architecture": "x86_64",
+                  "platform": "linux/amd64",
+                  "qemu_used": false
+                },
+                "offline_smoke_passed": true,
+                "smoke_methods": [
+                  "stopped-container-export-no-host-extraction",
+                  "all-ELF64-native-architecture",
+                  "baked-config-script-license-hashes",
+                  "runtime-clone-and-private-key-screen",
+                  "native-hardened-ldd-workload-custom-ELFs-v1",
+                  "candidate-driver-offline-hardened-attestation"
+                ]
+              }
+            }
+          },
+          "media-microservices": {
+            "index_image": "ghcr.io/tonymarkel/deathstarbench-media-app@sha256:8637bad697c14b3cea7181a49f305a1b85fde8ed8e3b5e4af9464b6e9c9b4cc6",
+            "platforms": {
+              "linux/amd64": {
+                "image": "ghcr.io/tonymarkel/deathstarbench-media-app@sha256:048fca33b53bf7e49a9284fd1dee88c15ebffcba2e998e18bf7839e1721f4454",
+                "config_digest": "sha256:d85062551c0e317e1bc9095d06cbcf7728647f15807c8c62484664a802fea92b",
+                "native_builder": {
+                  "architecture": "x86_64",
+                  "platform": "linux/amd64",
+                  "qemu_used": false
+                },
+                "offline_smoke_passed": true,
+                "smoke_methods": [
+                  "stopped-container-export-no-host-extraction",
+                  "all-ELF64-native-architecture",
+                  "baked-config-script-license-hashes",
+                  "runtime-clone-and-private-key-screen",
+                  "native-hardened-ldd-workload-custom-ELFs-v1"
+                ]
+              },
+              "linux/arm64": {
+                "image": "ghcr.io/tonymarkel/deathstarbench-media-app@sha256:3f5001b3933e6a404c7527ec9cd66786cff01a0e3560bccbe943501aab0b9b4b",
+                "config_digest": "sha256:4d1b4532ebcde93969712c3d94dd2ba56782703bbad059659d477303d941b006",
+                "native_builder": {
+                  "architecture": "aarch64",
+                  "platform": "linux/arm64",
+                  "qemu_used": false
+                },
+                "offline_smoke_passed": true,
+                "smoke_methods": [
+                  "stopped-container-export-no-host-extraction",
+                  "all-ELF64-native-architecture",
+                  "baked-config-script-license-hashes",
+                  "runtime-clone-and-private-key-screen",
+                  "native-hardened-ldd-workload-custom-ELFs-v1"
+                ]
+              }
+            }
+          },
+          "memcached": {
+            "index_image": "docker.io/library/memcached@sha256:09eaba8e0b136af2f1d8a4985b4fda74ce2793f95ea66d82fbe5769c05b42ea3",
+            "platforms": {
+              "linux/amd64": {
+                "image": "docker.io/library/memcached@sha256:405390d9c38a0e3d59f34088c2265a710da10e5e9f3cdeb4fb5264c829509aa5",
+                "config_digest": "sha256:10895cbae2201dbd8d84c3c9047f79424e9ed1ccbe25884d1b4d795d0ac6d5fb",
+                "native_builder": null,
+                "offline_smoke_passed": null,
+                "smoke_methods": null
+              }
+            }
+          },
+          "mongodb": {
+            "index_image": "docker.io/library/mongo@sha256:6efa052039903e731e4a5550c68a13c4869ddc93742c716332883fd9c77eb79b",
+            "platforms": {
+              "linux/amd64": {
+                "image": "docker.io/library/mongo@sha256:d9ddf3df31941d30ee486ad5d2337283f0a02f68dbc5092319e24d3a541dbddd",
+                "config_digest": "sha256:61ea24dc52c6396df1a77f7e1a00c1019b4dd7873228f1916de40628677e8824",
+                "native_builder": null,
+                "offline_smoke_passed": null,
+                "smoke_methods": null
+              }
+            }
+          },
+          "nginx-web-server": {
+            "index_image": "ghcr.io/tonymarkel/deathstarbench-media-frontend@sha256:984dfb4945c2b0c8a878d2e99514df742f37b2c8776a53e836d75685dfa67a75",
+            "platforms": {
+              "linux/amd64": {
+                "image": "ghcr.io/tonymarkel/deathstarbench-media-frontend@sha256:7c33f07409c336d0c6296096db7d284d9337fe02437a5bf175dbb5482efee9e6",
+                "config_digest": "sha256:f2b69240aa06619afb66d72311d772a4b2e67bad1dd58d32f924424bc8abd310",
+                "native_builder": {
+                  "architecture": "x86_64",
+                  "platform": "linux/amd64",
+                  "qemu_used": false
+                },
+                "offline_smoke_passed": true,
+                "smoke_methods": [
+                  "stopped-container-export-no-host-extraction",
+                  "all-ELF64-native-architecture",
+                  "baked-config-script-license-hashes",
+                  "runtime-clone-and-private-key-screen",
+                  "native-hardened-ldd-workload-custom-ELFs-v1",
+                  "baked-Media-excluded-client-absence-v1",
+                  "baked-nginx-config-syntax-with-explicit-mock-DNS",
+                  "baked-Lua-Thrift-module-loading-no-service-methods"
+                ]
+              },
+              "linux/arm64": {
+                "image": "ghcr.io/tonymarkel/deathstarbench-media-frontend@sha256:a521a6bbb15ccc5287f550f00e94e409eef6f7feeab79cf2d0cd101e6a449f49",
+                "config_digest": "sha256:b908c85695c92d29f5051a60ba9a24bc3b53c6eb77d32d7c45c0e0b73cfe9b8d",
+                "native_builder": {
+                  "architecture": "aarch64",
+                  "platform": "linux/arm64",
+                  "qemu_used": false
+                },
+                "offline_smoke_passed": true,
+                "smoke_methods": [
+                  "stopped-container-export-no-host-extraction",
+                  "all-ELF64-native-architecture",
+                  "baked-config-script-license-hashes",
+                  "runtime-clone-and-private-key-screen",
+                  "native-hardened-ldd-workload-custom-ELFs-v1",
+                  "baked-Media-excluded-client-absence-v1",
+                  "baked-nginx-config-syntax-with-explicit-mock-DNS",
+                  "baked-Lua-Thrift-module-loading-no-service-methods"
+                ]
+              }
+            }
+          },
+          "redis": {
+            "index_image": "docker.io/library/redis@sha256:5a93f6b2e391b78e8bd3f9e7e1e1e06aeb5295043b4703fb88392835cec924a0",
+            "platforms": {
+              "linux/amd64": {
+                "image": "docker.io/library/redis@sha256:9341b6548cc35b64a6de0085555264336e2f570e17ecff20190bf62222f2bd64",
+                "config_digest": "sha256:9b38108e295d10dabee133dcb2e68c1fe88e9407f4e83f0930154b3ff8f717bc",
+                "native_builder": null,
+                "offline_smoke_passed": null,
+                "smoke_methods": null
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

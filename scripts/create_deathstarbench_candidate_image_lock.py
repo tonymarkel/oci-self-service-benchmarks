@@ -476,7 +476,10 @@ def _build_receipt(receipt: Any, workload_id: str, context_name: str, platform: 
 
 
 def _artifact_receipt(receipt: dict, workload_id: str, runtime_key: str, platform: str, context: Path) -> None:
-    from scripts.smoke_deathstarbench_candidate_images import _baked_files, HOTEL_PROGRAMS, MEDIA_PROGRAMS, MEDIA_DEPENDENCY_LICENSES, inspection_plan
+    from scripts.smoke_deathstarbench_candidate_images import (
+        _baked_files, REQUIRED_EXECUTABLES, MEDIA_DEPENDENCY_LICENSES,
+        LINKAGE_METHOD, linkage_policy, inspection_plan,
+    )
     artifacts = _mapping(receipt.get("artifact_identities"), "smoke artifact identities", keys={
         "baked_file_sha256", "dependency_license_sha256", "elf_artifacts", "required_executables", "runtime_clone_detected", "private_key_detected"})
     for key in ("runtime_clone_detected", "private_key_detected"):
@@ -507,10 +510,7 @@ def _artifact_receipt(receipt: dict, workload_id: str, runtime_key: str, platfor
         observed_dependencies.add(suffix.split("/", 1)[0])
         _hex(digest, "in-image dependency notice")
     _require(observed_dependencies == expected_dependencies, "Incomplete or unexpected in-image dependency notice inventory.")
-    expected_required = (["/go/bin/" + name for name in HOTEL_PROGRAMS] if runtime_key == "hotel-reservation" else
-                         ["/usr/local/bin/" + name for name in MEDIA_PROGRAMS] if runtime_key == "media-microservices" else
-                         ["/usr/local/openresty/nginx/sbin/nginx"] if runtime_key == "nginx-web-server" else
-                         ["/opt/deathstarbench-candidate-driver/bin/wrk"])
+    expected_required = list(REQUIRED_EXECUTABLES[runtime_key])
     _equal(artifacts.get("required_executables"), expected_required, "smoke required executable inventory")
     elves = _mapping(artifacts.get("elf_artifacts"), "smoke ELF artifacts")
     from scripts.deathstarbench_public_crypto_fixtures import PUBLIC_PEM_SHA256, system_gnutls_path
@@ -539,18 +539,25 @@ def _artifact_receipt(receipt: dict, workload_id: str, runtime_key: str, platfor
         _require(path in elves and elves[path]["runnable"], "Smoke required executable is missing/not runnable.")
         if runtime_key == "hotel-reservation":
             _equal(elves[path]["static"], True, "scratch Hotel executable linkage")
+    try:
+        linkage_scope, linkage_targets = linkage_policy(workload_id, runtime_key, artifacts)
+    except PreparationError as exc:
+        raise CandidateImageLockError("Invalid required image linkage policy.") from exc
+    _equal(receipt.get("linkage_scope"), linkage_scope, "versioned image linkage scope")
+    _equal(receipt.get("linkage_targets"), linkage_targets, "sorted required image linkage targets")
     methods = set(receipt["methods"])
     expected_methods = {"stopped-container-export-no-host-extraction", "all-ELF64-native-architecture",
                         "baked-config-script-license-hashes", "runtime-clone-and-private-key-screen"}
     if runtime_key == "hotel-reservation":
         expected_methods.add("scratch-static-linkage-no-service-startup")
-    elif any(elf["dynamic_dependencies"] for elf in elves.values()):
-        expected_methods.add("native-hardened-ldd-all-dynamic-ELFs")
+    elif linkage_targets:
+        expected_methods.add(LINKAGE_METHOD)
     if runtime_key == "nginx-web-server":
         expected_methods.update({"baked-nginx-config-syntax-with-explicit-mock-DNS", "baked-Lua-Thrift-module-loading-no-service-methods"})
     if runtime_key == "load-driver":
         expected_methods.add("candidate-driver-offline-hardened-attestation")
-    _require(expected_methods <= methods, "Missing required native image smoke methods.")
+    _require(methods == expected_methods and len(receipt["methods"]) == len(methods),
+             "Missing, unexpected, or duplicate required native image smoke methods.")
     executions = receipt.get("inspection_executions")
     _require(isinstance(executions, list), "Missing image inspection execution receipts.")
     for execution in executions:

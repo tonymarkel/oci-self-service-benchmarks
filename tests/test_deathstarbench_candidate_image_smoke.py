@@ -82,6 +82,12 @@ def media_fixture(root, key, *, machine=62):
     return context, files
 
 
+def linkage_identities(key):
+    required = list(smoke.REQUIRED_EXECUTABLES[key])
+    return {"required_executables": required,
+            "elf_artifacts": {path: smoke.elf_identity(elf(), "x86_64") for path in required}}
+
+
 class RegistryBytesTests(unittest.TestCase):
     def test_exact_platform_resolution_checks_manifest_and_config_bytes(self):
         cfg = encode({"os": "linux", "architecture": "amd64", "config": {"Env": []}})
@@ -286,6 +292,27 @@ class ImageFilesystemTests(unittest.TestCase):
                 with self.assertRaises(smoke.PreparationError):
                     smoke._inspect_filesystem(fs, "hotel_reservation", "hotel-reservation", "x86_64", context, config)
 
+    def test_out_of_scope_os_helpers_still_undergo_native_architecture_and_key_screening(self):
+        for mutation in ("native", "foreign", "key"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                context, files = media_fixture(root, "media-microservices")
+                payload = elf(183 if mutation == "foreign" else 62, dynamic=True)
+                if mutation == "key":
+                    payload += b"-----BEGIN PRIVATE KEY-----\n" + b"A" * 64 + b"\n-----END PRIVATE KEY-----\n"
+                files["usr/libexec/utempter/utempter"] = (payload, 0o700)
+                archive(root / "image.tar", files)
+                fs = smoke.ImageFilesystem(root / "image.tar")
+                self.addCleanup(fs.close)
+                if mutation != "native":
+                    with self.assertRaises(smoke.PreparationError):
+                        smoke._inspect_filesystem(fs, "media_microservices", "media-microservices", "x86_64", context, {})
+                else:
+                    identities = smoke._inspect_filesystem(fs, "media_microservices", "media-microservices", "x86_64", context, {})
+                    self.assertIn("/usr/libexec/utempter/utempter", identities["elf_artifacts"])
+                    _, targets = smoke.linkage_policy("media_microservices", "media-microservices", identities)
+                    self.assertEqual(targets, [])
+
     def test_elf_architecture_and_relocatable_objects_are_distinguished(self):
         self.assertTrue(smoke.elf_identity(elf(183), "aarch64")["static"])
         identity = smoke.elf_identity(elf(relocatable=True), "x86_64")
@@ -321,7 +348,8 @@ class SmokeExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             context, _ = media_fixture(root, "nginx-web-server")
-            identities = {"elf_artifacts": {"/usr/local/lib/example.so": {"dynamic_dependencies": True}}}
+            identities = linkage_identities("nginx-web-server")
+            identities["elf_artifacts"]["/usr/local/lib/example.so"] = smoke.elf_identity(elf(dynamic=True), "x86_64")
             plan = smoke.inspection_plan("media_microservices", "nginx-web-server", context, identities)
             self.assertEqual(plan[0], (smoke._ldd_command(["/usr/local/lib/example.so"]), ()))
             self.assertEqual(plan[1][0], ["/usr/local/openresty/bin/openresty", "-t"])
@@ -330,6 +358,61 @@ class SmokeExecutionTests(unittest.TestCase):
             self.assertIn('require("opentracing_bridge_tracer")', plan[2][0][2])
             self.assertTrue(plan[1][1])
             self.assertEqual(plan[1][1], plan[2][1])
+
+    def test_linkage_scope_is_versioned_sorted_and_covers_all_custom_dynamic_elves(self):
+        cases = (
+            ("hotel_reservation", "load-driver", ["/opt/deathstarbench-candidate-driver/luajit/lib/libluajit.so",
+                                                   "/opt/deathstarbench-candidate-driver/luajit/bin/luajit-2.1"],
+             ["/opt/deathstarbench-candidate-driver-other/helper", "/usr/libexec/utempter/utempter"]),
+            ("media_microservices", "media-microservices", ["/usr/local/lib/libthrift.so", "/usr/local/bin/PageService"],
+             ["/usr/local/library/foreign-prefix.so", "/usr/local/bin/unused-helper", "/usr/libexec/utempter/utempter"]),
+            ("media_microservices", "nginx-web-server", ["/usr/local/openresty/lualib/opentracing_bridge_tracer.so",
+                                                         "/usr/local/openresty/nginx/sbin/nginx", "/usr/local/lib/libthrift.so"],
+             ["/usr/local/openresty-other/helper", "/usr/libexec/utempter/utempter"]),
+        )
+        for workload, key, included, excluded in cases:
+            with self.subTest(key=key):
+                identities = linkage_identities(key)
+                for path in [*included, *excluded]:
+                    identities["elf_artifacts"][path] = smoke.elf_identity(elf(dynamic=True), "x86_64")
+                scope, targets = smoke.linkage_policy(workload, key, identities)
+                self.assertEqual(scope, {"revision": "workload-custom-install-roots-v1",
+                                         "required_executables": sorted(smoke.REQUIRED_EXECUTABLES[key]),
+                                         "custom_install_roots": sorted(smoke.LINKAGE_CUSTOM_ROOTS[key])})
+                self.assertEqual(targets, sorted(included))
+                plan = smoke.inspection_plan(workload, key, Path("unused"), identities)
+                self.assertEqual(plan[0], (smoke._ldd_command(sorted(included)), ()))
+
+    def test_linkage_scope_fails_closed_for_missing_required_programs_and_dynamic_scratch_artifacts(self):
+        for case in ("missing", "inventory", "not-runnable", "unsafe-path", "dynamic-scratch", "crossed-workload"):
+            with self.subTest(case=case):
+                identities = linkage_identities("hotel-reservation")
+                workload, key = "hotel_reservation", "hotel-reservation"
+                if case == "missing":
+                    del identities["elf_artifacts"]["/go/bin/frontend"]
+                elif case == "inventory":
+                    identities["required_executables"] = []
+                elif case == "not-runnable":
+                    identities["elf_artifacts"]["/go/bin/frontend"]["runnable"] = False
+                elif case == "unsafe-path":
+                    identities["elf_artifacts"]["/go/bin/../escape"] = smoke.elf_identity(elf(), "x86_64")
+                elif case == "dynamic-scratch":
+                    identities["elf_artifacts"]["/go/bin/unexpected.so"] = smoke.elf_identity(elf(dynamic=True), "x86_64")
+                else:
+                    workload = "media_microservices"
+                with self.assertRaises(smoke.PreparationError):
+                    smoke.linkage_policy(workload, key, identities)
+
+    def test_linkage_checks_reject_nonzero_status_or_unresolved_dependencies(self):
+        for status, output in ((1, "permission denied"), (0, "librequired.so => not found"), (0, "librequired.so => /usr/lib/librequired.so")):
+            with self.subTest(status=status, output=output):
+                command = smoke._ldd_command(["/opt/deathstarbench-candidate-driver/bin/wrk"])
+                command[-1] = 'ldd() { printf "%s\\n" ' + smoke.shlex.quote(output) + '; return ' + str(status) + '; }; ' + command[-1]
+                if status or "not found" in output:
+                    with self.assertRaisesRegex(smoke.PreparationError, "wrk"):
+                        smoke._command(command)
+                else:
+                    self.assertIn(output.encode(), smoke._command(command))
 
     def test_scratch_smoke_uses_only_stopped_owned_container_and_candidate_receipt(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -356,6 +439,8 @@ class SmokeExecutionTests(unittest.TestCase):
             self.assertEqual(receipt["context_sha256"], smoke.tree_sha256(context))
             self.assertEqual(receipt["smoke_execution"]["network"], "none")
             self.assertEqual(receipt["load_driver_attestation"], None)
+            self.assertEqual(receipt["linkage_scope"]["revision"], smoke.LINKAGE_SCOPE_REVISION)
+            self.assertEqual(receipt["linkage_targets"], [])
             self.assertEqual([c[1] for c in commands], ["image", "create", "export", "rm"])
             self.assertIn("--entrypoint=/nonexistent-smoke-not-started", commands[1])
             self.assertEqual(commands[-1], ["docker", "rm", "c" * 64])

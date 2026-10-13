@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from scripts import create_deathstarbench_candidate_image_lock as lock
+from scripts import smoke_deathstarbench_candidate_images as smoke_tool
 from scripts import inspect_deathstarbench_support_images as support
 
 
@@ -265,6 +266,7 @@ class CandidateLockTests(unittest.TestCase):
                 executions = [{"command": command, "stdout": attestation or "", "stdout_sha256": hashlib.sha256((attestation or "").encode()).hexdigest(),
                                "mock_dns": {host: "127.0.0.1" for host in hosts}}
                               for command, hosts in smoke_tool.inspection_plan(workload_id, runtime_key, context, artifacts)]
+                linkage_scope, linkage_targets = smoke_tool.linkage_policy(workload_id, runtime_key, artifacts)
                 smoke = {"schema_version": 1, "candidate_schema": "candidate-image-smoke-v1", "workload_id": workload_id,
                          "image_key": runtime_key, "image": images[platform], "platform": platform, "architecture": lock.ARCHITECTURES[platform],
                          "config_digest": configs[platform], "context_sha256": identity["context_sha256"], "methods": methods,
@@ -274,6 +276,7 @@ class CandidateLockTests(unittest.TestCase):
                          "native_builder": {"platform": platform, "architecture": lock.ARCHITECTURES[platform], "qemu_used": False},
                          "image_config": {"os": "linux", "architecture": platform.split("/")[1], "config_digest": configs[platform]},
                          "load_driver_attestation": attestation, "inspection_executions": executions,
+                         "linkage_scope": linkage_scope, "linkage_targets": linkage_targets,
                          "artifact_identities": artifacts}
                 image_evidence["platforms"][platform] = {"image": images[platform], "build_receipt": build, "smoke_receipt": smoke}
             if context_name == "load_driver":
@@ -474,8 +477,59 @@ class CandidateLockTests(unittest.TestCase):
         receipt = records[0]["images"]["app"]["smoke_receipt"]
         elf = next(iter(receipt["artifact_identities"]["elf_artifacts"].values()))
         elf.update(dynamic_dependencies=True, interpreter="/lib64/ld-linux-x86-64.so.2", static=False)
-        receipt["methods"].append("native-hardened-ldd-all-dynamic-ELFs")
+        receipt["linkage_scope"], receipt["linkage_targets"] = smoke_tool.linkage_policy("media_microservices", "media-microservices", receipt["artifact_identities"])
+        receipt["methods"].append(smoke_tool.LINKAGE_METHOD)
         with self.assertRaisesRegex(lock.CandidateImageLockError, "inspection execution receipts"):
+            self.preflight(evidence, inputs, records)
+
+    def test_linkage_scope_targets_and_method_cannot_override_shared_policy(self):
+        for case in ("missing-scope", "revision", "roots", "required", "missing-target", "extra-target", "ordering", "old-method", "missing-execution"):
+            evidence, *inputs = self.fixture("media_microservices")
+            records = self.native_records(evidence)
+            receipt = records[0]["images"]["app"]["smoke_receipt"]
+            elves = receipt["artifact_identities"]["elf_artifacts"]
+            template = copy.deepcopy(next(iter(elves.values())))
+            template.update(elf_type=3, dynamic_dependencies=True, static=False)
+            for path in ("/usr/local/lib/z.so", "/usr/local/lib/a.so", "/usr/libexec/utempter/utempter"):
+                elves[path] = copy.deepcopy(template)
+            receipt["linkage_scope"], receipt["linkage_targets"] = smoke_tool.linkage_policy("media_microservices", "media-microservices", receipt["artifact_identities"])
+            receipt["methods"].append(smoke_tool.LINKAGE_METHOD)
+            receipt["inspection_executions"] = [{"command": command, "stdout": "", "stdout_sha256": hashlib.sha256(b"").hexdigest(),
+                                                "mock_dns": {host: "127.0.0.1" for host in hosts}}
+                                               for command, hosts in smoke_tool.inspection_plan("media_microservices", "media-microservices", self.workload_path / "app", receipt["artifact_identities"])]
+            self.preflight(evidence, inputs, records)
+            if case == "missing-scope":
+                del receipt["linkage_scope"]
+            elif case == "revision":
+                receipt["linkage_scope"]["revision"] = "all-image-ELFs-v1"
+            elif case == "roots":
+                receipt["linkage_scope"]["custom_install_roots"] = []
+            elif case == "required":
+                receipt["linkage_scope"]["required_executables"] = []
+            elif case == "missing-target":
+                receipt["linkage_targets"].pop()
+            elif case == "extra-target":
+                receipt["linkage_targets"].append("/usr/libexec/utempter/utempter")
+            elif case == "ordering":
+                receipt["linkage_targets"].reverse()
+            elif case == "old-method":
+                receipt["methods"].append("native-hardened-ldd-all-dynamic-ELFs")
+            else:
+                receipt["inspection_executions"] = []
+            with self.subTest(case=case), self.assertRaises(lock.CandidateImageLockError):
+                self.preflight(evidence, inputs, records)
+
+    def test_out_of_scope_os_elf_keeps_architecture_validation_without_ldd(self):
+        evidence, *inputs = self.fixture("hotel_reservation")
+        records = self.native_records(evidence)
+        receipt = records[0]["images"]["load_driver"]["smoke_receipt"]
+        template = copy.deepcopy(next(iter(receipt["artifact_identities"]["elf_artifacts"].values())))
+        template.update(elf_type=3, dynamic_dependencies=True, static=False)
+        receipt["artifact_identities"]["elf_artifacts"]["/usr/libexec/utempter/utempter"] = template
+        self.assertEqual(receipt["linkage_targets"], [])
+        self.preflight(evidence, inputs, records)
+        template.update(machine=183, architecture="aarch64")
+        with self.assertRaisesRegex(lock.CandidateImageLockError, "ELF machine"):
             self.preflight(evidence, inputs, records)
 
     def test_support_preflight_records_candidates_not_binary_or_pull_qualification(self):

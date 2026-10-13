@@ -44,6 +44,20 @@ MEDIA_DEPENDENCY_LICENSES = {
 ARCHITECTURES = {"x86_64": ("linux/amd64", 62), "aarch64": ("linux/arm64", 183)}
 IMAGE_KEYS = {"hotel_reservation": {"hotel-reservation", "load-driver"},
               "media_microservices": {"media-microservices", "nginx-web-server", "load-driver"}}
+REQUIRED_EXECUTABLES = {
+    "hotel-reservation": tuple("/go/bin/" + name for name in HOTEL_PROGRAMS),
+    "media-microservices": tuple("/usr/local/bin/" + name for name in MEDIA_PROGRAMS),
+    "nginx-web-server": ("/usr/local/openresty/nginx/sbin/nginx",),
+    "load-driver": ("/opt/deathstarbench-candidate-driver/bin/wrk",),
+}
+LINKAGE_SCOPE_REVISION = "workload-custom-install-roots-v1"
+LINKAGE_METHOD = "native-hardened-ldd-workload-custom-ELFs-v1"
+LINKAGE_CUSTOM_ROOTS = {
+    "hotel-reservation": ("/go/bin/",),
+    "media-microservices": ("/usr/local/lib/",),
+    "nginx-web-server": ("/usr/local/lib/", "/usr/local/openresty/"),
+    "load-driver": ("/opt/deathstarbench-candidate-driver/",),
+}
 # Reject actual PEM material, not OpenSSL's binary parser-format strings.
 PRIVATE_KEY = re.compile(
     rb"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----\r?\n"
@@ -341,10 +355,7 @@ def _inspect_filesystem(fs: ImageFilesystem, workload: str, key: str, architectu
                 interpreter = fs.read(identity["interpreter"])
                 elf_identity(interpreter, architecture)
             elves["/" + name] = identity
-    required = (["/go/bin/" + p for p in HOTEL_PROGRAMS] if key == "hotel-reservation" else
-                ["/usr/local/bin/" + p for p in MEDIA_PROGRAMS] if key == "media-microservices" else
-                ["/usr/local/openresty/nginx/sbin/nginx"] if key == "nginx-web-server" else
-                ["/opt/deathstarbench-candidate-driver/bin/wrk"])
+    required = list(REQUIRED_EXECUTABLES[key])
     for path in required:
         if path not in elves or not elves[path]["runnable"] or not fs._resolve(path).mode & 0o111:
             raise PreparationError("A required native executable is missing or not executable.")
@@ -362,12 +373,49 @@ def _ldd_command(paths: list[str]) -> list[str]:
             'case "$output" in *"not found"*) exit 1;; esac; done']
 
 
+def linkage_policy(workload: str, key: str, identities: dict) -> tuple[dict, list[str]]:
+    """Bind linkage execution to workload programs and custom install roots.
+
+    All image ELFs are still architecture/key-screened by the export inspector.
+    ldd checks the dependency closure of custom programs/libraries, not unused
+    OS helpers that may intentionally be inaccessible to the benchmark UID.
+    Runtime-loaded frontend modules also have the separate exact require test.
+    """
+    if workload not in IMAGE_KEYS or key not in IMAGE_KEYS[workload]:
+        raise PreparationError("Unsupported candidate workload linkage policy.")
+    required = list(REQUIRED_EXECUTABLES[key])
+    if identities.get("required_executables") != required:
+        raise PreparationError("Linkage policy requires the exact workload executable inventory.")
+    elves = identities.get("elf_artifacts")
+    if not isinstance(elves, dict) or not elves:
+        raise PreparationError("Linkage policy requires the complete inspected ELF inventory.")
+    for path in required:
+        if path not in elves or not isinstance(elves[path], dict) or elves[path].get("runnable") is not True:
+            raise PreparationError("A required linkage executable is missing or not runnable.")
+    roots = sorted(LINKAGE_CUSTOM_ROOTS[key])
+    targets = []
+    for path, value in elves.items():
+        if (not isinstance(path, str) or not path.startswith("/") or PurePosixPath(path).as_posix() != path
+                or ".." in PurePosixPath(path).parts or "\\" in path or "\0" in path
+                or not isinstance(value, dict) or type(value.get("dynamic_dependencies")) is not bool):
+            raise PreparationError("Invalid inspected ELF linkage identity.")
+        if ((path in required or any(path.startswith(root) for root in roots))
+                and (value["dynamic_dependencies"] or value.get("interpreter") is not None)):
+            targets.append(path)
+    targets.sort()
+    if key == "hotel-reservation" and targets:
+        raise PreparationError("Scratch Hotel custom install artifacts must be statically linked.")
+    scope = {"revision": LINKAGE_SCOPE_REVISION, "required_executables": sorted(required),
+             "custom_install_roots": roots}
+    return scope, targets
+
+
 def inspection_plan(workload: str, key: str, context: Path, identities: dict) -> list[tuple[list[str], tuple[str, ...]]]:
     """Return exact, bounded offline commands shared with receipt validation."""
     plan = []
-    dynamic = sorted(path for path, value in identities["elf_artifacts"].items() if value["dynamic_dependencies"])
-    if key != "hotel-reservation" and dynamic:
-        plan.append((_ldd_command(dynamic), ()))
+    _, targets = linkage_policy(workload, key, identities)
+    if targets:
+        plan.append((_ldd_command(targets), ()))
     if key == "nginx-web-server":
         names = tuple(sorted(DISTRIBUTED_WORKLOAD_PROFILES[workload].expected_component_placement))
         hosts = tuple(sorted({*names, *(name + ".deathstarbench-media.svc.cluster.local" for name in names)}))
@@ -446,11 +494,11 @@ def smoke_image(image: str, *, workload_id: str, image_key: str, architecture: s
                 fs.close()
         finally:
             _command(["docker", "rm", container])
-    dynamic = [path for path, value in identities["elf_artifacts"].items() if value["dynamic_dependencies"]]
+    linkage_scope, linkage_targets = linkage_policy(workload_id, image_key, identities)
     if image_key == "hotel-reservation":
         methods.append("scratch-static-linkage-no-service-startup")
-    elif dynamic:
-        methods.append("native-hardened-ldd-all-dynamic-ELFs")
+    elif linkage_targets:
+        methods.append(LINKAGE_METHOD)
     executions = [_run_inspection(image, command, hosts=hosts)
                   for command, hosts in inspection_plan(workload_id, image_key, context, identities)]
     attestation = None
@@ -469,9 +517,11 @@ def smoke_image(image: str, *, workload_id: str, image_key: str, architecture: s
             "smoke_execution": {"passed": True, "network": "none", "read_only": True, "user": "65532:65532",
                                 "drop_capabilities": ["ALL"], "no_new_privileges": True},
             "load_driver_attestation": attestation, "artifact_identities": identities, "inspection_executions": executions,
+            "linkage_scope": linkage_scope, "linkage_targets": linkage_targets,
             "public_crypto_selftest_pem_sha256": public_crypto_selftests,
             "limitations": ["No database/cache/network service was contacted and no dataset or persistent transaction was qualified.",
                             "Scratch Hotel checks inspect binaries without starting seed-mutating application services.",
+                            "Linkage execution covers declared workload programs and custom install roots, not unused OS helpers; all image ELFs still undergo architecture/key screening.",
                             "Only SHA-bound public GnuTLS self-test PEMs inside system-library ELFs are exempted from the unexpected-key screen; these are never application credentials.",
                             "Frontend mock DNS permits syntax/module checks only, not live endpoint connectivity."]}
 

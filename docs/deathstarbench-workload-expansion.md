@@ -159,7 +159,11 @@ expected architecture, and baked configuration, scripts, and licenses are
 hashed against prepared inputs. Hotel's ten scratch binaries must be static;
 they are not started because upstream startup mutates MongoDB. Media's thirteen
 installed C++ binaries (including the undeployed `PageService`) and frontend
-libraries receive native linkage checks. The frontend parses its actual baked
+libraries receive native linkage checks. A versioned linkage scope records the
+sorted workload/custom-library targets; their recursive loader dependencies
+must resolve. Unrelated OS tools are not executed or promoted to workload
+requirements, but still receive the same all-ELF architecture and unexpected-key
+screening. The frontend parses its actual baked
 nginx configuration and loads Lua/Thrift modules with explicit mock DNS, not a
 substitute configuration or live dependencies. Executed checks use user 65532,
 a read-only filesystem, no network, no capabilities, and no-new-privileges.

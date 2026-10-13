@@ -1,3 +1,5 @@
+import copy
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -18,6 +20,7 @@ from app.run_lease import (
     RunLeaseHeldError,
     acquire_run_lease,
     inspect_run_lease,
+    require_acquired_run_lease,
 )
 
 
@@ -554,6 +557,185 @@ class RunLeaseTests(unittest.TestCase):
                         RUN_ID,
                         'qualification-cli',
                     )
+
+    def test_active_acquired_authority_is_repeatable_read_only_and_does_not_relock_retained_fds(self):
+        with acquire_run_lease(self.runs_root, RUN_ID, 'candidate-stage') as lease:
+            before = {path.name: (path.stat().st_ino, path.read_bytes()) for path in
+                      (self.lock_path, self.legacy_lock_path, self.metadata_path)}
+            retained = {lease._file_descriptor, lease._legacy_file_descriptor}
+            real_flock = run_lease.fcntl.flock
+            calls = []
+
+            def observed_flock(descriptor, operation):
+                calls.append((descriptor, operation))
+                return real_flock(descriptor, operation)
+
+            with mock.patch.object(run_lease.fcntl, 'flock', side_effect=observed_flock):
+                self.assertIs(require_acquired_run_lease(lease, RUN_ID), lease)
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(all(fd not in retained for fd, _operation in calls))
+            self.assertTrue(all(operation == run_lease.fcntl.LOCK_EX | run_lease.fcntl.LOCK_NB
+                                for _fd, operation in calls))
+            self.assertEqual({path.name: (path.stat().st_ino, path.read_bytes()) for path in
+                              (self.lock_path, self.legacy_lock_path, self.metadata_path)}, before)
+            self.assertIs(require_acquired_run_lease(lease, RUN_ID), lease)
+            self.assertTrue(inspect_run_lease(self.runs_root, RUN_ID).held)
+
+    def test_manual_copied_and_released_leases_have_no_active_authority(self):
+        with acquire_run_lease(self.runs_root, RUN_ID, 'candidate-stage') as lease:
+            fake = run_lease.RunLease(file_descriptor=-1, legacy_file_descriptor=-1,
+                                      path=lease.path, owner=lease.owner)
+            borrowed = run_lease.RunLease(file_descriptor=lease._file_descriptor,
+                                          legacy_file_descriptor=lease._legacy_file_descriptor,
+                                          path=lease.path, owner=lease.owner)
+            for value in (None, {}, fake, borrowed, copy.copy(lease)):
+                with self.subTest(value=type(value).__name__), self.assertRaises(RunLeaseError):
+                    require_acquired_run_lease(value, RUN_ID)
+            self.assertIs(require_acquired_run_lease(lease, RUN_ID), lease)
+        with self.assertRaisesRegex(RunLeaseError, 'released'):
+            require_acquired_run_lease(lease, RUN_ID)
+
+    def test_crossed_run_and_owner_fields_cannot_borrow_acquired_authority(self):
+        with acquire_run_lease(self.runs_root, RUN_ID, 'candidate-stage') as lease:
+            for run_id in ('000000000001', RUN_ID.upper(), None):
+                with self.subTest(run_id=run_id), self.assertRaises(RunLeaseError):
+                    require_acquired_run_lease(lease, run_id)
+            original = lease.owner
+            for owner in (
+                replace(original, owner_label='changed-owner'), replace(original, run_id='000000000001'),
+                replace(original, pid=original.pid + 1), replace(original, pid=True),
+                replace(original, schema_version=True), replace(original, acquired_at='invalid'),
+            ):
+                lease.owner = owner
+                with self.subTest(owner=owner), self.assertRaises(RunLeaseError):
+                    require_acquired_run_lease(lease, RUN_ID)
+            lease.owner = original
+            self.assertIs(require_acquired_run_lease(lease, RUN_ID), lease)
+
+    def test_modified_descriptor_path_or_mutex_is_rejected_without_changing_the_lock(self):
+        with acquire_run_lease(self.runs_root, RUN_ID, 'candidate-stage') as lease:
+            for field, changed in (
+                ('_file_descriptor', -1), ('_file_descriptor', True),
+                ('_legacy_file_descriptor', lease._file_descriptor),
+                ('path', self.run_directory / 'not-the-lease'),
+                ('path', self.runs_root / '000000000001' / RUN_LEASE_FILENAME),
+                ('_release_lock', threading.Lock()),
+            ):
+                original = getattr(lease, field)
+                setattr(lease, field, changed)
+                try:
+                    with self.subTest(field=field), self.assertRaises(RunLeaseError):
+                        require_acquired_run_lease(lease, RUN_ID)
+                finally:
+                    setattr(lease, field, original)
+            self.assertIs(require_acquired_run_lease(lease, RUN_ID), lease)
+            self.assertTrue(inspect_run_lease(self.runs_root, RUN_ID).held)
+
+    def test_lock_or_metadata_inode_replacement_and_unsafe_modes_reject_authority(self):
+        for filename in (RUN_LEASE_FILENAME, LEGACY_AZURE_QUALIFICATION_LOCK_FILENAME, RUN_LEASE_METADATA_FILENAME):
+            with self.subTest(filename=filename):
+                with acquire_run_lease(self.runs_root, RUN_ID, 'candidate-stage') as lease:
+                    path = self.run_directory / filename
+                    retained = self.run_directory / (filename + '.retained')
+                    payload = path.read_bytes()
+                    path.rename(retained)
+                    path.write_bytes(payload)
+                    path.chmod(0o600)
+                    with self.assertRaises(RunLeaseError):
+                        require_acquired_run_lease(lease, RUN_ID)
+                    path.unlink()
+                    retained.rename(path)
+                    self.assertIs(require_acquired_run_lease(lease, RUN_ID), lease)
+                with acquire_run_lease(self.runs_root, RUN_ID, 'candidate-stage') as lease:
+                    path.chmod(0o644)
+                    with self.assertRaisesRegex(RunLeaseError, '0600'):
+                        require_acquired_run_lease(lease, RUN_ID)
+                    path.chmod(0o600)
+
+    def test_owner_metadata_missing_or_changed_is_not_repaired(self):
+        with acquire_run_lease(self.runs_root, RUN_ID, 'candidate-stage') as lease:
+            original = self.metadata_path.read_bytes()
+            self.metadata_path.write_bytes(b'corrupt-owner-metadata')
+            with self.assertRaises(RunLeaseError):
+                require_acquired_run_lease(lease, RUN_ID)
+            self.assertEqual(self.metadata_path.read_bytes(), b'corrupt-owner-metadata')
+            self.metadata_path.write_bytes(original)
+            self.assertIs(require_acquired_run_lease(lease, RUN_ID), lease)
+            retained = self.run_directory / 'retained-owner'
+            self.metadata_path.rename(retained)
+            with self.assertRaises(RunLeaseError):
+                require_acquired_run_lease(lease, RUN_ID)
+            self.assertFalse(self.metadata_path.exists())
+            retained.rename(self.metadata_path)
+
+    def test_unlocked_shared_or_legacy_descriptor_cannot_be_reauthorized_by_a_probe(self):
+        for field, path in (('_file_descriptor', self.lock_path), ('_legacy_file_descriptor', self.legacy_lock_path)):
+            with self.subTest(field=field), acquire_run_lease(self.runs_root, RUN_ID, 'candidate-stage') as lease:
+                run_lease.fcntl.flock(getattr(lease, field), run_lease.fcntl.LOCK_UN)
+                with self.assertRaisesRegex(RunLeaseError, 'no longer held'):
+                    require_acquired_run_lease(lease, RUN_ID)
+                descriptor = os.open(path, os.O_RDWR)
+                try:
+                    # The validator did not repair the retained descriptor or
+                    # leave its separate transient probe lock behind.
+                    self.assertTrue(run_lease._try_lock(descriptor, run_id=RUN_ID))
+                finally:
+                    os.close(descriptor)
+
+    def test_closed_retained_descriptor_is_rejected(self):
+        lease = acquire_run_lease(self.runs_root, RUN_ID, 'candidate-stage')
+        os.close(lease._file_descriptor)  # Test-only external descriptor corruption.
+        with self.assertRaises(RunLeaseError):
+            require_acquired_run_lease(lease, RUN_ID)
+        with self.assertRaises(RunLeaseError):
+            lease.release()
+        self.assertTrue(lease.released)
+        self.assertFalse(inspect_run_lease(self.runs_root, RUN_ID).held)
+
+    def test_validation_serializes_with_release_without_granting_authority_after_release(self):
+        lease = acquire_run_lease(self.runs_root, RUN_ID, 'candidate-stage')
+        entered, proceed, releasing, released = (threading.Event() for _ in range(4))
+        failures = []
+        real_probe = run_lease._require_held_authority_file
+
+        def paused_probe(*arguments, **keywords):
+            if not entered.is_set():
+                entered.set()
+                if not proceed.wait(3):
+                    raise RuntimeError('test probe did not resume')
+            return real_probe(*arguments, **keywords)
+
+        def validate():
+            try:
+                require_acquired_run_lease(lease, RUN_ID)
+            except BaseException as exc:
+                failures.append(exc)
+
+        def release():
+            releasing.set()
+            try:
+                lease.release()
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                released.set()
+
+        with mock.patch.object(run_lease, '_require_held_authority_file', side_effect=paused_probe):
+            validator = threading.Thread(target=validate)
+            validator.start()
+            self.assertTrue(entered.wait(3))
+            releaser = threading.Thread(target=release)
+            releaser.start()
+            self.assertTrue(releasing.wait(3))
+            self.assertFalse(released.wait(0.05), 'Release must wait for validation mutex')
+            proceed.set()
+            validator.join(3)
+            releaser.join(3)
+        self.assertFalse(validator.is_alive() or releaser.is_alive())
+        self.assertEqual(failures, [])
+        self.assertTrue(released.is_set())
+        with self.assertRaisesRegex(RunLeaseError, 'released'):
+            require_acquired_run_lease(lease, RUN_ID)
 
 
 if __name__ == '__main__':

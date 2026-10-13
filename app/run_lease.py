@@ -33,6 +33,7 @@ import stat
 import threading
 from typing import Any, Mapping
 import uuid
+import weakref
 
 try:  # pragma: no cover - exercised only on unsupported platforms.
     import fcntl
@@ -170,6 +171,241 @@ class RunLease:
 
     def __exit__(self, _exc_type, _exc, _traceback) -> None:
         self.release()
+
+
+@dataclass(frozen=True)
+class _AcquiredLeaseProof:
+    """Factory-only process-local capability; never reconstructed from metadata."""
+
+    path: Path
+    canonical_path: Path
+    directory_identity: tuple[int, int]
+    file_descriptor: int
+    legacy_file_descriptor: int
+    file_identity: tuple[int, int]
+    legacy_file_identity: tuple[int, int]
+    metadata_identity: tuple[int, int]
+    owner_metadata: bytes
+    pid: int
+    release_lock: Any
+
+
+# Keying authority by the actual returned object rejects hand-made instances
+# and shallow copies even when they borrow genuine fields/descriptors. Weak
+# keys do not keep released objects alive or add any lock-file lifecycle.
+_ACQUIRED_LEASE_PROOFS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_ACQUIRED_LEASE_PROOFS_LOCK = threading.Lock()
+
+
+def _authority_file(
+    directory_descriptor: int,
+    filename: str,
+    *,
+    run_id: str,
+    label: str,
+) -> tuple[int, os.stat_result]:
+    """Open an existing regular authority file without following or blocking."""
+
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            filename,
+            os.O_RDWR | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0),
+            dir_fd=directory_descriptor,
+        )
+        details = _validate_private_regular_file(descriptor, run_id=run_id, label=label)
+        named = os.stat(filename, dir_fd=directory_descriptor, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(named.st_mode)
+            or (named.st_dev, named.st_ino) != (details.st_dev, details.st_ino)
+        ):
+            raise RunLeaseError(f'The {label} for {run_id} changed while opening.')
+        return descriptor, details
+    except BaseException as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        if isinstance(exc, OSError):
+            raise RunLeaseError(f'Unable to open the exact {label} for {run_id}: {exc}') from exc
+        raise
+
+
+def _record_acquired_lease(lease: RunLease, directory_descriptor: int) -> None:
+    """Capture original relationships after acquisition, without extra locks."""
+
+    run_id = lease.owner.run_id
+    shared = _validate_private_regular_file(lease._file_descriptor, run_id=run_id, label='run lease')
+    legacy = _validate_private_regular_file(lease._legacy_file_descriptor, run_id=run_id, label='legacy qualification lock')
+    directory = os.fstat(directory_descriptor)
+    if shared.st_size != 0 or legacy.st_size != 0:
+        raise RunLeaseError(f'The acquired lock files for {run_id} must remain empty.')
+    try:
+        canonical_path = lease.path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise RunLeaseError(f'The acquired run lease path for {run_id} is not canonical.') from exc
+    for filename, retained in (
+        (RUN_LEASE_FILENAME, shared),
+        (LEGACY_AZURE_QUALIFICATION_LOCK_FILENAME, legacy),
+    ):
+        descriptor, opened = _authority_file(directory_descriptor, filename, run_id=run_id, label='acquired lock')
+        try:
+            if (opened.st_dev, opened.st_ino) != (retained.st_dev, retained.st_ino):
+                raise RunLeaseError(f'The acquired lock path for {run_id} changed before publication.')
+        finally:
+            os.close(descriptor)
+    metadata_descriptor, metadata = _authority_file(
+        directory_descriptor, RUN_LEASE_METADATA_FILENAME,
+        run_id=run_id, label='run lease owner metadata',
+    )
+    try:
+        owner = _read_owner_metadata_from_descriptor(metadata_descriptor, run_id=run_id)
+        if owner != lease.owner:
+            raise RunLeaseError(f'The acquired run lease owner for {run_id} changed.')
+    finally:
+        os.close(metadata_descriptor)
+    proof = _AcquiredLeaseProof(
+        path=lease.path, canonical_path=canonical_path,
+        directory_identity=(directory.st_dev, directory.st_ino),
+        file_descriptor=lease._file_descriptor,
+        legacy_file_descriptor=lease._legacy_file_descriptor,
+        file_identity=(shared.st_dev, shared.st_ino),
+        legacy_file_identity=(legacy.st_dev, legacy.st_ino),
+        metadata_identity=(metadata.st_dev, metadata.st_ino),
+        owner_metadata=_canonical_metadata(owner), pid=os.getpid(),
+        release_lock=lease._release_lock,
+    )
+    with _ACQUIRED_LEASE_PROOFS_LOCK:
+        _ACQUIRED_LEASE_PROOFS[lease] = proof
+
+
+def _require_held_authority_file(
+    directory_descriptor: int,
+    filename: str,
+    identity: tuple[int, int],
+    *,
+    run_id: str,
+) -> None:
+    """Probe a separate open description; never relock a retained descriptor."""
+
+    descriptor, details = _authority_file(directory_descriptor, filename, run_id=run_id, label='acquired lock')
+    try:
+        if (details.st_dev, details.st_ino) != identity or details.st_size != 0:
+            raise RunLeaseError(f'The acquired lock inode for {run_id} changed.')
+        if _try_lock(descriptor, run_id=run_id):
+            # Closing only this fresh descriptor releases its transient probe
+            # lock. Acquiring a probe never repairs or authorizes the lease.
+            raise RunLeaseError(f'The factory-acquired lock for {run_id} is no longer held.')
+    finally:
+        os.close(descriptor)
+
+
+def _require_authority_metadata(
+    directory_descriptor: int,
+    proof: _AcquiredLeaseProof,
+    *,
+    run_id: str,
+) -> None:
+    descriptor, details = _authority_file(
+        directory_descriptor, RUN_LEASE_METADATA_FILENAME,
+        run_id=run_id, label='run lease owner metadata',
+    )
+    try:
+        if (details.st_dev, details.st_ino) != proof.metadata_identity:
+            raise RunLeaseError(f'The acquired owner-metadata inode for {run_id} changed.')
+        observed = _read_owner_metadata_from_descriptor(descriptor, run_id=run_id)
+        if _canonical_metadata(observed) != proof.owner_metadata:
+            raise RunLeaseError(f'The acquired owner metadata for {run_id} changed.')
+    finally:
+        os.close(descriptor)
+
+
+def require_acquired_run_lease(lease: RunLease, run_id: str) -> RunLease:
+    """Require this process's original active acquired capability for a run.
+
+    This is an additive authorization boundary, not ``inspect_run_lease`` and
+    not a substitute for retaining the lease throughout the caller's operation.
+    Validation holds the original release mutex, checks original descriptor,
+    path/inode/owner relationships, and expects separate lock probes to block.
+    It never relocks/unlocks retained descriptors, changes owner metadata, or
+    creates/deletes/repairs lease files. Existing constructors remain source
+    compatible, but manually constructed/copied objects have no authority.
+    """
+
+    _require_posix_support()
+    try:
+        run_id = _validate_run_id(run_id)
+    except ValueError as exc:
+        raise RunLeaseError('An exact run ID is required for acquired lease authority.') from exc
+    if type(lease) is not RunLease:
+        raise RunLeaseError('An original factory-acquired RunLease is required.')
+    with _ACQUIRED_LEASE_PROOFS_LOCK:
+        proof = _ACQUIRED_LEASE_PROOFS.get(lease)
+    if proof is None:
+        raise RunLeaseError('A manually constructed or copied RunLease has no acquired authority.')
+    with proof.release_lock:
+        if lease._release_lock is not proof.release_lock or lease._released is not False:
+            raise RunLeaseError('The acquired run lease is released or its synchronization changed.')
+        if proof.pid != os.getpid() or type(lease.owner) is not RunLeaseOwner:
+            raise RunLeaseError('Acquired lease authority belongs to another process or owner.')
+        try:
+            owner = _parse_owner_metadata(_canonical_metadata(lease.owner), expected_run_id=run_id)
+        except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
+            raise RunLeaseError('The retained acquired lease owner is invalid.') from exc
+        if owner.pid != os.getpid() or _canonical_metadata(owner) != proof.owner_metadata:
+            raise RunLeaseError('The acquired lease owner or run identity changed.')
+        if (
+            not isinstance(lease.path, Path) or lease.path != proof.path
+            or lease.path.name != RUN_LEASE_FILENAME or lease.path.parent.name != run_id
+        ):
+            raise RunLeaseError('The acquired lease path conflicts with its exact run identity.')
+        for descriptor, original, identity, label in (
+            (lease._file_descriptor, proof.file_descriptor, proof.file_identity, 'run lease'),
+            (lease._legacy_file_descriptor, proof.legacy_file_descriptor, proof.legacy_file_identity, 'legacy qualification lock'),
+        ):
+            if type(descriptor) is not int or descriptor < 0 or descriptor != original:
+                raise RunLeaseError(f'The retained {label} descriptor changed.')
+            details = _validate_private_regular_file(descriptor, run_id=run_id, label=label)
+            if (details.st_dev, details.st_ino) != identity or details.st_size != 0:
+                raise RunLeaseError(f'The retained {label} inode changed.')
+        try:
+            if lease.path.resolve(strict=True) != proof.canonical_path:
+                raise RunLeaseError('The acquired lease canonical path changed.')
+            directory_descriptor, _path = _open_run_directory(proof.canonical_path.parent.parent, run_id)
+        except (OSError, RuntimeError) as exc:
+            if isinstance(exc, RunLeaseError):
+                raise
+            raise RunLeaseError('The acquired lease canonical path cannot be verified.') from exc
+        try:
+            directory = os.fstat(directory_descriptor)
+            if (directory.st_dev, directory.st_ino) != proof.directory_identity:
+                raise RunLeaseError('The acquired run-directory inode changed.')
+            _require_authority_metadata(directory_descriptor, proof, run_id=run_id)
+            for filename, identity in (
+                (RUN_LEASE_FILENAME, proof.file_identity),
+                (LEGACY_AZURE_QUALIFICATION_LOCK_FILENAME, proof.legacy_file_identity),
+            ):
+                _require_held_authority_file(directory_descriptor, filename, identity, run_id=run_id)
+            _require_authority_metadata(directory_descriptor, proof, run_id=run_id)
+            # A renamed/replaced path must not leave authority pointing at the
+            # detached inode observed through an already-open directory FD.
+            named_directory = os.stat(proof.canonical_path.parent, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(named_directory.st_mode)
+                or (named_directory.st_dev, named_directory.st_ino) != proof.directory_identity
+            ):
+                raise RunLeaseError('The acquired run-directory path changed during validation.')
+            for filename, identity in (
+                (RUN_LEASE_FILENAME, proof.file_identity),
+                (LEGACY_AZURE_QUALIFICATION_LOCK_FILENAME, proof.legacy_file_identity),
+                (RUN_LEASE_METADATA_FILENAME, proof.metadata_identity),
+            ):
+                named = os.stat(filename, dir_fd=directory_descriptor, follow_symlinks=False)
+                if not stat.S_ISREG(named.st_mode) or (named.st_dev, named.st_ino) != identity:
+                    raise RunLeaseError('An acquired authority path changed during validation.')
+        except OSError as exc:
+            raise RunLeaseError('The acquired lease filesystem identity cannot be verified.') from exc
+        finally:
+            os.close(directory_descriptor)
+    return lease
 
 
 def _require_posix_support() -> None:
@@ -866,6 +1102,7 @@ def acquire_run_lease(
             path=run_directory / RUN_LEASE_FILENAME,
             owner=owner,
         )
+        _record_acquired_lease(lease, directory_descriptor)
         descriptor = None
         legacy_descriptor = None
         locked = False
@@ -959,4 +1196,5 @@ __all__ = [
     'RunLeaseStatus',
     'acquire_run_lease',
     'inspect_run_lease',
+    'require_acquired_run_lease',
 ]

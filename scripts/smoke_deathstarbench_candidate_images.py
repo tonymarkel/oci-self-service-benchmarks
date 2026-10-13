@@ -422,7 +422,9 @@ def inspection_plan(workload: str, key: str, context: Path, identities: dict) ->
         plan.append((["/usr/local/openresty/bin/openresty", "-t"], hosts))
         modules = [p.stem for p in sorted((context / "runtime/gen-lua").glob("*.lua"))]
         lua = 'package.path="/gen-lua/?.lua;/usr/local/openresty/nginx/lua-scripts/?.lua;"..package.path; '
-        lua += '; '.join('assert(require(' + json.dumps(module) + '))' for module in ["Thrift", "liblualongnumber", "json", "resty.jwt", "opentracing_bridge_tracer", *modules])
+        # TBinaryProtocol imports the native byte-packing/bitwise helpers in
+        # their actual Lua host. ldd alone cannot resolve host-provided symbols.
+        lua += '; '.join('assert(require(' + json.dumps(module) + '))' for module in ["Thrift", "TBinaryProtocol", "libluabpack", "libluabitwise", "liblualongnumber", "json", "resty.jwt", "opentracing_bridge_tracer", *modules])
         plan.append((["/usr/local/openresty/bin/resty", "-e", lua], hosts))
     elif key == "load-driver":
         plan.append((["/opt/deathstarbench-candidate-driver/bin/entrypoint", "attest"], ()))

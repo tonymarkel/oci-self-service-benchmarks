@@ -255,7 +255,7 @@ class CandidateLockTests(unittest.TestCase):
                 if runtime_key == "hotel-reservation":
                     methods.append("scratch-static-linkage-no-service-startup")
                 elif runtime_key == "nginx-web-server":
-                    methods.extend(["baked-nginx-config-syntax-with-explicit-mock-DNS", "baked-Lua-Thrift-module-loading-no-service-methods"])
+                    methods.extend(["baked-Media-excluded-client-absence-v1", "baked-nginx-config-syntax-with-explicit-mock-DNS", "baked-Lua-Thrift-module-loading-no-service-methods"])
                 elif runtime_key == "load-driver":
                     methods.append("candidate-driver-offline-hardened-attestation")
                 attestation = marker(driver_document) if context_name == "load_driver" else None
@@ -453,7 +453,7 @@ class CandidateLockTests(unittest.TestCase):
             self.preflight(evidence, inputs, records)
 
     def test_frontend_method_labels_cannot_replace_exact_executed_checks(self):
-        for case in ("missing", "command", "mock_dns", "lua_module", "dependency_notice"):
+        for case in ("missing", "command", "mock_dns", "lua_module", "dependency_notice", "excluded-client-check"):
             evidence, *inputs = self.fixture("media_microservices")
             records = self.native_records(evidence)
             receipt = records[0]["images"]["frontend"]["smoke_receipt"]
@@ -465,6 +465,8 @@ class CandidateLockTests(unittest.TestCase):
                 receipt["inspection_executions"][0]["mock_dns"] = {}
             elif case == "lua_module":
                 receipt["inspection_executions"][1]["command"][-1] = "assert(true)"
+            elif case == "excluded-client-check":
+                receipt["methods"].remove("baked-Media-excluded-client-absence-v1")
             else:
                 notice = next(iter(receipt["artifact_identities"]["dependency_license_sha256"]))
                 del receipt["artifact_identities"]["dependency_license_sha256"][notice]

@@ -274,6 +274,11 @@ def _workload_preparation(root: Path, workload_id: str) -> tuple[dict, dict]:
         _equal(document.get("original_anchor_sha256"), media.UPSTREAM_ANCHORS, "Media original anchors")
         _hex(document.get("original_source_tree_sha256"), "Media original source tree")
         _equal(document.get("runtime_source_baked_into_images"), True, "Media baked source")
+        _equal(document.get("frontend_source_exclusions"), media.frontend_source_exclusion_receipt(), "Media frontend source exclusions")
+        try:
+            media.validate_frontend_source_exclusions(root / "frontend")
+        except (PreparationError, OSError) as exc:
+            raise CandidateImageLockError("Invalid Media frontend source exclusions or Lua references.") from exc
         for key, expected in {"immutable_base_images_verified": True, "build_source_archives_checksum_pinned": True,
                               "build_network_required": True, "native_build_required": True, "portable_cpu_build": True,
                               "frontend_runtime_writable_paths": ["/tmp"],
@@ -553,7 +558,7 @@ def _artifact_receipt(receipt: dict, workload_id: str, runtime_key: str, platfor
     elif linkage_targets:
         expected_methods.add(LINKAGE_METHOD)
     if runtime_key == "nginx-web-server":
-        expected_methods.update({"baked-nginx-config-syntax-with-explicit-mock-DNS", "baked-Lua-Thrift-module-loading-no-service-methods"})
+        expected_methods.update({"baked-Media-excluded-client-absence-v1", "baked-nginx-config-syntax-with-explicit-mock-DNS", "baked-Lua-Thrift-module-loading-no-service-methods"})
     if runtime_key == "load-driver":
         expected_methods.add("candidate-driver-offline-hardened-attestation")
     _require(methods == expected_methods and len(receipt["methods"]) == len(methods),

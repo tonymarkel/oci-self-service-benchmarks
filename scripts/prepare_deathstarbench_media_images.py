@@ -32,11 +32,25 @@ from scripts.prepare_deathstarbench_social_images import (
 
 SOURCE_ROOT = "mediaMicroservices"
 NAMESPACE = "deathstarbench-media"
-PREPARATION_REVISION = "media-microservices-6ecb097-contexts-candidate-v2"
+PREPARATION_REVISION = "media-microservices-6ecb097-contexts-candidate-v3"
 INITIALIZER_REVISION = "media-microservices-6ecb097-initializer-candidate-v1"
 LICENSE_NAME = "LICENSE.deathstarbench"
 LICENSE_DESTINATION = "/usr/share/licenses/deathstarbench/LICENSE"
 BUILD_ASSETS = Path(__file__).resolve().parent / "assets/deathstarbench/media"
+FRONTEND_SOURCE_EXCLUSION_REVISION = "unused-global-api-lua-clients-v1"
+# These are obsolete global-API Lua stubs, not the C++ backend services. The
+# pinned frontend handlers use the other, locally imported/returned clients.
+# Their exact source hashes remain anchored and the copied Lua tree must not
+# reference them, including dynamically assembled imports using these names.
+FRONTEND_EXCLUDED_CLIENT_PATHS = (
+    "gen-lua/media_service_ComposeReviewService.lua",
+    "gen-lua/media_service_RatingService.lua",
+    "gen-lua/media_service_ReviewStorageService.lua",
+)
+FRONTEND_SOURCE_EXCLUSION_REASON = (
+    "Unused legacy global-API Lua client incompatible with the pinned table-exporting Thrift runtime; "
+    "no prepared frontend Lua references it, and its C++ backend service remains included."
+)
 
 # Verified against the official Docker registry's raw manifest bytes. The
 # immutable index selects the corresponding native platform image; tags are
@@ -88,6 +102,9 @@ UPSTREAM_ANCHORS = {
     f"{SOURCE_ROOT}/helm-chart/mediamicroservices/templates/configs/nginx/nginx.tpl": "31c1d9359964c80daadc0649e1dcbc7573b370739d038452749cbf0799e79889",
     f"{SOURCE_ROOT}/nginx-web-server/jaeger-config.json": "a92a36fc877c8b3e1967c5c543cc7030f72c0659320ab7108a70a0f2e0b19703",
     f"{SOURCE_ROOT}/nginx-web-server/lua-scripts/wrk2-api/movie-info/write.lua": "8872cc5830aedb4c3641eb31fadb3661e9e0816d6f8c0bef692a586e9cee50ce",
+    f"{SOURCE_ROOT}/gen-lua/media_service_ComposeReviewService.lua": "b7e274625bc3eb5a9c7412d7281c998c971c6809bb5b4c7a780e8a8a2ab0d09c",
+    f"{SOURCE_ROOT}/gen-lua/media_service_RatingService.lua": "7dd9be0184ee05dbb48bf8d7bf9fe43bcaceaf7cf11ca6b879a4aa5f9f6a1e47",
+    f"{SOURCE_ROOT}/gen-lua/media_service_ReviewStorageService.lua": "0d81b9d83ecd42b150e90072d3a2e9a8e74e048df17cb76927a4aca1e9558661",
     f"{SOURCE_ROOT}/scripts/write_movie_info.py": "de6f06f7e809361b00cfa33f40365a0d5ae7f84a69bd5d2120d63eadcd91b938",
     f"{SOURCE_ROOT}/scripts/register_users.sh": "0de03dd5bfb1e786dd0fb766d137dd20b4b505694c17be3b793206b360519c56",
     f"{SOURCE_ROOT}/scripts/register_movies.sh": "911554a01a5af5fe5a8358cdfa5473aa8662058e66627dac29d028328162c0b5",
@@ -141,6 +158,37 @@ def _write_build_inputs(destination: Path) -> None:
 
 def _read(upstream: Path, relative: str) -> str:
     return (upstream / SOURCE_ROOT / relative).read_text(encoding="utf-8")
+
+
+def frontend_source_exclusion_receipt() -> dict[str, object]:
+    """Return the exact source-bound exclusions, never a smoke exception."""
+    return {"revision": FRONTEND_SOURCE_EXCLUSION_REVISION,
+            "files": [{"original_path": f"{SOURCE_ROOT}/{relative}",
+                       "original_sha256": UPSTREAM_ANCHORS[f"{SOURCE_ROOT}/{relative}"],
+                       "excluded_prepared_path": f"frontend/runtime/{relative}",
+                       "module": Path(relative).stem, "reason": FRONTEND_SOURCE_EXCLUSION_REASON}
+                      for relative in sorted(FRONTEND_EXCLUDED_CLIENT_PATHS)]}
+
+
+def validate_frontend_source_exclusions(frontend: Path) -> None:
+    """Fail closed if a removed stub is restored, aliased, or referenced."""
+    if frontend.is_symlink() or not frontend.is_dir():
+        raise PreparationError("Media frontend source-exclusion validation needs a regular context.")
+    for relative in FRONTEND_EXCLUDED_CLIENT_PATHS:
+        excluded = frontend / "runtime" / relative
+        if excluded.exists() or excluded.is_symlink():
+            raise PreparationError("An excluded legacy Media Lua client remains in the frontend context.")
+    # No symlinks exist in the pinned copied frontend. Reject new aliases so a
+    # Lua file or directory cannot evade this complete regular-file scan.
+    references = tuple(Path(relative).stem.removeprefix("media_service_").encode()
+                       for relative in FRONTEND_EXCLUDED_CLIENT_PATHS)
+    for path in sorted(frontend.rglob("*")):
+        if path.is_symlink():
+            raise PreparationError("A frontend source alias could evade the excluded-client reference screen.")
+        if path.is_file() and path.suffix.lower() == ".lua":
+            raw = path.read_bytes()
+            if any(reference in raw for reference in references):
+                raise PreparationError(f"Prepared frontend Lua references an excluded legacy client: {path.relative_to(frontend)}")
 
 
 def _copy_file(upstream: Path, relative: str, destination: Path) -> None:
@@ -262,7 +310,8 @@ def _write_frontend(upstream: Path, destination: Path) -> None:
     )
     _license(upstream, destination)
     runtime = destination / "runtime"
-    copy_tracked_tree(upstream, f"{SOURCE_ROOT}/gen-lua", runtime / "gen-lua")
+    copy_tracked_tree(upstream, f"{SOURCE_ROOT}/gen-lua", runtime / "gen-lua",
+                      exclude=tuple(Path(relative).name for relative in FRONTEND_EXCLUDED_CLIENT_PATHS))
     copy_tracked_tree(upstream, f"{SOURCE_ROOT}/nginx-web-server/lua-scripts", runtime / "lua-scripts")
     handler = runtime / "lua-scripts/wrk2-api/movie-info/write.lua"
     handler.write_text(replace_exact(
@@ -314,6 +363,7 @@ def _write_frontend(upstream: Path, destination: Path) -> None:
         + _labels()
     )
     (destination / "Dockerfile.candidate").write_text(source, encoding="utf-8")
+    validate_frontend_source_exclusions(destination)
 
 
 def _patch_initializer(text: str) -> str:
@@ -418,6 +468,7 @@ def prepare_contexts(upstream: Path, output: Path) -> dict[str, object]:
             "original_source_tree_sha256": tree_sha256(upstream / SOURCE_ROOT),
             "original_anchor_sha256": dict(UPSTREAM_ANCHORS),
             "prepared_source_receipts": source_receipts,
+            "frontend_source_exclusions": frontend_source_exclusion_receipt(),
             "runtime_git_clone": False, "runtime_source_baked_into_images": True,
             "byte_reproducible_rebuild": False,
             "immutable_base_images_verified": True,

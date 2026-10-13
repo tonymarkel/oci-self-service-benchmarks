@@ -274,6 +274,35 @@ class ImageFilesystemTests(unittest.TestCase):
             with self.assertRaisesRegex(smoke.PreparationError, "license/notice"):
                 smoke._inspect_filesystem(missing, "media_microservices", "nginx-web-server", "x86_64", context, {})
 
+    def test_excluded_media_clients_cannot_hide_in_image_or_virtual_aliases(self):
+        for case in ("file", "dangling-link", "cycle", "aliased-parent", "directory"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                context, files = media_fixture(root, "nginx-web-server")
+                target = "gen-lua/media_service_ComposeReviewService.lua"
+                if case == "aliased-parent":
+                    files = {("actual-gen/" + name.removeprefix("gen-lua/") if name.startswith("gen-lua/") else name): value
+                             for name, value in files.items()}
+                    link = tarfile.TarInfo("gen-lua")
+                    link.type, link.linkname = tarfile.SYMTYPE, "/actual-gen"
+                    files["gen-lua"] = link
+                    files["actual-gen/media_service_ComposeReviewService.lua"] = b"legacy client"
+                elif case in ("dangling-link", "cycle"):
+                    link = tarfile.TarInfo(target)
+                    link.type, link.linkname = tarfile.SYMTYPE, ("missing.lua" if case == "dangling-link" else "media_service_ComposeReviewService.lua")
+                    files[target] = link
+                elif case == "directory":
+                    inode = tarfile.TarInfo(target)
+                    inode.type = tarfile.DIRTYPE
+                    files[target] = inode
+                else:
+                    files[target] = b"legacy client"
+                archive(root / "image.tar", files)
+                fs = smoke.ImageFilesystem(root / "image.tar")
+                self.addCleanup(fs.close)
+                with self.assertRaisesRegex(smoke.PreparationError, "obsolete Media Lua client"):
+                    smoke._inspect_filesystem(fs, "media_microservices", "nginx-web-server", "x86_64", context, {})
+
     def test_wrong_arch_missing_binary_dynamic_hotel_config_drift_and_private_key_fail(self):
         for mutation in ("wrong-arch", "missing", "dynamic", "config", "key", "runtime-clone"):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:

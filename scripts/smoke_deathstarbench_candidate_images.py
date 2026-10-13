@@ -72,6 +72,10 @@ CLONE = re.compile(r"\bgit\s+(?:-[^\s]+\s+)*(?:clone|pull|fetch)\b")
 MAX_FILE_BYTES = 256 * 1024 * 1024
 
 
+class MissingImageFile(PreparationError):
+    """A virtual container path has no inode, not an unsafe/broken lookup."""
+
+
 def _command(arguments: list[str], *, timeout: int = 120, stdout_file=None) -> bytes:
     try:
         result = subprocess.run(arguments, check=True, stdout=stdout_file or subprocess.PIPE,
@@ -115,7 +119,7 @@ class ImageFilesystem:
     def close(self):
         self.archive.close()
 
-    def _resolve(self, name: str) -> tarfile.TarInfo:
+    def _resolve(self, name: str, *, follow_leaf: bool = True) -> tarfile.TarInfo:
         name = _normalized(name.lstrip("/"))
         for _ in range(40):
             parts = name.split("/")
@@ -126,10 +130,10 @@ class ImageFilesystem:
                          if "/".join(parts[:i]) in self.members
                          and (self.members["/".join(parts[:i])].issym()
                               or self.members["/".join(parts[:i])].islnk())), None)
-            if link is None:
+            if link is None or (not follow_leaf and not link[2]):
                 member = self.members.get(name)
                 if member is None:
-                    raise PreparationError("Required baked file is missing from the image.")
+                    raise MissingImageFile("Required baked file is missing from the image.")
                 return member
             link_name, member, suffix = link
             target = member.linkname
@@ -319,6 +323,15 @@ def _inspect_filesystem(fs: ImageFilesystem, workload: str, key: str, architectu
         files[path] = hashlib.sha256(raw).hexdigest()
         if path.endswith(".lua") and CLONE.search(raw.decode("utf-8", errors="ignore")):
             raise PreparationError("A baked runtime Lua script clones mutable source.")
+    if key == "nginx-web-server":
+        from scripts.prepare_deathstarbench_media_images import FRONTEND_EXCLUDED_CLIENT_PATHS
+        for relative in FRONTEND_EXCLUDED_CLIENT_PATHS:
+            path = "/gen-lua/" + PurePosixPath(relative).name
+            try:
+                fs._resolve(path, follow_leaf=False)
+            except MissingImageFile:
+                continue
+            raise PreparationError("An excluded obsolete Media Lua client is present in the runtime image.")
     if key == "hotel-reservation":
         go_license = fs.read("/usr/share/licenses/go/LICENSE")
         if len(go_license) < 100 or b"Copyright" not in go_license:
@@ -505,7 +518,7 @@ def smoke_image(image: str, *, workload_id: str, image_key: str, architecture: s
                   for command, hosts in inspection_plan(workload_id, image_key, context, identities)]
     attestation = None
     if image_key == "nginx-web-server":
-        methods.extend(["baked-nginx-config-syntax-with-explicit-mock-DNS", "baked-Lua-Thrift-module-loading-no-service-methods"])
+        methods.extend(["baked-Media-excluded-client-absence-v1", "baked-nginx-config-syntax-with-explicit-mock-DNS", "baked-Lua-Thrift-module-loading-no-service-methods"])
     elif image_key == "load-driver":
         attestation = executions[-1]["stdout"]
         _driver_attestation(attestation, workload_id, tree_sha256(context), identities)

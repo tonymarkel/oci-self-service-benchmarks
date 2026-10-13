@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "record_type": "candidate-artifact-adoption-validation-summary-v1",
+  "recorded_date": "2026-10-13",
+  "candidate_only": true,
+  "released": false,
+  "workflow_run_id": 38426311217,
+  "workflow_commit": "c09b878dd942b8f5353c5cad12357ba89961fe45",
+  "workflow_url": "https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38426311217",
+  "workflow_conclusion": "success",
+  "artifact_retention_days": 90,
+  "methods": [
+    "twice-regenerated-audited-source-preparation",
+    "complete-candidate-lock-regeneration-and-strict-equality",
+    "fresh-raw-registry-index-platform-manifest-config-byte-verification",
+    "role-correct-offline-render-and-run-storage-identity-binding"
+  ],
+  "limitations": [
+    "This retained summary cannot reconstruct adoption authority; full source preparation, publication, registry inspection, and lock equality are still required.",
+    "Registry access used a read-only GITHUB_TOKEN; anonymous layer pulls were not tested.",
+    "Provider, topology, run, and filesystem inputs in all sixteen snapshots are synthetic offline fixtures, not cloud or guest attestation.",
+    "No images were built or published, no cloud resources were created or destroyed, and no guest storage, dataset, or benchmark commands were executed.",
+    "Runtime, dataset, network, measurement, cleanup, public UI, and licensing/data-rights qualification are not claimed.",
+    "File hashes were computed from downloaded evidence; archive hashes are separately reported by GitHub's artifact API."
+  ],
+  "workloads": {
+    "hotel_reservation": {
+      "adoption_fingerprint": "sha256:5ffb28eba5643a61e79e33c5fe472f2c73d13c550c155a2c6760c7c440129bd2",
+      "artifact_adoption_file_sha256": "61254dd7f94f4de4088f60455335002c12e9276b577fdb78be12e1cbb956a175",
+      "artifact_name": "candidate-runtime-preflight-hotel_reservation-38426311217-1",
+      "candidate_lock_sha256": "a53ceb377feef1a064d990dbc403deccd8d761b8bd70db2e912af69df3d3e86f",
+      "driver_preparation_manifest_sha256": "e043e8d4ac7e9c341c1e4fec2e55ceb6150e86d1a94e26b56a4dbca970b385ae",
+      "load_driver_image": "ghcr.io/tonymarkel/deathstarbench-hotel-load-driver@sha256:911e797bffcabe968d05424d05e4bee0ced19718544e7d44e064881d0f4326b4",
+      "offline_snapshot_file_sha256": {
+        "aws-aarch64-offline-snapshot.json": "e350409e4a0932391431c6cb55d39d6ab8d38092c1b9847f3195c171a83b186d",
+        "aws-x86_64-offline-snapshot.json": "c41a99163c988b5f72194e41d85e9e299126c816e972f4c0c696f31a468039ed",
+        "azure-aarch64-offline-snapshot.json": "0e2600bdade2b6906dc277fd9c8b3f8ac05f45737c905c1e8e88acbac53807c3",
+        "azure-x86_64-offline-snapshot.json": "053de80ba86b799f756bb041910d3587e48e4ff59de09ec179c4b499918683da",
+        "gcp-aarch64-offline-snapshot.json": "d0a136e5a97f50f9b98a312dbd05f9f3c9e1544a85e98527ee7244d6bd143324",
+        "gcp-x86_64-offline-snapshot.json": "5e65dadda8a8771572bbdb9cbca9f6b0beefefd30fcdda5288a9f9b592f4efcc",
+        "oci-aarch64-offline-snapshot.json": "0cbc1293793b406dafed5baeb0b7dbda3be8ea332738c747bcc892a1f6552be4",
+        "oci-x86_64-offline-snapshot.json": "d0dce38793cd1181b2b5c4e2e038f6e98d16e794243e38240de7e783a65a7b74"
+      },
+      "preparation_identity_sha256": "sha256:2d63a4d4d27b219fc9bb8ad868bdd8a6b31cd4d629dd839e4231edef6fdf7b02",
+      "publication_document_sha256": "bef00c72962b3f26393eadbc8e4149888bf6c019e7d7299d32985d5da2eb6ea8",
+      "scope": {
+        "anonymous_layer_pull_qualified": false,
+        "candidate_only": true,
+        "cloud_resources_created": false,
+        "fresh_artifact_adoption": true,
+        "guest_storage_executed": false,
+        "measurement_qualified": false,
+        "provider_and_guest_inputs": "synthetic-offline-fixtures-not-cloud-attestation",
+        "public_ui_enabled": false,
+        "released": false,
+        "runtime_qualified": false,
+        "source_commit": "c09b878dd942b8f5353c5cad12357ba89961fe45",
+        "workload_id": "hotel_reservation"
+      },
+      "scope_file_sha256": "702cf5704ce030a535508a34cf4c33850096a57d5c2db701df6febe50b5478ce",
+      "workload_preparation_manifest_sha256": "366f7f387ac54a9cc6738b5553dc0c01b4f9ccf0cc412dfcb3340adfaa0c5adf",
+      "artifact_id": 11828084478,
+      "github_reported_archive_sha256": "9213d4e8d8b13320ddc153522e308a963259adea67d5673213a1453f3bc26e4a"
+    },
+    "media_microservices": {
+      "adoption_fingerprint": "sha256:e8d65363389c9effb0a3dd3db50292681846fd7f6bba0ac7fa6270439dd002cb",
+      "artifact_adoption_file_sha256": "c57bce713eb99d298451b0df9ba6b3ca65ccc08ab2ec992adafbd039fe2cdcd5",
+      "artifact_name": "candidate-runtime-preflight-media_microservices-38426311217-1",
+      "candidate_lock_sha256": "87bae12245f733a954a03d947d15aae50122c9ef9dab743278c116e81d350f73",
+      "driver_preparation_manifest_sha256": "daf9ee96545c142932f50c86b23e344e92be6442a38b3f446fd85b11a1e0ff43",
+      "load_driver_image": "ghcr.io/tonymarkel/deathstarbench-media-load-driver@sha256:d32ef0131a1e42be92b23f010db603d7da8b24ad0a7a8378df19f941ceb5c8f2",
+      "offline_snapshot_file_sha256": {
+        "aws-aarch64-offline-snapshot.json": "074f4ce7c2c6c7b7d6de343bf92fbf5a474c2a544e1bf592a14d1b710c8f3741",
+        "aws-x86_64-offline-snapshot.json": "6b5f026eb765de1623edf42245f8b61c392b2fa1f6e5cbc842b81fd83115f5e4",
+        "azure-aarch64-offline-snapshot.json": "485101d4df3beaf5bbf1aa0a334f948515428672eb3320ea6c6bef0bde6d3739",
+        "azure-x86_64-offline-snapshot.json": "966a998c4d1026b66a80c5a4b2a15a22527761e130414de593f8278305cfe236",
+        "gcp-aarch64-offline-snapshot.json": "45e51522c4d2122c800ff97aeff13aa75c4007c8890b1b885c103bb6478fdbb6",
+        "gcp-x86_64-offline-snapshot.json": "39dea6be7ae06c354ca1b4ac2d48724cd2a8285a402b4cb70bcf6d1768b61eb4",
+        "oci-aarch64-offline-snapshot.json": "93263ae80c5778985a957e8cd99904e2064f18287fbb2cad9bcc8328952bea5b",
+        "oci-x86_64-offline-snapshot.json": "730b892df6a11dcf68b74b951d6e02fde4bbd6630c099031befb1feab6465f70"
+      },
+      "preparation_identity_sha256": "sha256:5bf06d5ff37e5f734decfa8133261c51d27f172033cf81cf20c441b5ea6031e4",
+      "publication_document_sha256": "b0d9bda79df8831a189fd0f6aa42b5c486c3122e030d78b8caf049f7eb3d5abf",
+      "scope": {
+        "anonymous_layer_pull_qualified": false,
+        "candidate_only": true,
+        "cloud_resources_created": false,
+        "fresh_artifact_adoption": true,
+        "guest_storage_executed": false,
+        "measurement_qualified": false,
+        "provider_and_guest_inputs": "synthetic-offline-fixtures-not-cloud-attestation",
+        "public_ui_enabled": false,
+        "released": false,
+        "runtime_qualified": false,
+        "source_commit": "c09b878dd942b8f5353c5cad12357ba89961fe45",
+        "workload_id": "media_microservices"
+      },
+      "scope_file_sha256": "f017864e6c55fb4da024c591162a9c857b1f5488943dddcc64c5277701f97c08",
+      "workload_preparation_manifest_sha256": "fa37d9d64bbde58546940b71ebaaea90a9a1571df9ceb23f002b53caf881a452",
+      "artifact_id": 11828069828,
+      "github_reported_archive_sha256": "d37b473c13fbcf9dda7cef5ca0acbdfd29e72b3b95fcba5c7d6abd4d1526bb12"
+    }
+  }
+}

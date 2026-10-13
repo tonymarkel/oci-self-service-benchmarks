@@ -90,6 +90,8 @@ class CandidateRuntimePlan:
         # frozen prevents mutation, not dataclasses.replace with crossed fields.
         # Reconstruct the cheap offline contracts before accepting any instance.
         _validate_run_scope(self.artifacts, self.run_id, self.provider, self.topology_fingerprint)
+        if not isinstance(self.bundle, CandidateWorkloadBundle) or not isinstance(self.storage, CandidateStorageContract):
+            raise CandidateRuntimeError('Candidate plan requires typed render and storage contracts.')
         rebuilt_bundle = render_candidate_workload_bundle(
             self.artifacts.workload_id, self.artifacts.runtime_manifest,
             self.bundle.application_architecture,
@@ -108,6 +110,10 @@ class CandidateRuntimePlan:
             or self.fingerprint != _fingerprint(expected)
         ):
             raise CandidateRuntimeError('Candidate plan fields conflict with its retained run snapshot.')
+        # Copy-coherent inputs can still contain caller-owned placement mappings.
+        # Retain only the freshly rebuilt immutable contracts after comparison.
+        object.__setattr__(self, 'bundle', rebuilt_bundle)
+        object.__setattr__(self, 'storage', rebuilt_storage)
 
     def snapshot(self) -> dict[str, Any]:
         """Return a copy; callers cannot change the retained run identity."""
@@ -206,7 +212,10 @@ def read_candidate_runtime_snapshot(path: Path) -> dict[str, Any]:
         descriptor = path.lstat()
         if not stat.S_ISREG(descriptor.st_mode):
             raise CandidateRuntimeError('Saved candidate snapshot must be a regular non-symlink file.')
-        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+        flags = (
+            os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+            | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0)
+        )
         with os.fdopen(os.open(path, flags), 'rb') as stream:
             opened = os.fstat(stream.fileno())
             if (

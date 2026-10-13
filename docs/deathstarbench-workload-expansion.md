@@ -293,6 +293,17 @@ gh workflow run deathstarbench-social-images.yml \
   --ref YOUR_REVIEWED_BRANCH --field publication=candidate-runtime-preflight
 ```
 
+Both workloads passed this full read-only adoption on 2026-10-13 in
+[run 38426311217](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38426311217),
+source commit `c09b878dd942b8f5353c5cad12357ba89961fe45`. The
+[retained validation summary](qualification/deathstarbench-candidate-runtime-preflight-v1.json)
+binds downloaded adoption/scope/snapshot file hashes, artifact IDs and archive
+hashes, exact lock/preparation/driver identities, and all closed-gate scope
+statements. It is not an authority to deploy or restore from summary metadata.
+The local macOS registry attempt failed closed at a Docker blob redirect's
+certificate-chain verification, including a trusted CA-bundle retry; no TLS
+bypass was used. The clean Linux runner completed registry revalidation.
+
 `app/deathstarbench_candidate_storage.py` derives eight exact database paths
 and 80 GiB of claims from the hash-audited profile assets. Its **predeployment**
 guest command requires an already mounted, canonical, root-owned XFS filesystem

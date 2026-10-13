@@ -151,10 +151,17 @@ class CandidateRuntimeTests(unittest.TestCase):
             {'artifacts': other_workload.artifacts}, {'run_id': other_run.run_id},
             {'provider': 'aws'}, {'fingerprint': 'sha256:' + 'f' * 64},
             {'snapshot_json': other_run.snapshot_json},
+            {'bundle': None}, {'storage': None},
         ):
             with self.subTest(fields=fields), patch.object(runtime, 'CandidateArtifactBinding', SyntheticBinding):
                 with self.assertRaises(ValueError):
                     replace(plan, **fields)
+        placement = dict(plan.bundle.expected_component_placement)
+        mutable_bundle = replace(plan.bundle, expected_component_placement=placement)
+        with patch.object(runtime, 'CandidateArtifactBinding', SyntheticBinding):
+            detached = replace(plan, bundle=mutable_bundle)
+        placement.clear()
+        self.assertEqual(detached.bundle.expected_component_placement, plan.bundle.expected_component_placement)
 
     def test_nested_snapshot_drift_extra_fields_and_bool_integer_aliases_fail(self):
         plan = make_plan()

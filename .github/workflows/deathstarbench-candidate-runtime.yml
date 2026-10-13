@@ -1,0 +1,136 @@
+name: Hotel and Media runtime preflight (no cloud execution)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  actions: read
+  packages: read
+
+jobs:
+  adopt:
+    name: Revalidate ${{ matrix.workload }} candidate artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - workload: hotel_reservation
+            folder: hotel
+            publication_run: 38414696606
+            artifact: candidate-lock-hotel_reservation-38414696606-1
+            lock_sha256: a53ceb377feef1a064d990dbc403deccd8d761b8bd70db2e912af69df3d3e86f
+            publication_sha256: bef00c72962b3f26393eadbc8e4149888bf6c019e7d7299d32985d5da2eb6ea8
+          - workload: media_microservices
+            folder: media
+            publication_run: 38416925449
+            artifact: candidate-lock-media_microservices-38416925449-1
+            lock_sha256: 87bae12245f733a954a03d947d15aae50122c9ef9dab743278c116e81d350f73
+            publication_sha256: b0d9bda79df8831a189fd0f6aa42b5c486c3122e030d78b8caf049f7eb3d5abf
+    steps:
+      - name: Check out reviewed benchmark source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Check out exact audited upstream and recursive submodules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: delimitrou/DeathStarBench
+          ref: 6ecb09706140f8730b5385c08f1386c654c3c526
+          path: .build/upstream
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+
+      - name: Install application dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Regenerate audited preparation twice
+        run: |
+          set -euo pipefail
+          mkdir -p .build/sources
+          curl --proto '=https' --tlsv1.2 --fail --show-error --location --retry 3 \
+            https://luarocks.org/manifests/lunarmodules/luasocket-3.1.0-1.src.rock \
+            --output .build/sources/luasocket-3.1.0-1.src.rock
+          echo 'f4a207f50a3f99ad65def8e29c54ac9aac668b216476f7fae3fae92413398ed2  .build/sources/luasocket-3.1.0-1.src.rock' | sha256sum --check --strict -
+          python scripts/validate_deathstarbench_candidate_artifacts.py \
+            --upstream .build/upstream --luasocket-rock .build/sources/luasocket-3.1.0-1.src.rock \
+            --output .build/prepared
+
+      - name: Download the exact reviewed publication artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ matrix.publication_run }}
+          name: ${{ matrix.artifact }}
+          path: .build/evidence
+
+      - name: Check extracted lock and publication file hashes (not archive hashes)
+        env:
+          LOCK_SHA256: ${{ matrix.lock_sha256 }}
+          PUBLICATION_SHA256: ${{ matrix.publication_sha256 }}
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' "$LOCK_SHA256" .build/evidence/candidate-image-lock.json | sha256sum --check --strict -
+          printf '%s  %s\n' "$PUBLICATION_SHA256" .build/evidence/publication.json | sha256sum --check --strict -
+
+      - name: Fresh registry adoption and offline provider/architecture snapshots
+        env:
+          WORKLOAD: ${{ matrix.workload }}
+          PREPARATION_FOLDER: ${{ matrix.folder }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          from app.deathstarbench_candidate_artifacts import adopt_candidate_artifacts
+          from app.deathstarbench_candidate_runtime import create_candidate_runtime_plan, validate_candidate_runtime_snapshot
+          root = Path('.build/prepared/first')
+          folder = os.environ['PREPARATION_FOLDER']
+          binding = adopt_candidate_artifacts(
+              os.environ['WORKLOAD'], Path('.build/evidence/candidate-image-lock.json'),
+              Path('.build/evidence/publication.json'),
+              workload_preparation=root / folder, driver_preparation=root / (folder + '-driver'),
+          )
+          output = Path('.build/preflight')
+          output.mkdir()
+          (output / 'artifact-adoption.json').write_text(json.dumps(binding.metadata(), sort_keys=True, indent=2) + '\n')
+          for provider in ('aws', 'azure', 'gcp', 'oci'):
+              for arch in ('x86_64', 'aarch64'):
+                  # Explicitly synthetic offline identifiers, never cloud evidence.
+                  identity = 'offline-preflight-fixture:' + binding.workload_id + ':' + provider + ':' + arch
+                  digest = hashlib.sha256(identity.encode()).hexdigest()
+                  plan = create_candidate_runtime_plan(
+                      binding, run_id=digest[:12], provider=provider,
+                      topology_fingerprint='sha256:' + digest, application_architecture=arch,
+                      load_generator_ip='10.240.2.10',
+                      filesystem_uuid='12345678-1234-1234-1234-123456789abc',
+                  )
+                  validate_candidate_runtime_snapshot(plan.snapshot(), plan)
+                  (output / (provider + '-' + arch + '-offline-snapshot.json')).write_text(plan.snapshot_json)
+          (output / 'scope.json').write_text(json.dumps({
+              'candidate_only': True, 'released': False, 'source_commit': os.environ['GITHUB_SHA'],
+              'workload_id': binding.workload_id, 'fresh_artifact_adoption': True,
+              'provider_and_guest_inputs': 'synthetic-offline-fixtures-not-cloud-attestation',
+              'cloud_resources_created': False, 'guest_storage_executed': False,
+              'runtime_qualified': False, 'measurement_qualified': False,
+              'anonymous_layer_pull_qualified': False, 'public_ui_enabled': False,
+          }, sort_keys=True, indent=2) + '\n')
+          PY
+
+      - name: Retain successful read-only adoption (not live qualification)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-runtime-preflight-${{ matrix.workload }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/preflight/*.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90

@@ -53,6 +53,19 @@ def render(workload_id, architecture='aarch64', ip='10.240.2.10'):
     )
 
 
+def published_candidate_images(workload_id):
+    manifest = candidate_images(workload_id)
+    manifest['schema_version'] = candidate.CANDIDATE_RUNTIME_IMAGE_SCHEMA_VERSION
+    components, _edges = candidate.validate_candidate_assets(workload_id)
+    keys = {item['image_key'] for item in components if item['role'] == 'application'}
+    manifest['platforms']['linux/arm64']['images'] = {
+        key: reference
+        for key, reference in manifest['platforms']['linux/arm64']['images'].items()
+        if key in keys
+    }
+    return manifest
+
+
 def inventory(bundle):
     by_kind = {}
     for item in json.loads(bundle.canonical_json)['items']:
@@ -61,6 +74,33 @@ def inventory(bundle):
 
 
 class CandidateImageTests(unittest.TestCase):
+    def test_published_schema_has_only_application_images_on_arm(self):
+        for workload_id in CANDIDATES:
+            manifest = published_candidate_images(workload_id)
+            for architecture in ('x86_64', 'aarch64'):
+                with self.subTest(workload=workload_id, architecture=architecture):
+                    bundle = candidate.render_candidate_workload_bundle(
+                        workload_id, manifest, architecture, '10.240.2.10',
+                    )
+                    for item in inventory(bundle)['Deployment'].values():
+                        pod = item['spec']['template']['spec']
+                        role = item['metadata']['labels']['deathstarbench.io/role']
+                        platform = 'linux/arm64' if architecture == 'aarch64' and role == 'application' else 'linux/amd64'
+                        self.assertIn(pod['containers'][0]['image'], manifest['platforms'][platform]['images'].values())
+                    self.assertNotIn('mongodb', manifest['platforms']['linux/arm64']['images'])
+
+    def test_published_schema_rejects_missing_apps_or_extra_arm_support(self):
+        for workload_id in CANDIDATES:
+            valid = published_candidate_images(workload_id)
+            extra = copy.deepcopy(valid)
+            extra['platforms']['linux/arm64']['images']['mongodb'] = candidate_images(workload_id)['platforms']['linux/arm64']['images']['mongodb']
+            missing = copy.deepcopy(valid)
+            missing['platforms']['linux/arm64']['images'].pop(next(iter(missing['platforms']['linux/arm64']['images'])))
+            for invalid in (extra, missing):
+                with self.subTest(workload=workload_id):
+                    with self.assertRaises(candidate.CandidateWorkloadError):
+                        candidate.validate_candidate_images(workload_id, invalid)
+
     def test_exact_platforms_and_read_only_refs(self):
         for workload_id in CANDIDATES:
             with self.subTest(workload=workload_id):

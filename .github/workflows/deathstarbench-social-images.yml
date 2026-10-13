@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       publication:
-        description: Candidate artifact to publish
+        description: Candidate artifact operation
         type: choice
         required: true
         default: load-driver
@@ -14,6 +14,7 @@ on:
           - hotel-images
           - media-images
           - hotel-media-images
+          - candidate-runtime-preflight
 
 permissions:
   contents: read
@@ -27,6 +28,14 @@ env:
   UPSTREAM_REVISION: 6ecb09706140f8730b5385c08f1386c654c3c526
 
 jobs:
+  preflight-hotel-media:
+    if: github.event.inputs.publication == 'candidate-runtime-preflight'
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    uses: ./.github/workflows/deathstarbench-candidate-runtime.yml
+
   publish-hotel-media:
     if: contains(fromJSON('["hotel-images","media-images","hotel-media-images"]'), github.event.inputs.publication)
     uses: ./.github/workflows/deathstarbench-candidate-images.yml

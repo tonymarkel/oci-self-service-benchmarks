@@ -27,6 +27,10 @@ from .deathstarbench_workload_contract import (
 
 ASSET_SCHEMA_VERSION = 2
 CANDIDATE_IMAGE_SCHEMA_VERSION = 1
+# Published candidate support images intentionally exist only for the fixed
+# x86 roles. Keep v1 offline preview compatibility; v2 describes actual role
+# requirements without inventing Arm database/cache/control artifacts.
+CANDIDATE_RUNTIME_IMAGE_SCHEMA_VERSION = 2
 DATABASE_ROOT = '/var/lib/deathstarbench/database/mongodb'
 UPSTREAM_REVISION = '6ecb09706140f8730b5385c08f1386c654c3c526'
 _ARCHITECTURES = {'x86_64': 'linux/amd64', 'aarch64': 'linux/arm64'}
@@ -248,7 +252,9 @@ def validate_candidate_images(workload_id: str, value: Any) -> Mapping[str, Mapp
     }, 'Candidate image manifest')
     if (
         type(manifest['schema_version']) is not int
-        or manifest['schema_version'] != CANDIDATE_IMAGE_SCHEMA_VERSION
+        or manifest['schema_version'] not in (
+            CANDIDATE_IMAGE_SCHEMA_VERSION, CANDIDATE_RUNTIME_IMAGE_SCHEMA_VERSION,
+        )
         or manifest['workload_id'] != workload_id
         or manifest['workload_revision'] != profile.workload_revision
         or manifest['image_set_revision'] != profile.image_set_revision
@@ -257,6 +263,13 @@ def validate_candidate_images(workload_id: str, value: Any) -> Mapping[str, Mapp
     ):
         raise CandidateWorkloadError('Candidate image manifest identity or release state drifted.')
     platforms = _fields(manifest['platforms'], set(_ARCHITECTURES.values()), 'Candidate platforms')
+    application_keys = set(profile.required_image_keys)
+    if manifest['schema_version'] == CANDIDATE_RUNTIME_IMAGE_SCHEMA_VERSION:
+        components, _edges = validate_candidate_assets(workload_id)
+        application_keys = {
+            component['image_key'] for component in components
+            if component['role'] == 'application'
+        }
     selected = {}
     seen = set()
     for platform in sorted(platforms):
@@ -264,7 +277,10 @@ def validate_candidate_images(workload_id: str, value: Any) -> Mapping[str, Mapp
         # Validate and retain the same snapshot, never a caller-owned mapping
         # that could change between validation, rendering, and fingerprinting.
         images = dict(_fields(
-            platform_value['images'], set(profile.required_image_keys), 'Candidate images',
+            platform_value['images'], (
+                application_keys if platform == 'linux/arm64'
+                else set(profile.required_image_keys)
+            ), 'Candidate images',
         ))
         for reference in images.values():
             if (
@@ -274,7 +290,7 @@ def validate_candidate_images(workload_id: str, value: Any) -> Mapping[str, Mapp
                 raise CandidateWorkloadError('Candidate images require distinct nonzero manifest digests.')
             seen.add(reference)
         selected[platform] = MappingProxyType(images)
-    for key in profile.required_image_keys:
+    for key in application_keys:
         if selected['linux/amd64'][key].split('@', 1)[0] != selected['linux/arm64'][key].split('@', 1)[0]:
             raise CandidateWorkloadError('Both platforms must use the same image repository.')
     return MappingProxyType(selected)
@@ -312,9 +328,12 @@ def render_candidate_workload_bundle(
 
     profile = _candidate_profile(workload_id)
     components, edges = validate_candidate_assets(workload_id)
+    # Retain identity before validation can return; never reread caller-owned
+    # metadata while fingerprinting the already validated image snapshot.
+    image_schema_version = image_manifest.get('schema_version') if isinstance(image_manifest, Mapping) else None
     images = validate_candidate_images(workload_id, image_manifest)
     image_snapshot = {
-        'schema_version': CANDIDATE_IMAGE_SCHEMA_VERSION,
+        'schema_version': image_schema_version,
         'workload_id': profile.workload_id,
         'workload_revision': profile.workload_revision,
         'image_set_revision': profile.image_set_revision,

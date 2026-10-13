@@ -1,6 +1,6 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-13: **published native artifact candidates, not public benchmarks**.
+Status, 2026-10-13: **published artifacts and run-bound runtime preflight, not public benchmarks**.
 Social Network is still the only released distributed workload. The audited
 foundations now have drift-checked application/frontend, initializer, and
 load-driver preparation tools, plus an explicit native publication pipeline.
@@ -53,8 +53,9 @@ phases. It uses exact role/architecture selectors, one replica per component,
 no service-account token, separately pre-bound 10-GiB claims on the database
 disk, paired ingress/egress rules for every audited dependency, default deny,
 CoreDNS-only DNS access, and one private load-generator `/32` frontend rule.
-The eight database claims total 80 GiB within the current 100-GiB disk;
-guest free-space/storage attestation is still a later runtime requirement.
+The eight database claims total 80 GiB within the current 100-GiB disk.
+The candidate-only guest storage adapter below now checks that full budget;
+executing it against actual cloud guests is still a runtime qualification gate.
 Hotel's pod policy uses port **5000**, not the external NodePort 8080. No
 cloud ingress or K3s NodePort-range expansion is needed.
 
@@ -213,24 +214,131 @@ the summary is not a substitute runtime lock. Archive digests reported by
 GitHub are distinguished from hashes computed for the extracted JSON files.
 
 Every public/runtime/measurement/dataset/network/cleanup gate remains closed.
-The application and UI still offer Social Network only. The next integration
-slice must bind these exact candidate artifacts to explicit per-run workload
-identities, profile-specific database storage and readiness, and journaled
-initialization/measurement/recovery before exposing either new UI choice.
+The application and UI still offer Social Network only. Candidate artifact
+adoption, per-run snapshots, and profile-specific storage preparation are now
+implemented below. Workload readiness, initialization, measurement, recovery,
+and live qualification must follow before exposing either new UI choice.
 Media's TMDB dataset also needs documented rights clearance or a reviewed,
 versioned synthetic replacement; artifact hashes do not establish data rights.
+
+## Candidate runtime preflight checkpoint
+
+`app/deathstarbench_candidate_artifacts.py` accepts the **complete** downloaded
+candidate lock and publication, plus regenerated workload and driver preparation
+trees. It reruns the publication validator against those trees and freshly
+retrieved raw registry index, platform-manifest, and configuration bytes. The
+entire regenerated lock must match, including native receipts, licenses,
+prepared contexts, backing images, and driver attestation. A retained summary,
+serialized adoption metadata, or a syntactically valid digest is insufficient.
+This is read-only registry inspection, not layer-pull or deployed-service proof.
+
+The adoption result is immutable and architecture-neutral. Runtime image schema
+v2 records both application platforms, but **only amd64 backing-role images**;
+it does not fabricate Arm MongoDB, Consul, cache, or tracing manifests. The
+renderer still selects application architecture explicitly. Legacy schema-v1
+offline previews keep their previous validation/fingerprints. Social Network's
+released image validator, renderer, guest commands, providers, and public
+dispatch are unchanged.
+
+`app/deathstarbench_candidate_runtime.py` binds the adoption to an exact run ID,
+provider, supplied topology fingerprint, application architecture, private load
+generator `/32`, filesystem UUID, namespace, profile revisions, and rendered
+bundle hashes. Snapshots are portable copies, not reconstructed execution
+authority: restoring one requires fresh artifact adoption and an exact match.
+Both bindings and plans check their internal relationships, including copies
+made with `dataclasses.replace`. The provider/topology values are **identity
+bindings only**; this offline layer does not attest existing cloud resources.
+No candidate is dispatched by the public API or provider qualification wrappers.
+
+The read-only operator preflight emits a snapshot on stdout:
+
+```bash
+.venv/bin/python scripts/preflight_deathstarbench_candidate_runtime.py \
+  --workload hotel_reservation \
+  --image-lock /absolute/path/to/candidate-image-lock.json \
+  --publication /absolute/path/to/publication.json \
+  --workload-preparation /absolute/path/to/prepared/first/hotel \
+  --driver-preparation /absolute/path/to/prepared/first/hotel-driver \
+  --run-id "$CANDIDATE_RUN_ID" --provider azure \
+  --topology-fingerprint "$VALIDATED_TOPOLOGY_FINGERPRINT" \
+  --application-architecture aarch64 \
+  --load-generator-ip "$VALIDATED_LOAD_GENERATOR_IP" \
+  --database-filesystem-uuid "$VALIDATED_DATABASE_FILESYSTEM_UUID"
+```
+
+Use `media_microservices`, `first/media`, and `first/media-driver` for Media.
+The preparation-validation tool above generates these source trees; locks and
+publications come from their reviewed native workflow artifacts. The command
+does not create files, deploy infrastructure, run SSH/Docker, or initialize data.
+`--verify-snapshot /absolute/path/to/snapshot.json` additionally checks an earlier
+snapshot against fresh preflight. It refuses links/nonregular files, swapped
+file identities, duplicate JSON keys, non-UTF-8/nonfinite JSON, oversized or
+excessively nested inputs, crossed run identities, or any promoted gate.
+Use a trusted CA bundle if the local Python certificate store cannot verify a
+registry redirect; never disable TLS verification. Explicit GHCR authentication
+is optional and, if used, cannot qualify anonymous access.
+
+The existing manual workflow also has a read-only `candidate-runtime-preflight`
+operation. It downloads the two exact retained publication artifacts, verifies
+their extracted file hashes, independently regenerates preparation twice, and
+performs full fresh registry adoption with a read-only `GITHUB_TOKEN`. It renders
+eight provider/architecture snapshots per workload using **explicitly synthetic
+offline** run/topology/disk inputs. The resulting artifact includes `scope.json`;
+these are not cloud runs or anonymous-access/guest-storage qualification. No
+registry writes, image builds, cloud credentials, dataset execution, or provider
+commands occur. Required PR CI remains credential-free and does not dispatch it.
+
+```bash
+gh workflow run deathstarbench-social-images.yml \
+  --ref YOUR_REVIEWED_BRANCH --field publication=candidate-runtime-preflight
+```
+
+Both workloads passed this full read-only adoption on 2026-10-13 in
+[run 38426311217](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38426311217),
+source commit `c09b878dd942b8f5353c5cad12357ba89961fe45`. The
+[retained validation summary](qualification/deathstarbench-candidate-runtime-preflight-v1.json)
+binds downloaded adoption/scope/snapshot file hashes, artifact IDs and archive
+hashes, exact lock/preparation/driver identities, and all closed-gate scope
+statements. It is not an authority to deploy or restore from summary metadata.
+The local macOS registry attempt failed closed at a Docker blob redirect's
+certificate-chain verification, including a trusted CA-bundle retry; no TLS
+bypass was used. The clean Linux runner completed registry revalidation.
+
+`app/deathstarbench_candidate_storage.py` derives eight exact database paths
+and 80 GiB of claims from the hash-audited profile assets. Its **predeployment**
+guest command requires an already mounted, canonical, root-owned XFS filesystem
+with the expected UUID and the full claim budget available. It performs no
+format, mount, or data deletion. An atomic, root-only ownership marker binds
+run/workload/namespace/disk/inventory; a Social marker, foreign marker, unowned
+filesystem entries, unknown database paths, nested mounts, unsafe links/special
+files, insufficient capacity, or incorrect SELinux labels fails closed. Exact
+same-owner partial directory preparation can retry while preserving regular
+data. Concurrent claims cannot overwrite another owner's marker. The 10-GiB
+hostPath PVC requests are not per-directory filesystem quotas or reservations.
+
+The storage journal records only `preflight_only` or an exact, parsed
+`storage_prepared` receipt. A restored receipt is historical predeployment
+evidence, not current mount/free-space/readiness proof. Re-recording storage is
+refused pending a future read-only reconciliation boundary; preparation must
+not be replayed as a live populated-database recovery command. This slice does
+not apply pods, seed either dataset, run a benchmark, claim denied-edge or
+cleanup success, or enable UI selection. Portable shell tests use real temporary
+files with explicit privileged-tool stubs, not live cloud/storage attestation.
 
 ## Next review slices and release prerequisites
 
 1. **Immutable artifacts and public access.** Complete native publication and
    retain the generated locks, build receipts, and offline smoke evidence.
    Independently qualify anonymous pulls of every exact platform digest before
-   runtime adoption. Version tags/configuration metadata alone are not executed
+   cloud runtime execution. Read-only candidate adoption is not that gate.
+   Version tags/configuration metadata alone are not executed
    backing-image version or CPU-compatibility proof. Preparation receipts alone
    cannot satisfy this gate.
 2. **Workload-aware execution and measurement.** Pass the selected immutable
    profile through deployment/readiness, network qualification, database
    preparation, run-bound lock snapshots, journals, recovery, and cleanup.
+   The candidate artifact/storage preflight now supplies the first boundaries;
+   workload-aware K3s apply/readiness and live operator integration are next.
    Add exact dataset and semantic response verification, durable one-shot
    initialization, unchanged pre/post pod identities, and workload-specific
    comparison cohorts. Do not populate Hotel/Media metadata with fabricated

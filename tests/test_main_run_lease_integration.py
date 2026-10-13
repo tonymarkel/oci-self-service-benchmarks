@@ -347,22 +347,31 @@ class MainRunLeaseIntegrationTests(unittest.TestCase):
             write_saved_run(root, status='complete')
             cleanup_started = threading.Event()
             release_cleanup = threading.Event()
-            cleanup_finished = threading.Event()
+            cleanup_worker_finished = threading.Event()
             cleanup_calls = []
 
             def cleanup(job):
                 cleanup_calls.append(job['status'])
+                cleanup_started.set()
+                self.assertTrue(release_cleanup.wait(2))
+                job['status'] = 'destroyed'
+                main.persist_job_state(job)
+
+            real_worker = main.destroy_with_status_under_lease
+
+            def observed_worker(job, lease):
                 try:
-                    cleanup_started.set()
-                    self.assertTrue(release_cleanup.wait(2))
-                    job['status'] = 'destroyed'
-                    main.persist_job_state(job)
+                    return real_worker(job, lease)
                 finally:
-                    cleanup_finished.set()
+                    # The stub's return is earlier than the real worker's
+                    # finally/release. Cancellation before the waiter's first
+                    # step does not synchronize with that executor thread.
+                    cleanup_worker_finished.set()
 
             with (
                 patch.object(main, 'RUNS', root),
                 patch.object(main, 'destroy_with_status', side_effect=cleanup),
+                patch.object(main, 'destroy_with_status_under_lease', side_effect=observed_worker),
             ):
                 await main.destroy(RUN_ID)
                 task = main.job_tasks[RUN_ID]
@@ -382,9 +391,8 @@ class MainRunLeaseIntegrationTests(unittest.TestCase):
                 with self.assertRaises(asyncio.CancelledError):
                     await task
                 self.assertTrue(
-                    await asyncio.to_thread(cleanup_finished.wait, 2)
+                    await asyncio.to_thread(cleanup_worker_finished.wait, 2)
                 )
-                await asyncio.sleep(0)
                 held_after_worker = inspect_run_lease(root, RUN_ID).held
             return (
                 held_after_cancel,

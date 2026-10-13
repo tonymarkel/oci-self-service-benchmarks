@@ -1,0 +1,309 @@
+name: Native Hotel and Media candidate images (unreleased)
+
+on:
+  workflow_call:
+    inputs:
+      selection:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  plan:
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      native: ${{ steps.plan.outputs.native }}
+      workloads: ${{ steps.plan.outputs.workloads }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - id: plan
+        env:
+          SELECTION: ${{ inputs.selection }}
+        run: |
+          set -euo pipefail
+          python3 scripts/publish_deathstarbench_candidate_images.py plan --selection "$SELECTION" > plan.json
+          python3 - <<'PY'
+          import json, os
+          plan = json.load(open('plan.json'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              for key in ('native', 'workloads'):
+                  out.write(key + '=' + json.dumps(plan[key], separators=(',', ':')) + '\n')
+          PY
+      - name: Verify backing-image index, platform, and config bytes
+        run: |
+          mkdir -p .build/evidence
+          python3 scripts/inspect_deathstarbench_support_images.py --output .build/evidence/support-images.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-support-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/evidence/support-images.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+
+  native-build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.native) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Check out pinned DeathStarBench and exact recursive submodules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: delimitrou/DeathStarBench
+          ref: 6ecb09706140f8730b5385c08f1386c654c3c526
+          path: .build/upstream
+          submodules: recursive
+          persist-credentials: false
+      - name: Verify native host and Docker daemon (no QEMU)
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          case "$ARCHITECTURE" in
+            amd64) expected=x86_64 ;;
+            arm64) expected=aarch64 ;;
+            *) exit 1 ;;
+          esac
+          test "$(uname -m)" = "$expected"
+          test "$(docker info --format '{{.OSType}}')" = linux
+          observed=$(docker info --format '{{.Architecture}}')
+          test "$observed" = "$expected" || test "$observed" = "$ARCHITECTURE"
+      - name: Fetch checksum-pinned LuaSocket source
+        run: |
+          set -euo pipefail
+          mkdir -p .build/sources
+          curl --proto '=https' --tlsv1.2 --fail --show-error --location --retry 5 --retry-delay 5 \
+            https://luarocks.org/manifests/lunarmodules/luasocket-3.1.0-1.src.rock \
+            --output .build/sources/luasocket-3.1.0-1.src.rock
+          echo 'f4a207f50a3f99ad65def8e29c54ac9aac668b216476f7fae3fae92413398ed2  .build/sources/luasocket-3.1.0-1.src.rock' | sha256sum --check --strict -
+      - name: Prepare exact offline contexts and unique candidate names
+        env:
+          WORKLOAD: ${{ matrix.workload }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          OWNER: ${{ github.repository_owner }}
+          RUN_ID: ${{ github.run_id }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 scripts/publish_deathstarbench_candidate_images.py prepare --workload "$WORKLOAD" \
+            --upstream .build/upstream --luasocket-rock .build/sources/luasocket-3.1.0-1.src.rock --root .build/prepared
+          mkdir -p .build/evidence
+          python3 - <<'PY'
+          import json, os
+          from scripts.publish_deathstarbench_candidate_images import candidate_name
+          manifest = json.load(open('.build/prepared/driver/context-manifest.json'))
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              for context in ('app', 'frontend', 'load_driver'):
+                  if context == 'frontend' and os.environ['WORKLOAD'] != 'media_microservices':
+                      continue
+                  tag = candidate_name(os.environ['OWNER'], os.environ['WORKLOAD'], context, os.environ['RUN_ID'], os.environ['ATTEMPT'])
+                  out.write(context.upper() + '_TAG=' + tag + '-' + os.environ['ARCHITECTURE'] + '\n')
+              out.write('DRIVER_CONTEXT_SHA256=' + manifest['context_sha256'] + '\n')
+              out.write('WRK2_SOURCE_SHA256=' + manifest['wrk2_source_sha256'] + '\n')
+          PY
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish native app candidate
+        id: app
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .build/prepared/workload/app
+          file: .build/prepared/workload/app/Dockerfile.candidate
+          platforms: linux/${{ matrix.architecture }}
+          pull: true
+          push: true
+          tags: ${{ env.APP_TAG }}
+          cache-from: type=gha,scope=dsb-candidate-${{ matrix.workload }}-app-${{ matrix.architecture }}
+          cache-to: type=gha,mode=max,scope=dsb-candidate-${{ matrix.workload }}-app-${{ matrix.architecture }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            OCI_SOURCE_REPOSITORY=${{ github.server_url }}/${{ github.repository }}
+            OCI_SOURCE_REVISION=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+      - name: Publish native Media frontend candidate
+        if: matrix.workload == 'media_microservices'
+        id: frontend
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .build/prepared/workload/frontend
+          file: .build/prepared/workload/frontend/Dockerfile.candidate
+          platforms: linux/${{ matrix.architecture }}
+          pull: true
+          push: true
+          tags: ${{ env.FRONTEND_TAG }}
+          cache-from: type=gha,scope=dsb-candidate-media-frontend-${{ matrix.architecture }}
+          cache-to: type=gha,mode=max,scope=dsb-candidate-media-frontend-${{ matrix.architecture }}
+          build-args: |
+            OCI_SOURCE_REPOSITORY=${{ github.server_url }}/${{ github.repository }}
+            OCI_SOURCE_REVISION=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+      - name: Publish fixed x86 workload-specific driver candidate
+        if: matrix.architecture == 'amd64'
+        id: driver
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .build/prepared/driver/context
+          file: .build/prepared/driver/context/Dockerfile
+          platforms: linux/amd64
+          pull: true
+          push: true
+          tags: ${{ env.LOAD_DRIVER_TAG }}
+          cache-from: type=gha,scope=dsb-candidate-${{ matrix.workload }}-driver-amd64
+          cache-to: type=gha,mode=max,scope=dsb-candidate-${{ matrix.workload }}-driver-amd64
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            LOAD_DRIVER_CONTEXT_SHA256=${{ env.DRIVER_CONTEXT_SHA256 }}
+            WRK2_SOURCE_SHA256=${{ env.WRK2_SOURCE_SHA256 }}
+          provenance: mode=max
+          sbom: true
+      - name: Pull exact platform manifests and perform native hardened offline smoke
+        env:
+          WORKLOAD: ${{ matrix.workload }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          APP_DIGEST: ${{ steps.app.outputs.digest }}
+          FRONTEND_DIGEST: ${{ steps.frontend.outputs.digest }}
+          DRIVER_DIGEST: ${{ steps.driver.outputs.digest }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          args=(--app-index "${APP_TAG%:*}@${APP_DIGEST}")
+          if [ "$WORKLOAD" = media_microservices ]; then args+=(--frontend-index "${FRONTEND_TAG%:*}@${FRONTEND_DIGEST}"); fi
+          if [ "$ARCHITECTURE" = amd64 ]; then args+=(--driver-index "${LOAD_DRIVER_TAG%:*}@${DRIVER_DIGEST}"); fi
+          python3 scripts/publish_deathstarbench_candidate_images.py record-native --workload "$WORKLOAD" \
+            --architecture "$ARCHITECTURE" --root .build/prepared "${args[@]}" --output .build/evidence/native.json
+      - name: Preserve available preparation and build identities even on failure
+        if: always()
+        env:
+          APP_METADATA: ${{ steps.app.outputs.metadata }}
+          FRONTEND_METADATA: ${{ steps.frontend.outputs.metadata }}
+          DRIVER_METADATA: ${{ steps.driver.outputs.metadata }}
+        run: |
+          mkdir -p .build/evidence
+          for part in workload driver; do
+            if [ -f ".build/prepared/${part}/context-manifest.json" ]; then
+              cp ".build/prepared/${part}/context-manifest.json" ".build/evidence/${part}-preparation.json"
+            fi
+          done
+          python3 - <<'PY'
+          import json, os
+          metadata = {part: json.loads(os.environ[part + '_METADATA']) for part in ('APP', 'FRONTEND', 'DRIVER') if os.environ.get(part + '_METADATA')}
+          with open('.build/evidence/build-metadata.json', 'x') as out:
+              json.dump({'candidate_only': True, 'runtime_qualified': False, 'build_metadata': metadata}, out, indent=2, sort_keys=True)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: candidate-native-${{ matrix.workload }}-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/evidence/*.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+
+  assemble:
+    needs: [plan, native-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        workload: ${{ fromJSON(needs.plan.outputs.workloads) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: delimitrou/DeathStarBench
+          ref: 6ecb09706140f8730b5385c08f1386c654c3c526
+          path: .build/upstream
+          submodules: recursive
+          persist-credentials: false
+      - name: Independently regenerate exact preparation
+        env:
+          WORKLOAD: ${{ matrix.workload }}
+        run: |
+          set -euo pipefail
+          mkdir -p .build/sources
+          curl --proto '=https' --tlsv1.2 --fail --show-error --location --retry 5 --retry-delay 5 \
+            https://luarocks.org/manifests/lunarmodules/luasocket-3.1.0-1.src.rock \
+            --output .build/sources/luasocket-3.1.0-1.src.rock
+          echo 'f4a207f50a3f99ad65def8e29c54ac9aac668b216476f7fae3fae92413398ed2  .build/sources/luasocket-3.1.0-1.src.rock' | sha256sum --check --strict -
+          python3 scripts/publish_deathstarbench_candidate_images.py prepare --workload "$WORKLOAD" \
+            --upstream .build/upstream --luasocket-rock .build/sources/luasocket-3.1.0-1.src.rock --root .build/prepared
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: candidate-native-${{ matrix.workload }}-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/native
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: candidate-support-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/support
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assemble indexes without altering original native receipts; verify candidate lock
+        env:
+          WORKLOAD: ${{ matrix.workload }}
+          OWNER: ${{ github.repository_owner }}
+          RUN_ID: ${{ github.run_id }}
+          ATTEMPT: ${{ github.run_attempt }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 scripts/publish_deathstarbench_candidate_images.py assemble --workload "$WORKLOAD" --root .build/prepared \
+            --records ".build/native/candidate-native-${WORKLOAD}-amd64-${RUN_ID}-${ATTEMPT}/native.json" \
+              ".build/native/candidate-native-${WORKLOAD}-arm64-${RUN_ID}-${ATTEMPT}/native.json" \
+            --support .build/support/support-images.json --owner "$OWNER" --run-id "$RUN_ID" --attempt "$ATTEMPT" \
+            --output .build/publication
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-lock-${{ matrix.workload }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/publication/*.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+      - name: Record closed gates and package-owner follow-up
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ## Native candidate publication — not a release
+
+          The lock binds regenerated source contexts, native x86/Arm image
+          manifests, original native receipts, offline ELF/config/module checks,
+          and the fixed x86 driver/support roles. BuildKit SBOM/provenance is
+          attached to the original indexes; CI receipts are not signed proof.
+
+          Hotel and Media remain unreleased. Dataset semantics, K3s/cloud
+          integration, denied edges, measurement, and cleanup are not qualified.
+          New GHCR packages may be private. A package owner must make each
+          candidate package Public before independent anonymous layer-pull and
+          smoke qualification. Authenticated publication does not prove this.
+          SUMMARY

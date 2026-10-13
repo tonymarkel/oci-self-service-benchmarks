@@ -601,8 +601,12 @@ class DeathStarBenchImageWorkflowTests(unittest.TestCase):
         action_references = [
             line.split("@", 1)[1].split()[0]
             for line in workflow.splitlines()
-            if "uses:" in line
+            if "uses:" in line and "uses: ./" not in line
         ]
+        self.assertEqual(
+            [line.strip().split("uses: ", 1)[1] for line in workflow.splitlines() if "uses: ./" in line],
+            ["./.github/workflows/deathstarbench-candidate-images.yml"],
+        )  # Local reuse runs the caller's exact commit, without an @ref.
         self.assertGreaterEqual(len(action_references), 8)
         for reference in action_references:
             self.assertRegex(reference, r"^[0-9a-f]{40}$")

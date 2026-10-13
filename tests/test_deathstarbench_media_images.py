@@ -1,6 +1,7 @@
 """Offline preparation and semantic patch tests, never a cloud qualification."""
 
 import asyncio
+import copy
 import importlib.util
 import json
 import os
@@ -93,11 +94,16 @@ def fixture(root):
           + "RUN curl http://ftp.cs.stanford.edu/pub/exim/pcre/pcre-${RESTY_PCRE_VERSION}.tar.gz\n"
           + social.OPENRESTY_ROCKS_ORIGINAL + "\n")
     write(media / "gen-lua/media_service_ttypes.lua", 'return {Cast={character="fixture"}}\n')
+    write(media / "gen-lua/media_service_UserService.lua", 'local Thrift = require "Thrift"\nreturn {}\n')
+    for relative in prepare.FRONTEND_EXCLUDED_CLIENT_PATHS:
+        service = Path(relative).stem.removeprefix("media_service_")
+        write(media / relative, "require 'Thrift'\nrequire 'media_service_ttypes'\n" + service + "Client = __TObject.new(__TClient, {})\n")
+        write(media / "src" / service / (service + ".cpp"), "// C++ backend must remain included\n")
     write(media / "nginx-web-server/lua-scripts/wrk2-api/movie-info/write.lua", 'new_cast["charactor"]=cast["charactor"]\n')
     write(media / "nginx-web-server/lua-scripts/wrk2-api/review/compose.lua", 'local k8s_suffix = os.getenv("fqdn_suffix")\n')
     write(media / "nginx-web-server/jaeger-config.json", '{"service_name":"nginx","diabled": false,"reporter":{"logSpans":true,"localAgentHostPort":"jaeger:6831"},"sampler":{"type":"const","param":"1"}}\n')
     write(media / "helm-chart/mediamicroservices/templates/configs/nginx/nginx.tpl", '{{- define "mediamicroservices.templates.nginx.nginx.conf"  }}\n'
-          + "worker_processes  auto;\nenv fqdn_suffix;\nevents {\n  worker_connections  1024;\n}\nhttp {\n"
+          + "worker_processes  auto;\nerror_log  logs/error.log;\nenv fqdn_suffix;\nevents {\n  worker_connections  1024;\n}\nhttp {\n"
           + "  # Docker default hostname resolver\n  # resolver 127.0.0.11 ipv6=off;\n"
           + "  resolver {{ .Values.global.nginx.resolverName }} ipv6=off;\n  server {\n    listen 8080;\n    lua_need_request_body on;\n  }\n}\n{{- end}}\n")
     write(media / "scripts/write_movie_info.py", INITIALIZER)
@@ -179,7 +185,7 @@ class DeathStarBenchMediaPreparationTests(unittest.TestCase):
         self.assertTrue(manifest["candidate_only"])
         self.assertFalse(manifest["released"])
         self.assertFalse(manifest["byte_reproducible_rebuild"])
-        self.assertFalse(manifest["immutable_base_images_verified"])
+        self.assertTrue(manifest["immutable_base_images_verified"])
         self.assertFalse(manifest["initializer"]["executed"])
         self.assertFalse(manifest["initializer"]["dataset_ready"])
         self.assertTrue(manifest["initializer"]["requires_journal_and_semantic_readiness"])
@@ -195,6 +201,53 @@ class DeathStarBenchMediaPreparationTests(unittest.TestCase):
         self.assertNotIn("social-network-microservices", app)
         self.assertIn("/media-microservices/config/service-config.json", app)
         self.assertIn("/usr/share/licenses/deathstarbench/LICENSE", app)
+
+    def test_native_portable_recipes_use_verified_bases_and_checksum_locked_sources(self):
+        manifest, output = self.prepare()
+        self.assertTrue(manifest["native_build_required"])
+        self.assertTrue(manifest["portable_cpu_build"])
+        self.assertTrue(manifest["build_network_required"])
+        self.assertTrue(manifest["build_source_archives_checksum_pinned"])
+        self.assertFalse(manifest["byte_reproducible_rebuild"])
+        self.assertEqual(manifest["base_images"]["ubuntu_xenial"]["reference"], prepare.UBUNTU_BASE)
+        self.assertEqual(set(manifest["base_images"]["ubuntu_xenial"]["platform_digests"]), {"linux/amd64", "linux/arm64"})
+        for name in ("app", "frontend"):
+            recipe = (output / name / "Dockerfile.candidate").read_text()
+            self.assertIn(prepare.UBUNTU_BASE, recipe)
+            self.assertIn(prepare.NATIVE_BUILD_GUARD, recipe)
+            self.assertNotIn("ubuntu:16.04", recipe)
+            self.assertNotIn("-march=native", recipe)
+            self.assertNotIn("-mcpu=native", recipe)
+            self.assertNotIn("git clone", recipe)
+            build = output / name / "build"
+            lock = json.loads((build / "source-lock.json").read_text())
+            environment = (build / "source.env").read_text()
+            self.assertTrue(lock["candidate_only"])
+            for source, (url, digest) in prepare.BUILD_SOURCES.items():
+                self.assertEqual(lock["sources"][source], {"url": url, "sha256": digest})
+                self.assertIn(url, environment)
+                self.assertIn(digest, environment)
+            self.assertEqual(manifest["contexts"][name]["build_source_lock_sha256"], common.sha256(build / "source-lock.json"))
+            self.assertEqual(manifest["contexts"][name]["build_inputs_sha256"], common.tree_sha256(build))
+            dependencies = (build / "build-dependencies.sh").read_text()
+            self.assertIn("-DHUNTER_ENABLED=OFF", dependencies)
+            self.assertIn("-DBUILD_STATIC_LIBS=ON", dependencies)
+            self.assertIn("-DBUILD_SHARED_LIBS=ON", dependencies)
+            self.assertIn("tacopie-243089d84a5a8032b85e81cae237b823df99abee", dependencies)
+            self.assertIn("printf '%s  %s\\n'", dependencies)
+            self.assertLess(dependencies.index("sha256sum -c -"), dependencies.index('tar xzf "$name.tar.gz"'))
+            self.assertNotIn("git clone", dependencies)
+            self.assertNotIn("pip3 install", dependencies)
+            self.assertIn("rm -r /usr/local/include/jwt/test", dependencies)
+            openresty = (build / "build-openresty.sh").read_text()
+            self.assertLess(openresty.index("sha256sum -c -"), openresty.index('tar xzf "$name.tar.gz"'))
+            self.assertIn('cp README.markdown "$licenses/hmac/README.markdown"', openresty)
+            self.assertNotIn("raw.githubusercontent.com", openresty)
+            self.assertIn("install lib/resty/*.lua", openresty)
+            self.assertIn("make -j1\nmake install", openresty)
+            for script in (build / "build-dependencies.sh", build / "build-openresty.sh"):
+                self.assertIn('"$directory"/LICENCE*', script.read_text())
+                subprocess.run(["sh", "-n", str(script)], check=True, capture_output=True)
 
     def test_runtime_bakes_media_sources_configuration_namespace_and_licenses(self):
         manifest, output = self.prepare()
@@ -218,6 +271,11 @@ class DeathStarBenchMediaPreparationTests(unittest.TestCase):
         self.assertNotIn("127.0.0.11", nginx)
         self.assertNotIn("{{", nginx)
         self.assertIn("env fqdn_suffix;", nginx)
+        self.assertIn("error_log stderr warn;", nginx)
+        self.assertIn("pid /tmp/nginx.pid;", nginx)
+        for directory in ("client-body", "proxy", "fastcgi", "scgi", "uwsgi"):
+            self.assertIn(f"/tmp/{directory};", nginx)
+        self.assertEqual(manifest["frontend_runtime_writable_paths"], ["/tmp"])
         handler = (output / "frontend/runtime/lua-scripts/wrk2-api/movie-info/write.lua").read_text()
         self.assertIn('new_cast["character"]=cast["character"]', handler)
         self.assertNotIn("charactor", handler)
@@ -248,6 +306,83 @@ class DeathStarBenchMediaPreparationTests(unittest.TestCase):
         self.assertFalse((output / "app/scripts").exists())
         self.assertFalse((output / "app/wrk2").exists())
         self.assertEqual(sorted(path.name for path in (output / "initializer/scripts").iterdir()), ["register_movies.sh", "register_users.sh", "write_movie_info.py"])
+
+    def test_unused_legacy_lua_clients_are_source_bound_exclusions_not_removed_cpp_services(self):
+        manifest, output = self.prepare()
+        self.assertEqual(manifest["preparation_revision"], "media-microservices-6ecb097-contexts-candidate-v3")
+        self.assertEqual(manifest["frontend_source_exclusions"], prepare.frontend_source_exclusion_receipt())
+        self.assertEqual(manifest["frontend_source_exclusions"]["revision"], "unused-global-api-lua-clients-v1")
+        self.assertEqual(len(manifest["frontend_source_exclusions"]["files"]), 3)
+        for receipt in manifest["frontend_source_exclusions"]["files"]:
+            self.assertEqual(receipt["original_sha256"], common.sha256(self.upstream / receipt["original_path"]))
+            self.assertFalse((output / receipt["excluded_prepared_path"]).exists())
+            service = receipt["module"].removeprefix("media_service_")
+            backend = Path("src") / service / (service + ".cpp")
+            self.assertEqual((output / "app" / backend).read_bytes(), (self.upstream / prepare.SOURCE_ROOT / backend).read_bytes())
+        for name in ("media_service_ttypes.lua", "media_service_UserService.lua"):
+            self.assertEqual((output / "frontend/runtime/gen-lua" / name).read_bytes(),
+                             (self.upstream / prepare.SOURCE_ROOT / "gen-lua" / name).read_bytes())
+
+    def test_frontend_lua_reference_to_any_excluded_client_fails_before_receipts(self):
+        cases = (
+            ("nginx-web-server/lua-scripts/wrk2-api/review/compose.lua", "return require('media_service_ComposeReviewService')\n"),
+            ("docker/openresty-thrift/lua-thrift/LateImport.lua", 'return require("media_service_" .. "RatingService")\n'),
+            ("gen-lua/UnexpectedClient.lua", "return ReviewStorageServiceClient\n"),
+        )
+        for index, (relative, content) in enumerate(cases):
+            with self.subTest(relative=relative):
+                upstream = self.root / ("reference-source-" + str(index))
+                upstream.mkdir()
+                _, anchors = fixture(upstream)
+                write(upstream / prepare.SOURCE_ROOT / relative, content)
+                git(upstream, "add", ".")
+                git(upstream, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "reference excluded client")
+                output = self.root / ("reference-output-" + str(index))
+                with mock.patch.object(common, "UPSTREAM_REVISION", git(upstream, "rev-parse", "HEAD")), \
+                     mock.patch.object(prepare, "UPSTREAM_ANCHORS", anchors):
+                    with self.assertRaisesRegex(prepare.PreparationError, "references an excluded legacy client"):
+                        prepare.prepare_contexts(upstream, output)
+                self.assertFalse(output.exists())
+
+    def test_excluded_client_source_hash_drift_fails_even_at_clean_git_revision(self):
+        relative = prepare.FRONTEND_EXCLUDED_CLIENT_PATHS[0]
+        write(self.upstream / prepare.SOURCE_ROOT / relative, "-- changed obsolete source\n")
+        git(self.upstream, "add", ".")
+        git(self.upstream, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "drift obsolete source")
+        with mock.patch.object(common, "UPSTREAM_REVISION", git(self.upstream, "rev-parse", "HEAD")):
+            with self.assertRaisesRegex(prepare.PreparationError, "source anchor drifted"):
+                self.prepare()
+        self.assertFalse((self.root / "contexts").exists())
+
+    def test_lock_rejects_exclusion_receipt_tampering_reintroduced_files_and_lua_references(self):
+        from scripts import create_deathstarbench_candidate_image_lock as lock
+        for case in ("missing", "hash", "reason", "path", "ordering", "file", "reference", "alias"):
+            manifest, output = self.prepare("case-" + case)
+            with mock.patch.object(lock, "UPSTREAM_REVISION", manifest["upstream_revision"]), \
+                 mock.patch.dict(lock.hotel.UPSTREAM_ANCHORS, {"LICENSE": self.anchors["LICENSE"]}):
+                lock._workload_preparation(output, "media_microservices")
+                changed = copy.deepcopy(manifest)
+                exclusions = changed["frontend_source_exclusions"]
+                if case == "missing":
+                    del changed["frontend_source_exclusions"]
+                elif case == "hash":
+                    exclusions["files"][0]["original_sha256"] = "a" * 64
+                elif case == "reason":
+                    exclusions["files"][0]["reason"] = "skip a failing benchmark dependency"
+                elif case == "path":
+                    exclusions["files"][0]["excluded_prepared_path"] = "app/src/ComposeReviewService"
+                elif case == "ordering":
+                    exclusions["files"].reverse()
+                elif case == "file":
+                    write(output / exclusions["files"][0]["excluded_prepared_path"], "-- restored obsolete client\n")
+                elif case == "reference":
+                    write(output / "frontend/lua-thrift/Unexpected.lua", "return require('media_service_RatingService')\n")
+                else:
+                    (output / "frontend/lua-thrift/aliased.lua").symlink_to("../runtime/gen-lua/media_service_UserService.lua")
+                changed["contexts"]["frontend"]["context_sha256"] = common.tree_sha256(output / "frontend")
+                write(output / "context-manifest.json", json.dumps(changed))
+                with self.subTest(case=case), self.assertRaisesRegex(lock.CandidateImageLockError, "frontend source exclusions"):
+                    lock._workload_preparation(output, "media_microservices")
 
     def test_identical_inputs_produce_deterministic_context_recipe_and_source_receipts(self):
         first, first_output = self.prepare("first")

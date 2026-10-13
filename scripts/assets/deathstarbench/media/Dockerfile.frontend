@@ -1,0 +1,28 @@
+FROM @UBUNTU_BASE@
+ARG RESTY_VERSION="1.15.8.1rc1"
+ARG RESTY_LUAROCKS_VERSION="3.5.0"
+ARG RESTY_OPENSSL_VERSION="1.1.0j"
+ARG RESTY_PCRE_VERSION="8.42"
+ARG JAEGER_TRACING_VERSION="0.4.2"
+ARG NGINX_OPENTRACING_VERSION="0.8.0"
+ARG OPENTRACING_CPP_VERSION="1.5.1"
+RUN DEBIAN_FRONTEND=noninteractive apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential ca-certificates curl gettext-base libgd-dev libgeoip-dev \
+        libncurses5-dev libperl-dev libreadline-dev libxslt1-dev make perl unzip \
+        zlib1g-dev cmake libboost-all-dev libevent-dev libssl-dev automake bison flex libtool pkg-config
+COPY build /tmp/media-build
+RUN sh /tmp/media-build/build-dependencies.sh frontend \
+    && sh /tmp/media-build/build-openresty.sh
+ENV PATH=$PATH:/usr/local/openresty/luajit/bin:/usr/local/openresty/nginx/sbin:/usr/local/openresty/bin
+ENV LUA_PATH="/usr/local/openresty/site/lualib/?.ljbc;/usr/local/openresty/site/lualib/?/init.ljbc;/usr/local/openresty/lualib/?.ljbc;/usr/local/openresty/lualib/?/init.ljbc;/usr/local/openresty/site/lualib/?.lua;/usr/local/openresty/site/lualib/?/init.lua;/usr/local/openresty/lualib/?.lua;/usr/local/openresty/lualib/?/init.lua;./?.lua;/usr/local/openresty/luajit/share/luajit-2.1.0-beta3/?.lua;/usr/local/share/lua/5.1/?.lua;/usr/local/share/lua/5.1/?/init.lua;/usr/local/openresty/luajit/share/lua/5.1/?.lua;/usr/local/openresty/luajit/share/lua/5.1/?/init.lua;/usr/local/openresty/lualib/?/?.lua;/usr/local/openresty/lualib/thrift/?.lua;/gen-lua/?.lua"
+ENV LUA_CPATH="/usr/local/openresty/site/lualib/?.so;/usr/local/openresty/lualib/?.so;./?.so;/usr/local/lib/lua/5.1/?.so;/usr/local/openresty/luajit/lib/lua/5.1/?.so;/usr/local/lib/lua/5.1/loadall.so;/usr/local/openresty/luajit/lib/lua/5.1/?.so;/usr/local/openresty/lualib/?/?.so"
+COPY lua-thrift /usr/local/openresty/lualib/thrift
+COPY lua-bridge-tracer /tmp/lua-bridge-tracer
+COPY lua-json/json.lua /usr/local/openresty/lualib/json/json.lua
+RUN cd /usr/local/openresty/lualib/thrift/src && make && make install \
+    && cd /tmp/lua-bridge-tracer && mkdir candidate-build && cd candidate-build \
+    && cmake -DCMAKE_BUILD_TYPE=Release .. && make -j2 && make install
+@JWT_INSTALL@
+CMD ["/usr/local/openresty/bin/openresty", "-g", "daemon off;"]
+STOPSIGNAL SIGQUIT

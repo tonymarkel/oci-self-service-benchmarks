@@ -273,7 +273,9 @@ def _validate_provider_pin(value: Any) -> dict[str, Any]:
             raise QualificationError('Saved OCI architecture is invalid.')
         _validate_oci_defined_tags(value.get('defined_tags'))
         for key in ('compartment_id', 'application_image_id', 'support_image_id'):
-            prefix = 'compartment' if key == 'compartment_id' else 'image'
+            # A tenancy OCID is the root compartment. Match the authoritative
+            # OCI candidate input contract without rewriting the pinned ID.
+            prefix = '(?:compartment|tenancy)' if key == 'compartment_id' else 'image'
             if not re.fullmatch(rf'ocid1\.{prefix}\.[A-Za-z0-9._-]+', str(value.get(key, ''))):
                 raise QualificationError(f'Saved OCI {key} is invalid.')
     else:

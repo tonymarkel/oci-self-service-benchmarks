@@ -160,7 +160,7 @@ def _subset(actual, expected, label):
         actual = _array(actual, label)
         if len(actual) != len(expected):
             raise CandidateK3sError(f'{label} array inventory drifted.')
-        for index, (left, right) in enumerate(zip(actual, expected, strict=True)):
+        for index, (left, right) in enumerate(zip(actual, expected)):  # Python 3.9; lengths checked above.
             _subset(left, right, f'{label}[{index}]')
     elif type(actual) is not type(expected) or actual != expected:
         raise CandidateK3sError(f'{label} drifted.')
@@ -452,7 +452,7 @@ def _validate_inventory(inventory, context, *, complete):
                     raise CandidateK3sError(f'{label} exposes an unapproved external path.')
                 if spec.get('publishNotReadyAddresses', False) is not False or spec.get('sessionAffinity', 'None') != 'None':
                     raise CandidateK3sError(f'{label} service behavior drifted.')
-                for port, approved_port in zip(spec['ports'], approved['spec']['ports'], strict=True):
+                for port, approved_port in zip(spec['ports'], approved['spec']['ports']):  # Exact lengths checked by _subset.
                     if 'nodePort' not in approved_port and port.get('nodePort', 0) != 0:
                         raise CandidateK3sError(f'{label} exposes an unexpected NodePort.')
                 if complete:
@@ -913,14 +913,19 @@ else:
 '''
 
 
+# Capture code when the module is loaded. Reading source for old function line
+# numbers during a later checkout/edit can splice the wrong function into a
+# long-running operator's generated command.
+_REMOTE_HELPERS = '\n\n'.join(inspect.getsource(function) for function in (
+    CandidateK3sError, _canonical, _strict_json, _mapping, _array, _uid,
+    _integer, _timestamp, _subset, _metadata, _owner, _default_fields, _pod_spec, _status_counts, _nodes,
+    _system_object, _validate_inventory, _checked_inventory, _object_uids, _require_uid_continuity,
+))
+
+
 def _remote_command(context, operation, timeout_seconds=120):
     # Embed only stdlib validation helpers. Compressed immutable desired state
     # avoids Linux's single-argument size limit while still hashing stdin bytes.
-    helpers = '\n\n'.join(inspect.getsource(function) for function in (
-        CandidateK3sError, _canonical, _strict_json, _mapping, _array, _uid,
-        _integer, _timestamp, _subset, _metadata, _owner, _default_fields, _pod_spec, _status_counts, _nodes,
-        _system_object, _validate_inventory, _checked_inventory, _object_uids, _require_uid_continuity,
-    ))
     encoded = base64.b64encode(zlib.compress(_canonical(context).encode(), 9)).decode()
     script = (
         'from __future__ import annotations\n'
@@ -932,7 +937,7 @@ def _remote_command(context, operation, timeout_seconds=120):
         f'_OWNERSHIP_KEYS={_OWNERSHIP_KEYS!r}\n'
         f'K3S_BINARY={K3S_BINARY!r}\n'
         f'OPERATION={operation!r}\nTIMEOUT_SECONDS={timeout_seconds}\n'
-        + helpers + '\n'
+        + _REMOTE_HELPERS + '\n'
         + f"compressed=base64.b64decode({encoded!r}, validate=True)\n"
         + 'decoder=zlib.decompressobj()\n'
         + 'raw=decoder.decompress(compressed, MAX_JSON_BYTES + 1)\n'

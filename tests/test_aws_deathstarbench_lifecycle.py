@@ -1,6 +1,10 @@
 """Stateful EC2 lifecycle tests; all mutation calls validate against botocore."""
 
 import copy
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -21,6 +25,8 @@ from app.deathstarbench_distributed import (
 from app.providers import aws
 from app.resource_inventory import ResourceInventoryError, load_role_node_inventory
 from tests.test_aws_provider import FakeSession
+from app.run_lease import RunLeaseError
+from scripts.deathstarbench_candidate_operator_state import CandidateStateStore
 
 
 PIN = {'image_id': 'ami-0123456789abcdef0', 'owner_id': '123456789012',
@@ -809,6 +815,44 @@ class AwsDistributedLifecycleTests(unittest.TestCase):
         aws.destroy_resources(self.job, aws_session=self.session)
         self.assertTrue(all(not values for values in self.ec2.data.values()))
 
+    def test_fresh_runinstances_ebs_capacity_rejection_allows_partial_cleanup(self):
+        def fail(kind, request):
+            if kind == 'instance':
+                raise ClientError({'Error': {'Code': 'InsufficientVolumeCapacity'}}, 'RunInstances')
+        self.ec2.on_create = fail
+        with self.assertRaises(ClientError):
+            self.provision()
+        graph = self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']
+        self.assertEqual(graph['instance-control'], {'status': 'planned'})
+        self.assertFalse(self.ec2.data['instance'])
+        self.ec2.on_create = None
+        aws.destroy_resources(self.job, aws_session=self.session)
+        self.assertTrue(all(not values for values in self.ec2.data.values()))
+
+    def test_ebs_capacity_error_on_other_create_remains_ambiguous(self):
+        def fail(kind, request):
+            if kind == 'volume':
+                raise ClientError({'Error': {'Code': 'InsufficientVolumeCapacity'}}, 'CreateVolume')
+        self.ec2.on_create = fail
+        with self.assertRaises(ClientError):
+            self.provision()
+        graph = self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']
+        self.assertEqual(graph['database-data'], {'status': 'create_ambiguous'})
+        self.assert_cleanup_read_only_failure('ambiguous')
+
+    def test_saved_capacity_error_text_cannot_resolve_ambiguous_create(self):
+        def fail(kind, request):
+            if kind == 'instance':
+                raise ConnectionError('response unavailable')
+        self.ec2.on_create = fail
+        with self.assertRaises(ConnectionError):
+            self.provision()
+        self.job['error'] = 'ClientError: InsufficientVolumeCapacity in RunInstances'
+        graph = self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']
+        self.assertEqual(graph['instance-control'], {'status': 'create_ambiguous'})
+        self.ec2.on_create = None
+        self.assert_cleanup_read_only_failure('ambiguous')
+
     def test_foreign_security_group_ingress_blocks_every_delete(self):
         self.provision()
         group = next(iter(self.ec2.data['sg'].values()))
@@ -1083,6 +1127,247 @@ class AwsDistributedLifecycleTests(unittest.TestCase):
         for role in ('control', 'database', 'cache'):
             rules = self.ec2.data['sg'][g['sg-' + role]['id']]['IpPermissions']
             self.assertFalse(any(p.get('GroupId') == loadgen for r in rules for p in r.get('UserIdGroupPairs', [])))
+
+
+class AwsCapacityRejectionCleanupTests(unittest.TestCase):
+    """Synthetic fresh SDK/CloudTrail evidence; these are not live proofs."""
+
+    def setUp(self):
+        from app import deathstarbench_candidate_operator as operator
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.store = CandidateStateStore(Path(self.temporary.name) / '.candidate-support')
+        run_id, self.lease = self.store.allocate()
+        self.addCleanup(self.lease.release)
+        fixture = AwsDistributedLifecycleTests()
+        fixture.setUp()
+        self.ec2, self.session = fixture.ec2, fixture.session
+        self.job = fixture.job
+        self.job['id'] = run_id
+        def fail(kind, request):
+            if kind == 'instance':
+                raise ConnectionError('historical response unavailable')
+        self.ec2.on_create = fail
+        with self.assertRaises(ConnectionError):
+            fixture.provision()
+        self.ec2.on_create = None
+        now = datetime.now(timezone.utc)
+        self.job.update(_persist_state=False, results=[], created_at=(now - timedelta(minutes=10)).isoformat(),
+                        updated_at=(now - timedelta(minutes=5)).isoformat(), events=[])
+        value = {
+            'schema_version': 1, 'candidate_schema': operator.PIN_SCHEMA,
+            'candidate_only': True, 'released': False, 'run_id': run_id,
+            'workload_id': 'hotel_reservation', 'artifact_fingerprint': 'sha256:' + 'a' * 64,
+            'artifacts': {}, 'infrastructure_plan': copy.deepcopy(self.job['plan']),
+            'provider_pin': {'provider': 'aws'}, 'ssh_public_key_sha256': 'b' * 64,
+        }
+        pin = {**value, 'fingerprint': aws._dsb_rejection_hash(value)}
+        self.job['candidate_support_pin'] = pin
+        record = operator._new_record(pin)
+        record.update(state='cleanup_failed', failure={'type': 'ClientError', 'message': 'InsufficientVolumeCapacity'})
+        self.job['candidate_support_operator'] = record
+        source = {
+            'schema_version': 1, 'candidate_schema': 'candidate-support-cleanup-source-v1',
+            'run_id': run_id, 'provider': 'aws', 'pin_fingerprint': pin['fingerprint'],
+            'plan_sha256': aws._dsb_rejection_hash(self.job['plan']),
+            'resources': copy.deepcopy(self.job['resources']), 'cloud_identity': None,
+        }
+        self.job['candidate_cloud_cleanup_source'] = {**source, 'fingerprint': aws._dsb_rejection_hash(source)}
+        self.source = copy.deepcopy(self.job['candidate_cloud_cleanup_source'])
+        self.store.publish_pin(pin, self.lease)
+        self.store.save(self.job, self.lease)
+        state = aws._dsb_load(self.job)
+        self.request = aws._dsb_specs(state['contract'], state['graph'])['instance-control'][1]
+        self.event_id = '11111111-2222-4333-8444-555555555555'
+        self.event = {
+            'eventID': self.event_id, 'eventTime': (now - timedelta(minutes=8)).isoformat(),
+            'eventSource': 'ec2.amazonaws.com', 'eventName': 'RunInstances',
+            'awsRegion': state['contract']['region'], 'recipientAccountId': '123456789012',
+            'userIdentity': {'accountId': '123456789012'}, 'requestID': 'request-exact',
+            'errorCode': 'Server.InsufficientVolumeCapacity', 'responseElements': None,
+            'requestParameters': aws._dsb_rejection_wire_request(self.request),
+        }
+        self.events = [self.event]
+        self.lookup_calls = []
+        def lookup(**kwargs):
+            self.lookup_calls.append(kwargs)
+            return {'Events': [{'EventId': value['eventID'], 'CloudTrailEvent': json.dumps(value)}
+                               for value in self.events]}
+        self.trail = SimpleNamespace(lookup_events=lookup)
+        self.snapshots = []
+        self.sleep = patch.object(aws.time, 'sleep')
+        self.sleep.start()
+        self.addCleanup(self.sleep.stop)
+
+    def persist(self, value):
+        self.store.save(value, self.lease)
+        self.snapshots.append(copy.deepcopy(value))
+
+    def reconcile(self, **overrides):
+        return aws.reconcile_distributed_capacity_rejection_for_cleanup(self.job, **{
+            'lease': self.lease, 'event_id': self.event_id, 'persist': self.persist,
+            'aws_session': self.session, 'cloudtrail_client': self.trail, **overrides,
+        })
+
+    def assert_ambiguous(self):
+        self.assertEqual(self.job['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']['instance-control'],
+                         {'status': 'create_ambiguous'})
+
+    def test_exact_fresh_evidence_is_durable_before_only_deleted_transition_and_normal_cleanup(self):
+        before_creates = sum(name == 'run_instances' for name, _ in self.ec2.calls)
+        result = self.reconcile()
+        self.assertTrue(result['cleanup_only'])
+        self.assertFalse(result['provisioning_allowed'])
+        self.assertEqual(len(self.snapshots), 2)
+        first, second = self.snapshots
+        self.assertEqual(first['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']['instance-control'],
+                         {'status': 'create_ambiguous'})
+        self.assertEqual(second['resources'][aws.AWS_DSB_GRAPH_KEY]['graph']['instance-control'], {'status': 'deleted'})
+        self.assertEqual(first['candidate_cloud_cleanup_source'], self.source)
+        self.assertEqual(second['candidate_cloud_cleanup_source'], self.source)
+        receipt = first[aws.AWS_DSB_REJECTION_EVIDENCE_KEY][0]
+        self.assertEqual(receipt['cloudtrail_event'], self.event)
+        self.assertEqual(len(receipt['absence_observations']), 8)
+        self.assertEqual(sum(name == 'run_instances' for name, _ in self.ec2.calls), before_creates)
+        aws.destroy_distributed_deathstarbench_candidate(self.job, aws_session=self.session)
+        aws.recover_distributed_deathstarbench_candidate(self.job, aws_session=self.session, wait_for_attachments=False)
+        self.assertTrue(aws.distributed_deathstarbench_candidate_deleted(self.job))
+        self.assertTrue(all(not values for values in self.ec2.data.values()))
+        self.assertEqual(self.job['candidate_cloud_cleanup_source'], self.source)
+
+    def test_malformed_crossed_late_replaced_and_generic_events_never_authorize(self):
+        now = datetime.now(timezone.utc)
+        changes = [
+            {'errorCode': 'Server.InternalError'}, {'responseElements': {}},
+            {'eventID': 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'}, {'awsRegion': 'us-east-1'},
+            {'recipientAccountId': '999999999999'}, {'userIdentity': {'accountId': '999999999999'}},
+            {'eventTime': now.isoformat()}, {'eventTime': (now - timedelta(days=1)).isoformat()},
+            {'eventTime': 'bad-time'}, {'requestID': None},
+        ]
+        original = copy.deepcopy(self.event)
+        for change in changes:
+            with self.subTest(change=change):
+                self.events = [{**copy.deepcopy(original), **change}]
+                with self.assertRaises(ResourceInventoryError):
+                    self.reconcile()
+                self.assert_ambiguous()
+                self.assertEqual(self.snapshots, [])
+        self.events = [original]
+        for field, value in (('instanceType', 'm7i.2xlarge'), ('availabilityZone', 'us-east-2b'),
+                             ('unknownUnreviewedField', True)):
+            with self.subTest(field=field):
+                self.events = [copy.deepcopy(original)]
+                self.events[0]['requestParameters'][field] = value
+                with self.assertRaises(ResourceInventoryError):
+                    self.reconcile()
+                self.assert_ambiguous()
+        for mutation in ('image', 'subnet', 'tags', 'bool'):
+            self.events = [copy.deepcopy(original)]
+            params = self.events[0]['requestParameters']
+            if mutation == 'image':
+                params['instancesSet']['items'][0]['imageId'] = 'ami-foreign'
+            elif mutation == 'subnet':
+                params['networkInterfaceSet']['items'][0]['subnetId'] = 'subnet-foreign'
+            elif mutation == 'tags':
+                params['tagSpecificationSet']['items'][0]['tags'][0]['value'] = 'foreign'
+            else:
+                params['disableApiTermination'] = 0  # JSON equality must not equate bool and integer.
+            with self.subTest(mutation=mutation), self.assertRaises(ResourceInventoryError):
+                self.reconcile()
+            self.assert_ambiguous()
+
+    def test_missing_duplicate_or_replayed_token_events_are_refused(self):
+        second = {**copy.deepcopy(self.event), 'eventID': 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'}
+        for events in ([], [self.event, self.event], [self.event, second]):
+            self.events = events
+            with self.subTest(count=len(events)), self.assertRaises(ResourceInventoryError):
+                self.reconcile()
+            self.assert_ambiguous()
+
+    def test_bounded_lookup_refuses_incomplete_or_malformed_service_pages(self):
+        for response in ({'Events': 'bad'}, {'Events': [{'EventId': self.event_id, 'CloudTrailEvent': '{}'}]},
+                         {'Events': [{'EventId': self.event_id, 'CloudTrailEvent': '{"eventID":1,"eventID":2}'}]}):
+            with self.subTest(response=response), self.assertRaises(ResourceInventoryError):
+                self.reconcile(cloudtrail_client=SimpleNamespace(lookup_events=lambda **_: response))
+        calls = []
+        def endless(**kwargs):
+            calls.append(kwargs)
+            return {'Events': [], 'NextToken': str(len(calls))}
+        with self.assertRaisesRegex(ResourceInventoryError, 'finite'):
+            self.reconcile(cloudtrail_client=SimpleNamespace(lookup_events=endless))
+        self.assertEqual(len(calls), 4)
+        self.assert_ambiguous()
+
+    def test_any_instance_boot_volume_or_incomplete_absence_page_is_refused(self):
+        for response in ({'Reservations': [{'Instances': [{'InstanceId': 'i-any'}]}]},
+                         {'Reservations': [], 'NextToken': 'more'}, {'Reservations': [{}]}):
+            with self.subTest(response=response), patch.object(self.ec2, 'describe_instances', return_value=response):
+                with self.assertRaises(ResourceInventoryError):
+                    self.reconcile()
+                self.assert_ambiguous()
+        with patch.object(self.ec2, 'describe_volumes', return_value={'Volumes': [{'VolumeId': 'vol-orphan'}]}):
+            with self.assertRaisesRegex(ResourceInventoryError, 'boot volume'):
+                self.reconcile()
+        self.assert_ambiguous()
+
+    def test_evidence_persistence_failure_does_not_change_graph_or_source(self):
+        with self.assertRaisesRegex(OSError, 'disk failure'):
+            self.reconcile(persist=lambda _value: (_ for _ in ()).throw(OSError('disk failure')))
+        self.assert_ambiguous()
+        self.assertEqual(self.job['candidate_cloud_cleanup_source'], self.source)
+
+    def test_retained_evidence_alone_cannot_authorize_and_prior_receipts_are_preserved(self):
+        def fail(_value):
+            raise OSError('before tombstone')
+        with self.assertRaises(OSError):
+            self.reconcile(persist=fail)
+        retained = copy.deepcopy(self.job[aws.AWS_DSB_REJECTION_EVIDENCE_KEY])
+        self.events = []
+        with self.assertRaises(ResourceInventoryError):
+            self.reconcile()
+        self.assertEqual(self.job[aws.AWS_DSB_REJECTION_EVIDENCE_KEY], retained)
+        self.events = [self.event]
+        self.reconcile()
+        self.assertEqual(self.job[aws.AWS_DSB_REJECTION_EVIDENCE_KEY][0], retained[0])
+        self.assertEqual(len(self.job[aws.AWS_DSB_REJECTION_EVIDENCE_KEY]), 2)
+
+    def test_source_drift_or_copied_released_lease_refuses_before_tombstone(self):
+        with self.assertRaises(RunLeaseError):
+            self.reconcile(lease=copy.copy(self.lease))
+        def drift(value):
+            self.persist(value)
+            value['candidate_cloud_cleanup_source']['fingerprint'] = 'sha256:' + '0' * 64
+        with self.assertRaisesRegex(ResourceInventoryError, 'changed'):
+            self.reconcile(persist=drift)
+        self.assert_ambiguous()
+        self.job['candidate_cloud_cleanup_source'] = self.source
+        self.lease.release()
+        with self.assertRaises(RunLeaseError):
+            self.reconcile()
+
+    def test_released_during_sdk_read_cannot_persist_or_mutate(self):
+        def release(**kwargs):
+            self.lease.release()
+            return {'Events': []}
+        with self.assertRaises(RunLeaseError):
+            self.reconcile(cloudtrail_client=SimpleNamespace(lookup_events=release))
+        self.assert_ambiguous()
+        self.assertEqual(self.snapshots, [])
+
+    def test_cleanup_intent_source_and_timestamps_cannot_be_reopened(self):
+        self.job['candidate_support_operator']['state'] = 'accepted'
+        with self.assertRaisesRegex(ResourceInventoryError, 'cleanup-only'):
+            self.reconcile()
+        self.job['candidate_support_operator']['state'] = 'cleanup_failed'
+        original = copy.deepcopy(self.job['resources'])
+        self.job['resources']['foreign_resource'] = 'unknown'
+        with self.assertRaisesRegex(ResourceInventoryError, 'unchanged original'):
+            self.reconcile()
+        self.job['resources'] = original
+        self.job['created_at'] = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        with self.assertRaisesRegex(ResourceInventoryError, 'bounded'):
+            self.reconcile()
+        self.assert_ambiguous()
 
 
 if __name__ == '__main__':

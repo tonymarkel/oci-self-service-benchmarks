@@ -410,6 +410,188 @@ commands against actual image locks with synthetic provider/architecture inputs;
 its scope explicitly says Kubernetes/guest/cloud operations were not executed.
 Hotel and Media remain unavailable in the UI.
 
+## Private support-stage operator
+
+`scripts/qualify_deathstarbench_candidate_support.py` joins the reviewed stage
+to the existing five-role provider lifecycle without using public dispatch or
+the Social Network deployment/measurement wrappers. It creates **five billable
+VMs** per new invocation. The separate Hotel/Media pin identifies the candidate;
+the sanitized `BenchmarkPlan` is only an infrastructure carrier for the existing
+`distributed_tiered_v1` / `k3s_v1` role, capacity, network and storage contract.
+Its `deathstarbench.workload` remains `social_network` solely because that
+existing infrastructure contract accepts only that value. No Social Network
+application is deployed and no Social result/report is fabricated.
+
+Example (paths identify actual full reviewed artifacts/preparations, not the
+checked-in qualification summaries):
+
+```sh
+python scripts/qualify_deathstarbench_candidate_support.py \
+  --plan /secure/azure-five-role-plan.json \
+  --workload hotel_reservation \
+  --image-lock /secure/hotel/candidate-image-lock.json \
+  --publication /secure/hotel/publication.json \
+  --workload-preparation /secure/prepared/hotel \
+  --driver-preparation /secure/prepared/hotel-driver
+```
+
+The plan must select only distributed DeathStarBench, have
+`destroy_after_completion: true`, disable the general additional storage volume,
+and contain no SSH credentials/key material. SSH defaults come from the existing
+environment configuration or `--ssh-env-file`. AWS additionally requires the
+existing exact Rocky AMI `--aws-image-pin`; OCI requires its pinned support and
+application image OCIDs, architecture, and profile selectors. OCI defined tags
+come from the exact carrier plan; an optional tag file must agree with it.
+No Marketplace agreement/subscription is accepted by this operator.
+
+State lives under `app/runs/.candidate-support/<run-id>/`, outside public run
+history. Pins and state are private 0600 JSON in 0700 directories, written with
+atomic replace and file/directory fsync while the original acquired run lease is
+held. Exact original lock/publication bytes are retained. Private SSH keys and
+passphrases stay process-local; public authorized keys can legitimately occur
+inside provider ownership contracts. Private SSH known-host state uses the same
+lease-bound directory, not a public run-shaped directory. Validation failures
+do not print injected private key/passphrase inputs.
+
+New runs provision once, take a fresh SDK ownership/readiness audit, prepare the
+pinned K3s runtime, repeat the cloud audit, verify support-image access, and
+execute only the support stage. The cloud identity pins account/project,
+topology, addresses, profiles, image/disk/network identities and immutable
+creation IDs. Azure audits include opaque VM/disk IDs as well as reusable ARM
+paths. Azure's original provider did not retain those opaque IDs during create;
+their first successful complete audit establishes the additional pins. Before
+that audit, partial-provision cleanup retains the existing exact ARM-ID/tag/
+graph contract. Azure cleanup checks any established opaque IDs before delete,
+including stopped VMs; observed same-name replacements are refused.
+
+Support-image access is deliberately narrower than the application release
+gate. It anonymously streams each exact active amd64 backing manifest, config
+and **all compressed layer bodies**, checking descriptor sizes and SHA-256.
+There are four distinct backing images per candidate. The client uses verified
+TLS, fixed Docker Hub repository-scoped anonymous token exchange, bounded
+streaming and reviewed HTTPS CDN destinations without forwarding auth. It does
+not use Docker config, environment registry/proxy credentials, or local image
+caches; it stores no layer files and executes no image. Each invocation/resume
+must obtain a fresh process-local factory capability. Saved JSON is historical
+evidence, never an access authority. Application/frontend/driver pulls, native
+binary/version smoke, and global `anonymous_layer_pull_qualified` remain outside
+this proof; the existing global release gates stay false.
+
+After taking cleanup ownership, normal returns/failures and cooperative signals
+attempt exact destruction in `finally`. Repeated SIGINT/SIGTERM are deferred
+through cleanup. The exact known support journal is durably archived before
+removing that one non-cloud resource key. The original cloud cleanup targets
+are also persisted **before** deletion, so a crash after a provider clears its
+graph cannot erase the independent absence targets. Unknown provider-prefixed
+keys are refused using finite writer schemas; unknown non-provider recovery
+data is not discarded to make a terminal predicate pass. Azure/GCP require
+fresh independent SDK absence reads after provider terminal proof; AWS/OCI
+re-read their retained tombstones. Inaccessible resources are not absence.
+
+Recovery commands use the printed private run ID:
+
+```sh
+# Fresh SDK audit and artifact adoption; never re-create missing roles.
+python scripts/qualify_deathstarbench_candidate_support.py \
+  --resume <run-id> \
+  --workload-preparation /secure/prepared/hotel \
+  --driver-preparation /secure/prepared/hotel-driver
+
+# No registry, prepared trees, private SSH key, or guest command is needed.
+python scripts/qualify_deathstarbench_candidate_support.py \
+  --cleanup-only <run-id>
+```
+
+Resume is refused without cleanup if its initial read-only ownership audit
+fails or its immutable create identities changed; use explicit cleanup-only to
+request destruction of the still-verifiable owned graph. Resume never calls
+provisioning. Once teardown begins only cleanup-only is permitted. Provider
+selector/image/shape overrides are not accepted during recovery. The original
+SDK authentication and exact ownership evidence are still required for cleanup.
+
+An older AWS partial launch can retain a no-ID ambiguous intent when EC2
+explicitly rejected its root EBS allocation with
+[`InsufficientVolumeCapacity`](https://docs.aws.amazon.com/ec2/latest/devguide/errors-overview.html).
+New launches recognize that exact fresh service rejection. Existing ambiguous
+records are **not** resolved from a saved error message or a missing tag lookup.
+For this one case an operator can explicitly supply the authoritative event:
+
+```sh
+python scripts/qualify_deathstarbench_candidate_support.py \
+  --cleanup-only <run-id> \
+  --reconcile-aws-capacity-rejection <cloudtrail-event-uuid>
+```
+
+This optional AWS-only mode additionally requires `cloudtrail:LookupEvents`.
+It takes a fresh, bounded CloudTrail lookup and requires exactly one matching
+immutable RunInstances request, account/region/time, the exact capacity error,
+and a null response. Two fresh instance and boot-volume absence passes must
+also succeed. Full private evidence is persisted before the sole no-ID intent
+becomes a deletion tombstone; it never becomes provisionable or replays a
+create. The original cleanup-source snapshot is unchanged, and ordinary
+whole-graph destruction plus independent terminal proof must still pass.
+Uncertain, replaced, duplicate, late, or inaccessible evidence fails closed.
+This is not a general override for ambiguous launches.
+
+SIGKILL, power loss, or the explicit qualification-only
+`--interrupt-after cluster-ready|support-ready --interrupt-mode hard` cannot run
+`finally`; these deliberately retain billable resources and require recovery.
+Graceful injected interruptions use the same checkpoints and cleanup path.
+Exit 0 means the requested support-only operation and independent cleanup proof
+succeeded (or cleanup-only succeeded). Exit 1 is a support-stage failure with
+cleanup proved complete; exit 2 means refusal/incomplete cleanup. Cooperative
+signals return nonzero signal status after cleanup; cleanup failure takes
+precedence. No exit code authorizes application startup or public release.
+
+Unit tests use synthetic SDK/SSH/registry transports and are not live cloud
+qualification. Any live evidence is retained separately with its exact scope;
+neither a support-ready Pod nor a TCP probe is a semantic application test.
+
+### Support-only live observations, 15 October 2026
+
+The private operator completed the following bounded live checks. Each row is
+one candidate/provider observation, not qualification of both workloads or
+both application architectures on every provider. Support roles use amd64;
+the application column describes the prepared node, not application execution.
+
+| Provider | Candidate | Application node | Ready support Pods | Application Pods | Independent cleanup |
+| --- | --- | --- | --- | --- | --- |
+| Azure | Hotel | Arm64 | 14 | 0 | Passed |
+| AWS | Hotel | x86-64 | 14 | 0 | Passed |
+| GCP | Media | Arm64 | 19 | 0 | Passed |
+| OCI | Media | x86-64 | 19 | 0 | Passed |
+
+All six guarded phases completed in each successful run. Hotel's ten and
+Media's thirteen application deployments remained at zero replicas. No
+application, initializer, load driver, or benchmark measurement was dispatched.
+Fresh cloud ownership audits ran before SSH and after K3s preparation; fresh
+support-image byte access preceded staging. Every attempt, including the four
+earlier failures, finished with independently proved destruction.
+
+The failed attempts remain in the evidence rather than being counted as
+support successes. A hard GCP cluster-ready interruption recovered without
+reprovisioning, then exposed a Python 3.9 `zip` compatibility issue. Source edits
+overlapping other early processes exposed dynamic source-extraction drift;
+embedded helpers are now frozen when imported. Fresh processes validated that
+repair. OCI's earlier process overlapped source evolution, so its summary does
+not claim execution of one exact final commit. AWS's rejected EBS allocation
+was reconciled only through the explicit CloudTrail/absence boundary above; a
+new run in another zone then passed support staging and cleanup.
+
+The [retained observation summary](qualification/deathstarbench-candidate-support-operator-v1.json)
+contains counts and hashes, not cloud account/resource IDs, IP addresses,
+hostnames, keys, or raw CloudTrail events. It records source-cohort limitations
+and cannot reconstruct fresh artifact, cloud, or cleanup authority. Exact
+private records remain outside web history.
+
+Local `scripts/check.sh` passed 1,681 tests (one existing macOS GNU-sed/time
+skip). GitHub's Python 3.10/3.14 CI and the
+[read-only artifact/support-byte workflow](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38749728738)
+also passed on the tested code commit. All global application/runtime, dataset,
+measurement, network-denial, full-anonymous-image, and public release gates
+remain closed. Hotel and Media are still hidden in the UI; support readiness
+does not enable their public benchmark dispatch.
+
 ## Next review slices and release prerequisites
 
 1. **Immutable artifacts and public access.** Complete native publication and
@@ -423,9 +605,10 @@ Hotel and Media remain unavailable in the UI.
    profile through deployment/readiness, network qualification, database
    preparation, run-bound lock snapshots, journals, recovery, and cleanup.
    Candidate artifact/storage preflight and support-only K3s apply/readiness now
-   supply the first boundaries. A cleanup-guaranteed live operator wrapper, real
-   support-stage qualification, guarded application startup and semantic
-   initialization/measurement are next.
+   supply the first boundaries. The private cleanup-owning operator now joins
+   those boundaries; live support-stage evidence must be evaluated separately.
+   Guarded application startup and semantic initialization/measurement remain
+   required before release.
    Add exact dataset and semantic response verification, durable one-shot
    initialization, unchanged pre/post pod identities, and workload-specific
    comparison cohorts. Do not populate Hotel/Media metadata with fabricated

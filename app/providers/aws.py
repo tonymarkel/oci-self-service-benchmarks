@@ -13,9 +13,11 @@ import base64
 import binascii
 import copy
 import hashlib
+import json
 import re
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -4146,13 +4148,18 @@ def _dsb_ensure(ec2, job, key, persist):
                     _dsb_save(job, persist)
         except Exception as exc:
             # These explicit service rejections guarantee no resource was
-            # accepted (not timeouts/5xx). Do not strand an empty create intent.
-            if isinstance(exc, ClientError) and exc.response.get('Error', {}).get('Code') in {
+            # accepted (not timeouts or generic/internal server failures). Do
+            # not strand an empty create intent.
+            error_code = exc.response.get('Error', {}).get('Code') if isinstance(exc, ClientError) else None
+            if isinstance(exc, ClientError) and (error_code in {
                 'UnauthorizedOperation', 'AuthFailure', 'OptInRequired',
                 'InvalidParameterValue', 'InvalidParameterCombination',
                 'InsufficientInstanceCapacity', 'InstanceLimitExceeded',
                 'VcpuLimitExceeded', 'AddressLimitExceeded',
-            }:
+            } or (kind == 'instance' and error_code == 'InsufficientVolumeCapacity')):
+                # RunInstances can reject its root EBS allocation before an
+                # instance is accepted. This applies only to the fresh service
+                # response, never a saved error string or unresolved intent.
                 entry['status'] = 'planned'
                 _dsb_save(job, persist)
                 raise
@@ -4625,6 +4632,238 @@ def recover_distributed_deathstarbench_candidate(
             _dsb_save(job, persist)
     _dsb_verify_graph(ec2, contract, graph, objects)
     return objects
+
+
+AWS_DSB_REJECTION_EVIDENCE_KEY = 'aws_candidate_capacity_rejection_cleanup_evidence'
+
+
+def _dsb_rejection_json(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n'
+
+
+def _dsb_rejection_hash(value):
+    return 'sha256:' + hashlib.sha256(_dsb_rejection_json(value).encode()).hexdigest()
+
+
+def _dsb_rejection_wire_request(request):
+    """Exact CloudTrail encoding of this one reviewed RunInstances request."""
+    lower = lambda values: {key[0].lower() + key[1:]: value for key, value in values.items()}
+    interfaces = []
+    for value in request['NetworkInterfaces']:
+        item = lower({key: value for key, value in value.items() if key != 'Groups'})
+        item['groupSet'] = {'items': [{'groupId': group} for group in value['Groups']]}
+        interfaces.append(item)
+    return {
+        'instancesSet': {'items': [{'imageId': request['ImageId'], 'minCount': request['MinCount'],
+                                   'maxCount': request['MaxCount'], 'keyName': request['KeyName']}]},
+        'instanceType': request['InstanceType'], 'clientToken': request['ClientToken'],
+        'availabilityZone': request['Placement']['AvailabilityZone'],
+        'networkInterfaceSet': {'items': interfaces},
+        'blockDeviceMapping': {'items': [{'deviceName': value['DeviceName'], 'ebs': lower(value['Ebs'])}
+                                        for value in request['BlockDeviceMappings']]},
+        'tagSpecificationSet': {'items': [{'resourceType': value['ResourceType'],
+            'tags': [{'key': tag['Key'], 'value': tag['Value']} for tag in value['Tags']]}
+            for value in request['TagSpecifications']]},
+        'metadataOptions': lower(request['MetadataOptions']),
+        # These are the three explicitly observed EC2 wire defaults. Unknown
+        # fields/default changes deliberately need another review, not adoption.
+        'monitoring': {'enabled': False}, 'disableApiTermination': False, 'disableApiStop': False,
+    }
+
+
+def reconcile_distributed_capacity_rejection_for_cleanup(
+    job, *, lease, event_id, persist, aws_session=None, cloudtrail_client=None,
+):
+    """Explicit private cleanup-only recovery of one rejected, no-ID launch.
+
+    Fresh CloudTrail authority and repeated exact absence checks are mandatory.
+    Saved error strings/evidence are never authority. No create is dispatched;
+    the sole graph transition is ambiguous -> deleted, never back to planned.
+    All other resources still need the ordinary whole-graph cleanup audit.
+    """
+    from ..run_lease import require_acquired_run_lease
+    from ..deathstarbench_candidate_operator import (
+        _validate_pin, validate_candidate_operator_record,
+    )
+    if not callable(persist) or not isinstance(event_id, str) or not re.fullmatch(
+            r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', event_id):
+        _dsb_fail('explicit cleanup reconciliation requires an exact CloudTrail event UUID and persistence.')
+    pin = job.get('candidate_support_pin')
+    if _validate_pin(job, pin, None, cleanup_only=True) != 'aws':
+        _dsb_fail('capacity-rejection recovery is AWS-only.')
+    record = validate_candidate_operator_record(job.get('candidate_support_operator'), pin)
+    if record['state'] not in {'cleanup_pending', 'cleaning', 'cleanup_failed'}:
+        _dsb_fail('capacity rejection reconciliation is cleanup-only, never provision/resume.')
+    require_acquired_run_lease(lease, job['id'])
+    if lease.path.parent.parent.name != '.candidate-support':
+        _dsb_fail('capacity rejection recovery requires the private candidate lease namespace.')
+    source_key = 'candidate_cloud_cleanup_source'
+    source = job.get(source_key)
+    required = {'schema_version', 'candidate_schema', 'run_id', 'provider', 'pin_fingerprint',
+                'plan_sha256', 'resources', 'cloud_identity', 'fingerprint'}
+    if (not isinstance(source, dict) or set(source) != required
+            or type(source['schema_version']) is not int or source['schema_version'] != 1
+            or source['candidate_schema'] != 'candidate-support-cleanup-source-v1'
+            or source['run_id'] != job['id'] or source['provider'] != 'aws'
+            or source['pin_fingerprint'] != pin['fingerprint']
+            or source['plan_sha256'] != _dsb_rejection_hash(job['plan'])
+            or source['cloud_identity'] is not None
+            or source['fingerprint'] != _dsb_rejection_hash({k: v for k, v in source.items() if k != 'fingerprint'})
+            or _dsb_rejection_json(source['resources']) != _dsb_rejection_json(job['resources'])):
+        _dsb_fail('capacity rejection recovery requires the unchanged original partial-provision cleanup source.')
+    state = _dsb_load(job)
+    contract, graph = state['contract'], state['graph']
+    candidates = [key for key, entry in graph.items() if entry.get('status') == 'create_ambiguous']
+    if (len(candidates) != 1 or not candidates[0].startswith('instance-')
+            or graph[candidates[0]] != {'status': 'create_ambiguous'}
+            or any(entry.get('status') in {'creating', 'deleting', 'delete_ambiguous', 'deleted'}
+                   for entry in graph.values())):
+        _dsb_fail('recovery needs exactly one unresolved no-ID instance and untouched dependencies.')
+    key = candidates[0]
+    request = _dsb_specs(contract, graph)[key][1]
+    if not all(request['NetworkInterfaces'][0][field] for field in ('SubnetId', 'Groups')):
+        _dsb_fail('immutable launch dependencies are incomplete.')
+    frozen = {name: _dsb_rejection_json(job.get(name)) for name in (
+        'id', 'plan', 'candidate_support_pin', 'candidate_support_operator', source_key, 'resources')}
+    previous = copy.deepcopy(job.get(AWS_DSB_REJECTION_EVIDENCE_KEY, []))
+    if not isinstance(previous, list):
+        _dsb_fail('retained rejection evidence cannot be overwritten.')
+    for evidence in previous:
+        if (not isinstance(evidence, dict) or evidence.get('run_id') != job['id']
+                or evidence.get('source_fingerprint') != source['fingerprint']
+                or evidence.get('fingerprint') != _dsb_rejection_hash({k: v for k, v in evidence.items() if k != 'fingerprint'})):
+            _dsb_fail('retained rejection evidence is malformed or crossed.')
+    expected_history = _dsb_rejection_json(previous)
+
+    def guard():
+        require_acquired_run_lease(lease, job['id'])
+        if (any(_dsb_rejection_json(job.get(name)) != value for name, value in frozen.items())
+                or _dsb_rejection_json(job.get(AWS_DSB_REJECTION_EVIDENCE_KEY, [])) != expected_history):
+            _dsb_fail('private recovery identity/source/intent changed during reconciliation.')
+
+    def read(function, **kwargs):
+        guard()
+        value = function(**kwargs)
+        guard()
+        return value
+
+    now = datetime.now(timezone.utc)
+    try:
+        start = datetime.fromisoformat(job['created_at'])
+        retained_at = datetime.fromisoformat(job['updated_at'])
+        if (start.tzinfo is None or retained_at.tzinfo is None or not start <= retained_at <= now
+                or now - start > timedelta(hours=24)):
+            raise ValueError('outside bounded recovery window')
+    except (KeyError, TypeError, ValueError) as exc:
+        _dsb_fail(f'invalid bounded private recovery timestamps: {exc}')
+    session = _session(contract['profile'], contract['region'], aws_session)
+    account = read(session.client('sts', region_name=contract['region']).get_caller_identity).get('Account')
+    if account != contract['account_id']:
+        _dsb_fail('current AWS account differs from the immutable launch account.')
+    ec2 = _dsb_ec2_client(session, contract['region'])
+    trail = cloudtrail_client or session.client('cloudtrail', region_name=contract['region'])
+    lookup = {'LookupAttributes': [{'AttributeKey': 'EventName', 'AttributeValue': 'RunInstances'}],
+              'StartTime': start, 'EndTime': now, 'MaxResults': 50}
+    matches, seen_events, seen_tokens = [], set(), set()
+    for page in range(4):
+        response = read(trail.lookup_events, **lookup)
+        events = response.get('Events')
+        if not isinstance(events, list) or len(events) > 50:
+            _dsb_fail('CloudTrail returned an invalid or oversized page.')
+        for summary in events:
+            raw = summary.get('CloudTrailEvent') if isinstance(summary, dict) else None
+            if not isinstance(raw, str) or not 0 < len(raw.encode()) <= 262144:
+                _dsb_fail('CloudTrail event body is missing or oversized.')
+            def unique(pairs):
+                values = {}
+                for name, value in pairs:
+                    if name in values:
+                        raise ValueError('duplicate event field')
+                    values[name] = value
+                return values
+            try:
+                event = json.loads(raw, object_pairs_hook=unique,
+                                   parse_constant=lambda _value: (_ for _ in ()).throw(ValueError('nonfinite event')))
+                identifier = event['eventID']
+                if (summary.get('EventId') != identifier or identifier in seen_events
+                        or event.get('eventSource') != 'ec2.amazonaws.com' or event.get('eventName') != 'RunInstances'):
+                    raise ValueError('crossed or duplicate event identity')
+                seen_events.add(identifier)
+                params = event['requestParameters']
+                if not isinstance(params, dict):
+                    raise ValueError('missing request parameters')
+            except (KeyError, TypeError, ValueError, RecursionError):
+                _dsb_fail('CloudTrail event is malformed, duplicate, or crossed.')
+            if params.get('clientToken') == request['ClientToken']:
+                matches.append(event)
+        next_token = response.get('NextToken')
+        if not next_token:
+            break
+        if not isinstance(next_token, str) or next_token in seen_tokens or page == 3:
+            _dsb_fail('CloudTrail lookup exceeded its finite evidence bound.')
+        seen_tokens.add(next_token)
+        lookup['NextToken'] = next_token
+    if len(matches) != 1:
+        _dsb_fail('CloudTrail must contain exactly one matching immutable launch, not a replay or missing event.')
+    event = matches[0]
+    try:
+        event_time = datetime.fromisoformat(event['eventTime'].replace('Z', '+00:00'))
+        valid_time = event_time.tzinfo is not None and start <= event_time <= retained_at
+    except (KeyError, TypeError, ValueError, AttributeError):
+        valid_time = False
+    if (event.get('eventID') != event_id or not valid_time
+            or event.get('awsRegion') != contract['region']
+            or event.get('recipientAccountId') != account
+            or not isinstance(event.get('userIdentity'), dict) or event['userIdentity'].get('accountId') != account
+            or event.get('errorCode') != 'Server.InsufficientVolumeCapacity'
+            or 'responseElements' not in event or event['responseElements'] is not None
+            or not isinstance(event.get('requestID'), str) or not event['requestID']
+            or _dsb_rejection_json(event['requestParameters']) != _dsb_rejection_json(_dsb_rejection_wire_request(request))):
+        _dsb_fail('authoritative rejection is late/replaced/crossed or differs from the exact immutable launch request.')
+    observations = []
+    for number in range(2):
+        for label, filters in (
+            ('client_token', [{'Name': 'client-token', 'Values': [request['ClientToken']]}]),
+            ('role_tags', _dsb_filters(job['id'], key)),
+            ('vpc', [{'Name': 'vpc-id', 'Values': [graph['vpc']['id']]}]),
+        ):
+            response = read(ec2.describe_instances, Filters=filters, MaxResults=1000)
+            reservations = response.get('Reservations')
+            if (not isinstance(reservations, list) or response.get('NextToken')
+                    or any(not isinstance(value, dict) or value.get('Instances') != [] for value in reservations)):
+                _dsb_fail(f'fresh {label} instance absence was not proved; retain all dependencies.')
+            observations.append({'pass': number + 1, 'selector': label, 'instances': 0})
+        response = read(ec2.describe_volumes, Filters=_dsb_filters(job['id'], 'boot-' + key.removeprefix('instance-')),
+                        MaxResults=500)
+        if response.get('Volumes') != [] or response.get('NextToken'):
+            _dsb_fail('a rejected-launch boot volume may exist; retain all dependencies.')
+        observations.append({'pass': number + 1, 'selector': 'boot_volume_tags', 'volumes': 0})
+        if number == 0:
+            time.sleep(AMBIGUOUS_TAG_LOOKUP_DELAY_SECONDS)
+    value = {
+        'schema_version': 1, 'candidate_schema': 'aws-candidate-capacity-rejection-cleanup-v1',
+        'candidate_only': True, 'cleanup_only': True, 'run_id': job['id'], 'provider': 'aws',
+        'pin_fingerprint': pin['fingerprint'], 'source_fingerprint': source['fingerprint'],
+        'contract_sha256': _dsb_rejection_hash(contract), 'request_sha256': _dsb_rejection_hash(request),
+        'resource_key': key, 'before': {'status': 'create_ambiguous'}, 'after': {'status': 'deleted'},
+        'event_id': event_id, 'cloudtrail_event': event, 'absence_observations': observations,
+        'observed_at': now.isoformat(), 'provisioning_allowed': False,
+        'runtime_qualified': False, 'measurement_qualified': False,
+    }
+    evidence = {**value, 'fingerprint': _dsb_rejection_hash(value)}
+    guard()
+    job[AWS_DSB_REJECTION_EVIDENCE_KEY] = [*previous, evidence]
+    expected_history = _dsb_rejection_json(job[AWS_DSB_REJECTION_EVIDENCE_KEY])
+    persist(job)  # Full private evidence is durable before the one tombstone.
+    guard()
+    graph[key] = {'status': 'deleted'}
+    persist_role_node_inventory(job['resources'], _dsb_inventory(contract, graph))
+    frozen['resources'] = _dsb_rejection_json(job['resources'])
+    guard()
+    persist(job)  # Inventory and the irreversible tombstone are one state write.
+    guard()
+    return {'resource_key': key, 'event_id': event_id, 'evidence_fingerprint': evidence['fingerprint'],
+            'cleanup_only': True, 'provisioning_allowed': False}
 
 
 def quiesce_distributed_deathstarbench_load_generator(

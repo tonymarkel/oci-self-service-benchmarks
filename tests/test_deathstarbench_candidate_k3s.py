@@ -403,11 +403,17 @@ class CandidateK3sTests(_CandidateCaseMixin, unittest.TestCase):
             self.assertNotIn('--prune', command)
             self.assertNotIn("'delete'", command)
 
+    def test_remote_helpers_are_frozen_at_module_import(self):
+        plan, stage, _ = self.case()
+        with patch.object(k3s.inspect, 'getsource', side_effect=AssertionError('runtime source reread')):
+            command = k3s.candidate_support_readiness_command(plan, stage, ROLE_NODES)
+        compile(shlex.split(command)[3], '<frozen-candidate-remote>', 'exec')
+
 
 class CandidateRemoteSimulationTests(_CandidateCaseMixin, unittest.TestCase):
     """Execute generated Python with a fake API and a private test lock path."""
 
-    def execute_remote(self, command, inventory, *, payload=b'', conflict=False, change_uid_after_dry=False, change_service_uid_after_dry=False):
+    def execute_remote(self, command, inventory, *, payload=b'', conflict=False, change_uid_after_dry=False, change_service_uid_after_dry=False, legacy_zip=False):
         records = []
         self.last_remote_calls = records
         current = copy.deepcopy(inventory)
@@ -460,7 +466,12 @@ class CandidateRemoteSimulationTests(_CandidateCaseMixin, unittest.TestCase):
                      patch.object(os, 'lstat', side_effect=lambda path: root_stat(real_lstat(path))), \
                      patch.object(os, 'fstat', side_effect=lambda descriptor: root_stat(real_fstat(descriptor))), \
                      patch('sys.stdin', SimpleNamespace(buffer=io.BytesIO(payload))), redirect_stdout(captured):
-                    exec(compile(source, '<simulated-candidate-remote>', 'exec'), {'__name__': '__candidate_remote__'})
+                    namespace = {'__name__': '__candidate_remote__'}
+                    if legacy_zip:
+                        # Match Python 3.9's no-keyword zip signature even when
+                        # this regression runs on the newer CI interpreters.
+                        namespace['zip'] = lambda *values: zip(*values)
+                    exec(compile(source, '<simulated-candidate-remote>', 'exec'), namespace)
             except k3s.CandidateK3sError:
                 raise
             except ValueError as exc:
@@ -468,6 +479,22 @@ class CandidateRemoteSimulationTests(_CandidateCaseMixin, unittest.TestCase):
                 # app modules, but failures retain the same semantic boundary.
                 raise k3s.CandidateK3sError(str(exc)) from exc
         return records, captured.getvalue()
+
+    def test_guest_python39_zip_keeps_exact_inventory_checks(self):
+        for workload in ('hotel_reservation', 'media_microservices'):
+            with self.subTest(workload=workload):
+                plan, stage, inventory = self.case(workload)
+                for command in (
+                    k3s.candidate_phase_reconciliation_command(plan, stage, 'services', ROLE_NODES),
+                    k3s.candidate_support_readiness_command(plan, stage, ROLE_NODES),
+                ):
+                    records, output = self.execute_remote(command, inventory, legacy_zip=True)
+                    self.assertTrue(records)
+                    self.assertTrue(json.loads(output)['inventory']['items'])
+                    drifted = copy.deepcopy(inventory)
+                    objects(drifted, 'Service')[0]['spec']['ports'].append({'port': 12345})
+                    with self.assertRaisesRegex(k3s.CandidateK3sError, 'array inventory drifted'):
+                        self.execute_remote(command, drifted, legacy_zip=True)
 
     def test_readonly_reconciliation_and_support_waits_execute_no_mutations(self):
         plan, stage, inventory = self.case()

@@ -99,6 +99,17 @@ class CandidateCloud:
             'cloud_identity_sha256': fingerprint(identity),
         }
 
+    def reconcile_aws_capacity_rejection(self, job, lease, *, event_id):
+        """Explicit cleanup-only bridge; never part of default destroy/resume."""
+        self._guard(job, lease)
+        if self.plan.provider != 'aws':
+            raise ValueError('Capacity-rejection reconciliation is AWS-only.')
+        result = aws.reconcile_distributed_capacity_rejection_for_cleanup(
+            job, lease=lease, event_id=event_id, persist=self.persist,
+        )
+        self._guard(job, lease)
+        return result
+
     def destroy_and_prove(self, job, lease):
         self._guard(job, lease)
         from scripts import deathstarbench_candidate_cloud_audit as audit

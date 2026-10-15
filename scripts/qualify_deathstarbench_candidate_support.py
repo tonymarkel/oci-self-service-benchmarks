@@ -44,6 +44,8 @@ def _parser():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--resume', metavar='RUN_ID')
     mode.add_argument('--cleanup-only', metavar='RUN_ID')
+    parser.add_argument('--reconcile-aws-capacity-rejection', metavar='CLOUDTRAIL_EVENT_ID',
+                        help='Explicit AWS cleanup-only recovery of one exact authoritative rejected launch; never replay.')
     parser.add_argument('--plan', type=Path, help='Exact five-role infrastructure BenchmarkPlan JSON for a new run.')
     parser.add_argument('--workload', choices=('hotel_reservation', 'media_microservices'))
     parser.add_argument('--image-lock', type=Path)
@@ -182,6 +184,8 @@ def _run(args, *, store=None):
     )
     if args.interrupt_after is None and args.interrupt_mode != 'graceful':
         raise ValueError('--interrupt-mode requires --interrupt-after.')
+    if args.reconcile_aws_capacity_rejection and not args.cleanup_only:
+        raise ValueError('--reconcile-aws-capacity-rejection requires --cleanup-only.')
     if args.cleanup_only and (args.interrupt_after or args.plan or args.workload or args.image_lock or args.publication
                               or args.workload_preparation or args.driver_preparation):
         raise ValueError('Cleanup-only does not accept artifact, workload, plan or interruption overrides.')
@@ -205,6 +209,8 @@ def _run(args, *, store=None):
                 raise ValueError('Resume workload differs from its immutable candidate pin.')
             ssh = None if args.cleanup_only else shared._ssh_material(args.ssh_env_file)
             plan = _infrastructure_plan(job['plan'], ssh)
+            if args.reconcile_aws_capacity_rejection and plan.provider != 'aws':
+                raise ValueError('Capacity-rejection reconciliation is AWS-only.')
             if ssh is not None and pins._public_key_digest(ssh['public_key']) != pin['ssh_public_key_sha256']:
                 raise ValueError('Resume SSH key differs from the original candidate pin.')
             artifacts = None
@@ -291,6 +297,8 @@ def _run(args, *, store=None):
 
         print(f'Private support candidate {run_id}: {plan.provider}/{pin["workload_id"]}; state {store.directory(run_id)}', flush=True)
         with _signals(job) as (signal_state, cleanup_signals):
+            if args.reconcile_aws_capacity_rejection:
+                cloud.reconcile_aws_capacity_rejection(job, lease, event_id=args.reconcile_aws_capacity_rejection)
             outcome = run_candidate_support_operator(
                 job, lease=lease, pin=pin, artifacts=artifacts, persist=lambda value, _held: persist(value),
                 provision=cloud.provision, fresh_audit=cloud.audit, prepare_runtime=prepare_runtime,

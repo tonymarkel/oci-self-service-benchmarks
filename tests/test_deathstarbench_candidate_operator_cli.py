@@ -156,9 +156,10 @@ class CandidateOperatorCliTests(unittest.TestCase):
         self.ssh = {'private_key': 'PRIVATE-TEST-ONLY', 'public_key': PUBLIC_KEY, 'passphrase': None}
         self.plan = cli._infrastructure_plan(plan_values(), self.ssh)
 
-    def saved_run(self):
+    def saved_run(self, provider='azure'):
         run_id, lease = self.store.allocate()
-        pin = cli._new_pin(run_id, self.plan, {'schema_version': 1, 'provider': 'azure'}, self.binding, self.ssh)
+        plan = self.plan if provider == 'azure' else cli._infrastructure_plan(plan_values(provider), self.ssh)
+        pin = cli._new_pin(run_id, plan, {'schema_version': 1, 'provider': provider}, self.binding, self.ssh)
         job = {'id': run_id, 'plan': pin['infrastructure_plan'], 'candidate_support_pin': pin,
                'resources': {}, 'results': [], 'events': [], 'status': 'queued'}
         job[core.OPERATOR_JOURNAL_KEY] = core._new_record(pin)
@@ -186,11 +187,51 @@ class CandidateOperatorCliTests(unittest.TestCase):
             self.assertEqual(cli._run(cli._parser().parse_args(['--cleanup-only', run_id]), store=self.store), 0)
         cloud.provision.assert_not_called()
         cloud.audit.assert_not_called()
+        cloud.reconcile_aws_capacity_rejection.assert_not_called()
         with self.store.acquire(run_id) as lease:
             saved = self.store.load(run_id, lease)
         self.assertTrue(saved[core.OPERATOR_JOURNAL_KEY]['cleanup_complete'])
         self.assertFalse(saved[core.OPERATOR_JOURNAL_KEY]['scope']['public_dispatch_enabled'])
         self.assertEqual(saved['results'], [])
+
+    def test_aws_rejection_reconciliation_is_explicit_cleanup_only_and_precedes_normal_cleanup(self):
+        run_id = self.saved_run('aws')
+        order = []
+        event_id = '11111111-2222-4333-8444-555555555555'
+        def reconcile(job, held, *, event_id):
+            self.store.require_lease(run_id, held)
+            self.assertEqual(event_id, '11111111-2222-4333-8444-555555555555')
+            order.append('reconcile')
+        def destroy(job, held):
+            self.store.require_lease(run_id, held)
+            self.assertEqual(order, ['reconcile'])
+            order.append('destroy')
+            return {'schema_version': 1, 'candidate_schema': core.CLEANUP_PROOF_SCHEMA,
+                    'candidate_only': True, 'run_id': run_id, 'provider': 'aws',
+                    'cleanup_complete': True, 'independent_absence_proved': True}
+        cloud = mock.Mock(destroy_and_prove=destroy, reconcile_aws_capacity_rejection=reconcile)
+        with mock.patch.object(cli, 'CandidateCloud', return_value=cloud), \
+             mock.patch.object(cli, '_adopt', side_effect=AssertionError('No registry')), \
+             mock.patch.object(cli.shared, '_ssh_material', side_effect=AssertionError('No SSH')), \
+             redirect_stdout(io.StringIO()) as output:
+            args = cli._parser().parse_args(['--cleanup-only', run_id, '--reconcile-aws-capacity-rejection', event_id])
+            self.assertEqual(cli._run(args, store=self.store), 0)
+        self.assertEqual(order, ['reconcile', 'destroy'])
+        self.assertNotIn('cloudtrail_event', output.getvalue())
+        cloud.provision.assert_not_called()
+
+    def test_aws_rejection_flag_is_refused_for_resume_new_and_nonaws_before_cloud(self):
+        event_id = '11111111-2222-4333-8444-555555555555'
+        for mode in ([], ['--resume', '0123456789ab']):
+            with mock.patch.object(self.store, 'acquire') as acquire, self.assertRaisesRegex(ValueError, 'cleanup-only'):
+                args = cli._parser().parse_args([*mode, '--reconcile-aws-capacity-rejection', event_id])
+                cli._run(args, store=self.store)
+            acquire.assert_not_called()
+        run_id = self.saved_run()
+        with mock.patch.object(cli, 'CandidateCloud') as cloud, self.assertRaisesRegex(ValueError, 'AWS-only'):
+            args = cli._parser().parse_args(['--cleanup-only', run_id, '--reconcile-aws-capacity-rejection', event_id])
+            cli._run(args, store=self.store)
+        cloud.assert_not_called()
 
     def test_cleanup_carrier_has_only_nonsecret_placeholders_outside_saved_plan(self):
         restored = cli._infrastructure_plan(self.plan.model_dump(exclude={'ssh_private_key', 'ssh_public_key', 'ssh_key_passphrase'}))

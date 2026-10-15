@@ -509,6 +509,30 @@ provisioning. Once teardown begins only cleanup-only is permitted. Provider
 selector/image/shape overrides are not accepted during recovery. The original
 SDK authentication and exact ownership evidence are still required for cleanup.
 
+An older AWS partial launch can retain a no-ID ambiguous intent when EC2
+explicitly rejected its root EBS allocation with
+[`InsufficientVolumeCapacity`](https://docs.aws.amazon.com/ec2/latest/devguide/errors-overview.html).
+New launches recognize that exact fresh service rejection. Existing ambiguous
+records are **not** resolved from a saved error message or a missing tag lookup.
+For this one case an operator can explicitly supply the authoritative event:
+
+```sh
+python scripts/qualify_deathstarbench_candidate_support.py \
+  --cleanup-only <run-id> \
+  --reconcile-aws-capacity-rejection <cloudtrail-event-uuid>
+```
+
+This optional AWS-only mode additionally requires `cloudtrail:LookupEvents`.
+It takes a fresh, bounded CloudTrail lookup and requires exactly one matching
+immutable RunInstances request, account/region/time, the exact capacity error,
+and a null response. Two fresh instance and boot-volume absence passes must
+also succeed. Full private evidence is persisted before the sole no-ID intent
+becomes a deletion tombstone; it never becomes provisionable or replays a
+create. The original cleanup-source snapshot is unchanged, and ordinary
+whole-graph destruction plus independent terminal proof must still pass.
+Uncertain, replaced, duplicate, late, or inaccessible evidence fails closed.
+This is not a general override for ambiguous launches.
+
 SIGKILL, power loss, or the explicit qualification-only
 `--interrupt-after cluster-ready|support-ready --interrupt-mode hard` cannot run
 `finally`; these deliberately retain billable resources and require recovery.
@@ -522,6 +546,51 @@ precedence. No exit code authorizes application startup or public release.
 Unit tests use synthetic SDK/SSH/registry transports and are not live cloud
 qualification. Any live evidence is retained separately with its exact scope;
 neither a support-ready Pod nor a TCP probe is a semantic application test.
+
+### Support-only live observations, 15 October 2026
+
+The private operator completed the following bounded live checks. Each row is
+one candidate/provider observation, not qualification of both workloads or
+both application architectures on every provider. Support roles use amd64;
+the application column describes the prepared node, not application execution.
+
+| Provider | Candidate | Application node | Ready support Pods | Application Pods | Independent cleanup |
+| --- | --- | --- | --- | --- | --- |
+| Azure | Hotel | Arm64 | 14 | 0 | Passed |
+| AWS | Hotel | x86-64 | 14 | 0 | Passed |
+| GCP | Media | Arm64 | 19 | 0 | Passed |
+| OCI | Media | x86-64 | 19 | 0 | Passed |
+
+All six guarded phases completed in each successful run. Hotel's ten and
+Media's thirteen application deployments remained at zero replicas. No
+application, initializer, load driver, or benchmark measurement was dispatched.
+Fresh cloud ownership audits ran before SSH and after K3s preparation; fresh
+support-image byte access preceded staging. Every attempt, including the four
+earlier failures, finished with independently proved destruction.
+
+The failed attempts remain in the evidence rather than being counted as
+support successes. A hard GCP cluster-ready interruption recovered without
+reprovisioning, then exposed a Python 3.9 `zip` compatibility issue. Source edits
+overlapping other early processes exposed dynamic source-extraction drift;
+embedded helpers are now frozen when imported. Fresh processes validated that
+repair. OCI's earlier process overlapped source evolution, so its summary does
+not claim execution of one exact final commit. AWS's rejected EBS allocation
+was reconciled only through the explicit CloudTrail/absence boundary above; a
+new run in another zone then passed support staging and cleanup.
+
+The [retained observation summary](qualification/deathstarbench-candidate-support-operator-v1.json)
+contains counts and hashes, not cloud account/resource IDs, IP addresses,
+hostnames, keys, or raw CloudTrail events. It records source-cohort limitations
+and cannot reconstruct fresh artifact, cloud, or cleanup authority. Exact
+private records remain outside web history.
+
+Local `scripts/check.sh` passed 1,681 tests (one existing macOS GNU-sed/time
+skip). GitHub's Python 3.10/3.14 CI and the
+[read-only artifact/support-byte workflow](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38749728738)
+also passed on the tested code commit. All global application/runtime, dataset,
+measurement, network-denial, full-anonymous-image, and public release gates
+remain closed. Hotel and Media are still hidden in the UI; support readiness
+does not enable their public benchmark dispatch.
 
 ## Next review slices and release prerequisites
 

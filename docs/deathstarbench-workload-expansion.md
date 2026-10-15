@@ -1,6 +1,6 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-13: **published artifacts and run-bound runtime preflight, not public benchmarks**.
+Status, 2026-10-13: **published artifacts and support-only K3s staging foundation, not public benchmarks**.
 Social Network is still the only released distributed workload. The audited
 foundations now have drift-checked application/frontend, initializer, and
 load-driver preparation tools, plus an explicit native publication pipeline.
@@ -319,11 +319,96 @@ hostPath PVC requests are not per-directory filesystem quotas or reservations.
 The storage journal records only `preflight_only` or an exact, parsed
 `storage_prepared` receipt. A restored receipt is historical predeployment
 evidence, not current mount/free-space/readiness proof. Re-recording storage is
-refused pending a future read-only reconciliation boundary; preparation must
-not be replayed as a live populated-database recovery command. This slice does
+refused by this storage-only API; the separate read-only boundary below is used
+for support-stage retry. Preparation must not be replayed as a live
+populated-database recovery command. The preflight slice does
 not apply pods, seed either dataset, run a benchmark, claim denied-edge or
 cleanup success, or enable UI selection. Portable shell tests use real temporary
 files with explicit privileged-tool stubs, not live cloud/storage attestation.
+
+## Support-only K3s staging checkpoint
+
+`app/deathstarbench_candidate_stage.py` derives a separate run-bound stage,
+without changing the final offline bundle or Social Network's released path.
+Its six phases are namespace, storage, policies, services, support workloads,
+and blocked applications. All fourteen Hotel or nineteen Media support
+Deployments request one replica. Every application/frontend requests **zero**:
+ten for Hotel, thirteen for Media. No initializer, driver, Job, autoscaler, or
+application-start permission is introduced. This is necessary because eight
+Hotel programs seed MongoDB on startup; Media initialization/data rights also
+remain unqualified. Zero replicas are the desired/current observed state, not a
+permanent admission policy against an external operator.
+
+All object/pod-template metadata binds run, runtime snapshot, stage revision,
+non-circular stage identity, and denied application startup. Exact payload hashes
+are separate. Crossed runs/workloads/architectures, changed replicas, altered
+payloads, or substitution of the final application-starting bundle fail closed.
+
+`app/deathstarbench_candidate_k3s.py` generates apply, read-only reconciliation,
+and support-readiness commands. Apply hashes stdin, acquires a root-only
+namespace lock, verifies owned namespace/related-PV inventory, and performs
+strict server-side dry-run before apply. Namespace creation is atomic; conflicts
+are not ownership proof. All observed object UIDs must remain unchanged across
+dry-run/apply; normal controller/Pod replacement also requires a new explicit
+qualification attempt rather than transparent adoption.
+Unknown/foreign objects, orphaned PVs, application Pods, nonzero application
+controllers, or incompatible specs are refused, never adopted/deleted/scaled
+down. There is no prune, forced field conflict, or repair. Multi-object apply is
+not a transaction; its caller must journal and reconcile partial completion.
+
+Attestation checks exact role nodes/architectures, static inventory, PVC/PV UID
+binding/paths, frontend ports (including Hotel pod 5000), network policies,
+support Pod/ReplicaSet/Deployment ownership, locked image IDs, readiness and
+container/restart identities, with zero observed application Pods. Only support
+services are waited on; missing support Pods cannot become successful readiness.
+Narrow API-default equivalences cover omitted empty PV class/container env/deny
+arrays and controller fields. ReplicaSet metadata follows Deployment annotations
+while its template follows pod-template annotations, matching the
+[pinned Kubernetes controller](https://github.com/kubernetes/kubernetes/blob/v1.36.4/pkg/controller/deployment/util/deployment_util.go).
+TCP readiness is not a semantic transaction test. Current paused observations
+do not prove that another actor never started applications or seeded data.
+
+`app/deathstarbench_candidate_deployment.py` is an **internal leased facade**,
+not public dispatch or a live provisioning wrapper. It requires durable
+persistence, the exact run lease, and strict provider-persisted K3s inventory in
+`cluster_ready`. It binds run separately from the run-independent topology hash,
+plus inventory hash, SSH routes, role nodes, server CA and provider disk identity.
+An additive acquired-lease validator verifies the original factory capability,
+retained descriptors/inodes, canonical paths and owner metadata, plus both held
+current/legacy locks. Fabricated/copied, released, unlocked or changed leases
+cannot authorize staging; observational lease status is not permission.
+Those bindings and the exact stage journal are checked before/after every
+remote/persist callback. Erasing or substituting persisted intent prevents
+subsequent dispatch. Live K3s nodes/system services, CA and disk are re-attested
+before mutation; existing
+Social execution/results cannot be adopted. The caller still owns independent
+fresh cloud ownership checks, provisioning, signals and exact cleanup.
+
+A namespace guard precedes initial storage mutation. Preparation is permitted
+only before the stage namespace exists. Once the initial full-budget receipt is
+journaled, retries use `app/deathstarbench_candidate_storage_observation.py`:
+read-only checks of marker, UUID/XFS, exact inventory, unsafe trees, SELinux and
+capacity/free bytes. Observed free space may now be below 80 GiB (even zero),
+because MongoDB can consume the initially attested budget; total capacity must
+still cover the claims. No directories, labels, modes or data are repaired.
+
+The journal persists ordered intent before dispatch, pairs pending phases with
+before-apply UID receipts, and reconciles after transport completion/loss.
+Complete owned state advances without replay; partial owned state retries only
+with unchanged observed UIDs. Completed phases and namespace continuity are
+rechecked before further mutation, and every completed static UID must survive
+the final readiness observation. Saved `support_ready_applications_paused` is
+historical and revoked before the first retry SSH, including cancellation or
+transport failure. All public/runtime/dataset/measurement/network/cleanup gates
+remain false; this is support readiness only.
+
+Tests execute generated remote Python against a **fake** Kubernetes API, portable
+filesystem harnesses, simulated SSH/persist failures, and full-parser journal
+integration. They are not live API/cloud qualification. The manual read-only
+artifact workflow additionally derives staged manifests and syntax-checks
+commands against actual image locks with synthetic provider/architecture inputs;
+its scope explicitly says Kubernetes/guest/cloud operations were not executed.
+Hotel and Media remain unavailable in the UI.
 
 ## Next review slices and release prerequisites
 
@@ -337,8 +422,10 @@ files with explicit privileged-tool stubs, not live cloud/storage attestation.
 2. **Workload-aware execution and measurement.** Pass the selected immutable
    profile through deployment/readiness, network qualification, database
    preparation, run-bound lock snapshots, journals, recovery, and cleanup.
-   The candidate artifact/storage preflight now supplies the first boundaries;
-   workload-aware K3s apply/readiness and live operator integration are next.
+   Candidate artifact/storage preflight and support-only K3s apply/readiness now
+   supply the first boundaries. A cleanup-guaranteed live operator wrapper, real
+   support-stage qualification, guarded application startup and semantic
+   initialization/measurement are next.
    Add exact dataset and semantic response verification, durable one-shot
    initialization, unchanged pre/post pod identities, and workload-specific
    comparison cohorts. Do not populate Hotel/Media metadata with fabricated

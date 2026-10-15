@@ -80,7 +80,7 @@ jobs:
           printf '%s  %s\n' "$LOCK_SHA256" .build/evidence/candidate-image-lock.json | sha256sum --check --strict -
           printf '%s  %s\n' "$PUBLICATION_SHA256" .build/evidence/publication.json | sha256sum --check --strict -
 
-      - name: Fresh registry adoption and offline provider/architecture snapshots
+      - name: Fresh registry adoption and offline support-stage command validation
         env:
           WORKLOAD: ${{ matrix.workload }}
           PREPARATION_FOLDER: ${{ matrix.folder }}
@@ -89,10 +89,12 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import hashlib, json, os
+          import hashlib, json, os, subprocess
           from pathlib import Path
           from app.deathstarbench_candidate_artifacts import adopt_candidate_artifacts
           from app.deathstarbench_candidate_runtime import create_candidate_runtime_plan, validate_candidate_runtime_snapshot
+          from app.deathstarbench_candidate_stage import build_candidate_support_stage
+          from app.deathstarbench_candidate_k3s import candidate_phase_apply_command, candidate_phase_reconciliation_command, candidate_support_readiness_command
           root = Path('.build/prepared/first')
           folder = os.environ['PREPARATION_FOLDER']
           binding = adopt_candidate_artifacts(
@@ -116,11 +118,23 @@ jobs:
                   )
                   validate_candidate_runtime_snapshot(plan.snapshot(), plan)
                   (output / (provider + '-' + arch + '-offline-snapshot.json')).write_text(plan.snapshot_json)
+                  stage = build_candidate_support_stage(plan)
+                  (output / (provider + '-' + arch + '-offline-support-stage.json')).write_text(stage.canonical_json)
+                  (output / (provider + '-' + arch + '-offline-support-stage-identity.json')).write_text(json.dumps(stage.metadata(), sort_keys=True, indent=2) + '\n')
+                  roles = {role: 'dsb-' + role for role in ('application', 'cache', 'control', 'database')}
+                  commands = [candidate_support_readiness_command(plan, stage, roles)]
+                  for phase, _payload in stage.phases:
+                      commands.extend((candidate_phase_apply_command(plan, stage, phase, roles), candidate_phase_reconciliation_command(plan, stage, phase, roles)))
+                  # Parse generated shell only; do not execute it or contact Kubernetes.
+                  for command in commands:
+                      subprocess.run(['bash', '-n', '-c', command], check=True, capture_output=True)
           (output / 'scope.json').write_text(json.dumps({
               'candidate_only': True, 'released': False, 'source_commit': os.environ['GITHUB_SHA'],
               'workload_id': binding.workload_id, 'fresh_artifact_adoption': True,
               'provider_and_guest_inputs': 'synthetic-offline-fixtures-not-cloud-attestation',
               'cloud_resources_created': False, 'guest_storage_executed': False,
+              'support_stage_rendered': True, 'support_stage_commands_syntax_checked': True,
+              'support_stage_executed': False, 'kubernetes_api_contacted': False,
               'runtime_qualified': False, 'measurement_qualified': False,
               'anonymous_layer_pull_qualified': False, 'public_ui_enabled': False,
           }, sort_keys=True, indent=2) + '\n')

@@ -160,7 +160,9 @@ def _subset(actual, expected, label):
         actual = _array(actual, label)
         if len(actual) != len(expected):
             raise CandidateK3sError(f'{label} array inventory drifted.')
-        for index, (left, right) in enumerate(zip(actual, expected, strict=True)):
+        # Rocky/Oracle Linux 9 guests use Python 3.9, whose zip has no strict
+        # keyword. The explicit length check above retains the exact boundary.
+        for index, (left, right) in enumerate(zip(actual, expected)):
             _subset(left, right, f'{label}[{index}]')
     elif type(actual) is not type(expected) or actual != expected:
         raise CandidateK3sError(f'{label} drifted.')
@@ -452,7 +454,8 @@ def _validate_inventory(inventory, context, *, complete):
                     raise CandidateK3sError(f'{label} exposes an unapproved external path.')
                 if spec.get('publishNotReadyAddresses', False) is not False or spec.get('sessionAffinity', 'None') != 'None':
                     raise CandidateK3sError(f'{label} service behavior drifted.')
-                for port, approved_port in zip(spec['ports'], approved['spec']['ports'], strict=True):
+                # _subset already checked the exact ports length and contents.
+                for port, approved_port in zip(spec['ports'], approved['spec']['ports']):
                     if 'nodePort' not in approved_port and port.get('nodePort', 0) != 0:
                         raise CandidateK3sError(f'{label} exposes an unexpected NodePort.')
                 if complete:

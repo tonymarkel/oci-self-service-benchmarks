@@ -95,6 +95,7 @@ jobs:
           from app.deathstarbench_candidate_runtime import create_candidate_runtime_plan, validate_candidate_runtime_snapshot
           from app.deathstarbench_candidate_stage import build_candidate_support_stage
           from app.deathstarbench_candidate_k3s import candidate_phase_apply_command, candidate_phase_reconciliation_command, candidate_support_readiness_command
+          from app.deathstarbench_candidate_image_access import qualify_candidate_support_image_access
           root = Path('.build/prepared/first')
           folder = os.environ['PREPARATION_FOLDER']
           binding = adopt_candidate_artifacts(
@@ -128,6 +129,11 @@ jobs:
                   # Parse generated shell only; do not execute it or contact Kubernetes.
                   for command in commands:
                       subprocess.run(['bash', '-n', '-c', command], check=True, capture_output=True)
+          # One exact support-byte download per workload, not per provider/arch.
+          # The last plan is explicitly an offline synthetic fixture. No Docker,
+          # guest command, Kubernetes API, application or cloud action executes.
+          support_access = qualify_candidate_support_image_access(plan, stage)
+          (output / 'anonymous-support-byte-access.json').write_text(json.dumps(support_access.metadata(), sort_keys=True, indent=2) + '\n')
           (output / 'scope.json').write_text(json.dumps({
               'candidate_only': True, 'released': False, 'source_commit': os.environ['GITHUB_SHA'],
               'workload_id': binding.workload_id, 'fresh_artifact_adoption': True,
@@ -135,6 +141,7 @@ jobs:
               'cloud_resources_created': False, 'guest_storage_executed': False,
               'support_stage_rendered': True, 'support_stage_commands_syntax_checked': True,
               'support_stage_executed': False, 'kubernetes_api_contacted': False,
+              'anonymous_support_bytes_verified': True, 'support_image_execution_performed': False,
               'runtime_qualified': False, 'measurement_qualified': False,
               'anonymous_layer_pull_qualified': False, 'public_ui_enabled': False,
           }, sort_keys=True, indent=2) + '\n')

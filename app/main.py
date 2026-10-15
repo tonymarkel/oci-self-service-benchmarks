@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import stat
 import shutil
 import signal
 import subprocess
@@ -139,6 +140,7 @@ from .run_lease import (
     RunLeaseHeldError,
     acquire_run_lease,
     inspect_run_lease,
+    require_acquired_run_lease,
 )
 from .phoronix import (
     PREPARE_TIMEOUT_SECONDS as PHORONIX_PREPARE_TIMEOUT_SECONDS,
@@ -3570,6 +3572,38 @@ def command_output(stdout, stderr):
     )
 
 
+def _ssh_known_hosts_path(job):
+    """Keep private operator host keys under its original acquired run lease."""
+    private_keys = {'_candidate_ssh_directory', '_candidate_ssh_lease'}
+    if private_keys.intersection(job):
+        if not private_keys <= set(job) or job.get('_persist_state') is not False:
+            raise ValueError('Private SSH state requires the complete process-local candidate capability.')
+        lease = require_acquired_run_lease(job['_candidate_ssh_lease'], job['id'])
+        directory = job['_candidate_ssh_directory']
+        if (not isinstance(directory, Path) or directory.is_symlink()
+                or directory.parent.name != '.candidate-support'
+                or directory.resolve(strict=True) != lease.path.parent.resolve(strict=True)):
+            raise ValueError('Private SSH host keys must use the exact acquired candidate directory.')
+        details = directory.stat()
+        if details.st_uid != os.geteuid() or stat.S_IMODE(details.st_mode) != 0o700:
+            raise ValueError('Private SSH state directory permissions changed.')
+        path = directory / 'known_hosts'
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        try:
+            details = os.fstat(descriptor)
+            if (not stat.S_ISREG(details.st_mode) or details.st_uid != os.geteuid()
+                    or details.st_nlink != 1 or stat.S_IMODE(details.st_mode) != 0o600):
+                raise ValueError('Private SSH host keys must be an owned 0600 regular file.')
+        finally:
+            os.close(descriptor)
+        return path
+    path = RUNS / str(job['id']) / 'known_hosts'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(exist_ok=True)
+    os.chmod(path, 0o600)
+    return path
+
+
 def ssh(
     job,
     command,
@@ -3642,6 +3676,7 @@ def ssh(
             raise RuntimeError(
                 f'SSH jump target {jump_host_key!r} is not available for this run.'
             )
+    known_hosts_path = _ssh_known_hosts_path(job)
     with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
         f.write(job['_key'])
         path = f.name
@@ -3663,10 +3698,6 @@ def ssh(
             'OCI_BENCHMARK_SSH_PASSPHRASE': job['_passphrase'],
         })
     ssh_user = job.get('resources', {}).get('ssh_user', 'opc')
-    known_hosts_path = RUNS / str(job['id']) / 'known_hosts'
-    known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
-    known_hosts_path.touch(exist_ok=True)
-    os.chmod(known_hosts_path, 0o600)
     transport_options = [
         '-F', '/dev/null',
         '-o', 'ForwardAgent=no',

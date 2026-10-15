@@ -951,8 +951,7 @@ the API can represent their empty lists as
 [JSON null](https://github.com/kubernetes/kubernetes/issues/135968).
 The run retained its initial journal event, no dispatch latches and a successful
 two-pass independent Azure absence proof. This is useful failure-path evidence,
-not successful initialization. Fresh initialization, separate global read-only
-verification and accepted-response-loss qualification are still pending.
+not successful initialization or separate global read-only verification.
 
 The validator now accepts only empty, null or omitted ports/endpoints for these
 paused-Service placeholders. Active support Services still require their full
@@ -962,6 +961,30 @@ and any published paused-application endpoint remain failures. Regression
 fixtures include all ten paused placeholders rather than omitting them. This
 normalization does not grant application-start or release authority, and a
 fresh live attempt is required to qualify the changed controller.
+
+With source `a22db227`, GCP Arm attempt `e88f16cf1871` passed the live preflight
+and created both gated Pods. The requested `initialize-response-returned`
+interruption fired after the remote gate-release command returned but before
+the controller parsed its acknowledgement. Exit 130 was expected: the journal
+retained three events and one initializer latch, no verifier latch or exit
+acknowledgement, and an explicitly unknown initialization outcome. There was no
+replay or verifier dispatch. Cleanup completed with two independent absence
+passes covering the twenty expected GCP resources. This was an injected client
+acknowledgement-loss test, not an actual network outage or successful dataset
+initialization.
+
+Azure Arm attempt `35d8be5e471a`, also at `a22db227`, accepted one initializer
+release but stopped during a later status observation because the terminated
+container and Pod phase did not agree. The mismatching phase and exit code were
+not retained, so neither the exact cause nor initialization success is claimed.
+Its one initializer latch remained, no verifier ran, and two independent Azure
+absence passes confirmed cleanup. The pinned Kubernetes implementation can
+[retain a nonterminal Pod phase while container termination is reported](https://github.com/kubernetes/kubernetes/blob/v1.36.4/pkg/kubelet/status/status_manager.go#L1299-L1313).
+The observer now treats only `Pending` or `Running` in this situation as pending
+evidence, after all existing identity, timestamp, reason, signal and container
+checks. It accepts no exit code until the Pod phase is coherent. The existing
+bounded read-only wait continues; dispatch is never repeated. Contradictory
+terminal phases remain failures. Fresh positive qualification is still pending.
 
 ## Next review slices and release prerequisites
 

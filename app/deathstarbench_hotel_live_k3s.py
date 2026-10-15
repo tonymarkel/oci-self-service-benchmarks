@@ -250,10 +250,18 @@ def _initialization_pod(pod, approved, context):
         exit_code = _integer(ended.get('exitCode'), label + ' exit code')
         if _integer(ended.get('signal', 0), label + ' termination signal') != 0 or (exit_code == 0 and ended.get('reason') != 'Completed'):
             raise CandidateK3sError(label + ' termination reason or signal is not successful one-shot completion.')
-        if status.get('phase') != ('Succeeded' if exit_code == 0 else 'Failed'):
-            raise CandidateK3sError(label + ' terminal phase and exit status disagree.')
         if ended.get('containerID', container_id) != container_id:
             raise CandidateK3sError(label + ' terminated container ID drifted.')
+        phase = status.get('phase')
+        # Kubelet mergePodStatus can retain a nonterminal phase while publishing
+        # terminated container status. This is pending evidence, never success.
+        if phase in ('Pending', 'Running'):
+            return result
+        if phase != ('Succeeded' if exit_code == 0 else 'Failed'):
+            safe_phase = (phase if isinstance(phase, str) and phase in ('Succeeded', 'Failed', 'Unknown')
+                          else '<missing>' if phase is None else '<invalid>')
+            raise CandidateK3sError(label + ' terminal phase and exit status disagree '
+                                   + '(phase=' + safe_phase + ', exit_code=' + str(exit_code) + ').')
         result.update(state='terminated', exit_code=exit_code)
     return result
 

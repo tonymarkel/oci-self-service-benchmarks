@@ -277,6 +277,74 @@ class GuardedHotelLiveK3sTests(unittest.TestCase):
         run_pod(data, 'initialize-empty', exit_code=2)
         self.assertEqual(self.parse(data)['pods']['initialize-empty']['exit_code'], 2)
 
+    def test_terminated_container_with_nonterminal_pod_phase_is_pending_not_success(self):
+        for mode in ('initialize-empty', 'verify'):
+            for phase in ('Pending', 'Running'):
+                for exit_code in (0, 2):
+                    with self.subTest(mode=mode, phase=phase, exit_code=exit_code):
+                        data = inventory(self.plan, self.stage, created=True)
+                        baseline = self.parse(data)['identity']
+                        pod = run_pod(data, mode, exit_code=exit_code)
+                        pod['status']['phase'] = phase
+                        observed = self.parse(data, expected=baseline)['pods'][mode]
+                        self.assertEqual(observed['state'], 'pending')
+                        self.assertIsNone(observed['exit_code'])
+                        self.assertEqual(observed['pod'], pod)
+                        self.assertEqual(observed['container_id'], pod['status']['containerStatuses'][0]['containerID'])
+                        self.assertEqual(observed['image_id'], pod['status']['containerStatuses'][0]['imageID'])
+                        pod['status']['phase'] = 'Succeeded' if exit_code == 0 else 'Failed'
+                        completed = self.parse(data, expected=baseline)['pods'][mode]
+                        self.assertEqual(completed['state'], 'terminated')
+                        self.assertEqual(completed['exit_code'], exit_code)
+                        self.assertEqual(completed['uid'], observed['uid'])
+
+    def test_terminal_phase_contradictions_remain_hard_failures_with_safe_diagnostics(self):
+        for phase, exit_code, diagnostic in (
+                ('Succeeded', 2, 'Succeeded'), ('Failed', 0, 'Failed'),
+                ('Unknown', 0, 'Unknown'), (None, 0, '<missing>'),
+                (False, 0, '<invalid>'), ([], 0, '<invalid>'),
+                ('untrusted-secret-message', 0, '<invalid>')):
+            with self.subTest(phase=phase, exit_code=exit_code):
+                data = inventory(self.plan, self.stage, created=True)
+                pod = run_pod(data, 'initialize-empty', exit_code=exit_code)
+                pod['status']['phase'] = phase
+                with self.assertRaises(live.CandidateK3sError) as caught:
+                    self.parse(data)
+                message = str(caught.exception)
+                self.assertIn('Pod/' + pod['metadata']['name'], message)
+                self.assertIn('phase=' + diagnostic, message)
+                self.assertIn('exit_code=' + str(exit_code), message)
+                self.assertNotIn('untrusted-secret-message', message)
+
+    def test_nonterminal_phase_does_not_bypass_any_termination_validation(self):
+        baseline = self.parse(inventory(self.plan, self.stage, created=True))['identity']
+        mutations = [
+            lambda p, c, t: p['metadata'].update(uid=support_fixtures.identity('Pod', 'replacement')),
+            lambda p, c, t: p['spec'].update(nodeName=ROLES['database']),
+            lambda p, c, t: c.update(imageID='wrong-image'),
+            lambda p, c, t: c.update(restartCount=1),
+            lambda p, c, t: c.update(lastState={'terminated': {'exitCode': 0}}),
+            lambda p, c, t: c.update(containerID='containerd://bad'),
+            lambda p, c, t: t.update(containerID='containerd://' + '9' * 64),
+            lambda p, c, t: t.update(startedAt='invalid'),
+            lambda p, c, t: t.update(finishedAt='invalid'),
+            lambda p, c, t: t.update(finishedAt='2026-10-15T14:59:59Z'),
+            lambda p, c, t: t.update(exitCode=True),
+            lambda p, c, t: t.update(signal=9),
+            lambda p, c, t: t.update(signal=True),
+            lambda p, c, t: t.update(reason='Error'),
+        ]
+        for phase in ('Pending', 'Running'):
+            for index, mutate in enumerate(mutations):
+                with self.subTest(phase=phase, mutation=index):
+                    data = inventory(self.plan, self.stage, created=True)
+                    pod = run_pod(data, 'initialize-empty')
+                    pod['status']['phase'] = phase
+                    container = pod['status']['containerStatuses'][0]
+                    mutate(pod, container, container['state']['terminated'])
+                    with self.assertRaises(live.CandidateK3sError):
+                        self.parse(data, expected=baseline)
+
     def test_unsafe_admission_mutations_rejected(self):
         mutations = [
             lambda p: p['spec'].update(nodeName=ROLES['application']),
@@ -467,7 +535,7 @@ class GuardedHotelLiveK3sTests(unittest.TestCase):
         with self.assertRaises(live.CandidateK3sError):
             live.guarded_hotel_observation_command(self.plan, self.stage, ROLES, CA, operation='release', mode='initialize-empty')
 
-    def test_embedded_release_validates_fresh_graph_and_sends_one_exact_atomic_patch(self):
+    def _check_embedded_release(self, phase=None):
         data = inventory(self.plan, self.stage, created=True)
         ca_bytes = b'synthetic-certificate-only'
         ca = 'sha256:' + hashlib.sha256(ca_bytes).hexdigest()
@@ -494,7 +562,11 @@ class GuardedHotelLiveK3sTests(unittest.TestCase):
                 self.assertEqual(tests['/metadata/resourceVersion'], pod['metadata']['resourceVersion'])
                 self.assertEqual(tests['/spec'], pod['spec'])
                 self.assertEqual(operations[-1], {'op': 'remove', 'path': '/spec/schedulingGates'})
-                pod['spec'].pop('schedulingGates')
+                if phase is None:
+                    pod['spec'].pop('schedulingGates')
+                else:
+                    run_pod(data, 'initialize-empty')
+                    pod['status']['phase'] = phase
                 result = pod
             elif words[:3] == ['get', 'namespace', 'kube-system']:
                 result = {'metadata': {'uid': original['kube_system_namespace_uid']}}
@@ -515,4 +587,83 @@ class GuardedHotelLiveK3sTests(unittest.TestCase):
             exec(shlex.split(command)[3], {})
         observed = live.parse_guarded_hotel_live_observation(output.getvalue(), self.plan, self.stage, ROLES, ca, expected_identity=expected)
         self.assertEqual(observed['pods']['initialize-empty']['state'], 'pending')
+        self.assertIsNone(observed['pods']['initialize-empty']['exit_code'])
+        if phase is not None:
+            self.assertEqual(observed['pods']['initialize-empty']['pod']['status']['phase'], phase)
+            self.assertEqual(observed['pods']['initialize-empty']['pod']['status']['containerStatuses'][0]['state']['terminated']['exitCode'], 0)
         self.assertEqual(sum('patch' in arguments for arguments in calls), 1)
+
+    def test_embedded_release_validates_fresh_graph_and_sends_one_exact_atomic_patch(self):
+        self._check_embedded_release()
+
+    def test_embedded_release_accepts_only_pending_evidence_for_terminal_phase_lag(self):
+        for phase in ('Pending', 'Running'):
+            with self.subTest(phase=phase):
+                self._check_embedded_release(phase)
+
+    def test_embedded_wait_for_phase_convergence_is_readonly_and_bounded(self):
+        for persistent in (False, True):
+            with self.subTest(persistent=persistent):
+                data = inventory(self.plan, self.stage, created=True)
+                pod = run_pod(data, 'initialize-empty')
+                pod['status']['phase'] = 'Running'
+                ca_bytes = b'synthetic-certificate-only'
+                ca = 'sha256:' + hashlib.sha256(ca_bytes).hexdigest()
+                original = document(self.plan, self.stage, data)
+                original['server_ca_sha256'] = ca
+                expected = live.parse_guarded_hotel_live_observation(
+                    json.dumps(original), self.plan, self.stage, ROLES, ca)['identity']
+                command = live.guarded_hotel_observation_command(self.plan, self.stage, ROLES, ca,
+                    operation='wait', mode='initialize-empty', expected_identity=expected, timeout_seconds=3)
+                calls = []
+                inventory_reads = []
+
+                def kubectl(arguments, **kwargs):
+                    calls.append(arguments)
+                    words = arguments[2:]
+                    self.assertNotIn('patch', words)
+                    self.assertNotIn('create', words)
+                    if words[:2] == ['get', '--raw']:
+                        path = words[2].removeprefix('/apis/')
+                        evidence = original['admission_mutators']
+                        result = evidence['api_group'] if path == live.ADMISSION_GROUP else (
+                            evidence['discovery'][path] if path in evidence['discovery'] else evidence['inventories'][path])
+                    elif words[:3] == ['get', 'namespace', 'kube-system']:
+                        result = {'metadata': {'uid': original['kube_system_namespace_uid']}}
+                    elif words[:2] == ['get', 'namespace']:
+                        result = next(item for item in data['items'] if item['kind'] == 'Namespace')
+                    elif words[:2] == ['get', 'persistentvolumes']:
+                        result = {'items': [item for item in data['items'] if item['kind'] == 'PersistentVolume']}
+                    elif words[:2] == ['get', 'nodes']:
+                        result = {'items': [item for item in data['items'] if item['kind'] == 'Node']}
+                    elif words[:4] == ['-n', self.stage.namespace, 'get', 'pod']:
+                        result = pod
+                    elif words[:3] == ['-n', self.stage.namespace, 'logs']:
+                        return SimpleNamespace(returncode=0, stdout=b'{}\n', stderr=b'')
+                    elif words[:3] == ['-n', self.stage.namespace, 'get']:
+                        inventory_reads.append(1)
+                        if not persistent and len(inventory_reads) == 3:
+                            pod['status']['phase'] = 'Succeeded'
+                        result = {'items': [item for item in data['items'] if item['kind'] not in ('Namespace', 'PersistentVolume', 'Node')]}
+                    else:
+                        self.fail('Unexpected read-only kubectl invocation: ' + repr(words))
+                    return SimpleNamespace(returncode=0, stdout=json.dumps(result).encode(), stderr=b'')
+
+                output = io.StringIO()
+                with patch('subprocess.run', side_effect=kubectl), patch('builtins.open', mock_open(read_data=ca_bytes)), \
+                        patch('time.monotonic', side_effect=[0, 1, 2, 3]), patch('time.sleep') as sleep, redirect_stdout(output):
+                    if persistent:
+                        with self.assertRaisesRegex(ValueError, 'deadline exceeded; cleanup only'):
+                            exec(shlex.split(command)[3], {})
+                    else:
+                        exec(shlex.split(command)[3], {})
+                self.assertEqual(len(inventory_reads), 3)
+                self.assertEqual(sleep.call_count, 2)
+                self.assertTrue(all('patch' not in arguments and 'create' not in arguments for arguments in calls))
+                if persistent:
+                    self.assertEqual(output.getvalue(), '')
+                else:
+                    observed = live.parse_guarded_hotel_live_observation(
+                        output.getvalue(), self.plan, self.stage, ROLES, ca, expected_identity=expected)
+                    self.assertEqual(observed['pods']['initialize-empty']['state'], 'terminated')
+                    self.assertEqual(observed['pods']['initialize-empty']['exit_code'], 0)

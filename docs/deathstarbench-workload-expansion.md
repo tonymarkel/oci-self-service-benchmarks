@@ -1,6 +1,6 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-13: **published artifacts and support-only K3s staging foundation, not public benchmarks**.
+Status, 2026-10-15: **published artifacts, support-only K3s staging, and an additive offline Hotel initialization recipe; not public benchmarks**.
 Social Network is still the only released distributed workload. The audited
 foundations now have drift-checked application/frontend, initializer, and
 load-driver preparation tools, plus an explicit native publication pipeline.
@@ -591,6 +591,93 @@ also passed on the tested code commit. All global application/runtime, dataset,
 measurement, network-denial, full-anonymous-image, and public release gates
 remain closed. Hotel and Media are still hidden in the UI; support readiness
 does not enable their public benchmark dispatch.
+
+## Additive Hotel initialization source checkpoint
+
+The retained Hotel v1 image is not safe to start yet: all eight database-backed
+commands call `InsertMany` at startup, before normal service initialization.
+Restarting a Pod can therefore duplicate or partly seed its store. A Kubernetes
+`restartPolicy: Never` or a per-process lock does not solve response loss or
+cross-database ownership. The published v1 recipe, its preparation API, image
+lock adoption and support-only operator remain unchanged.
+
+`scripts/prepare_deathstarbench_hotel_initialization.py` adds a **separate
+recipe not wired into publication or adoption**:
+`hotel-reservation-guarded-init-native-go-scratch-candidate-v1`. It first
+validates the complete original preparation, retains that input receipt, then
+extracts the eight exact typed Go seed constructors into a pure catalog. This
+preserves original floating-point expressions, nested types and decimal user
+names; Python does not invent or approximate the row data. The generated
+source fingerprint binds the extraction revision, eight full source hashes,
+and all eleven collection/row mappings.
+
+The new Go library constructs exactly **873 baseline documents in eleven
+collections across eight stores**, rejects duplicate/foreign logical keys and
+incorrect BSON types, assigns deterministic logical-key `_id` values, and
+computes canonical typed content and logical-key hashes. Its complete metadata
+fingerprint includes the source binding. These are actual catalog-construction
+hashes, not Social Network dataset identifiers.
+
+The distinct `hotel-initialize` command supports only explicit
+`initialize-empty` and read-only `verify` modes. Identity, dataset fingerprint,
+the exact baked configuration and all eight fixed service endpoints are
+mandatory. The source-level initialization protocol:
+
+1. Observes every store and refuses any preexisting collection or marker.
+2. Creates an atomic ownership claim in each of the eight stores before
+   inserting any application data. Claim conflicts, cancellation, partial writes and
+   lost responses fail closed; initialization is never automatically replayed,
+   including after an apparently completed attempt.
+3. Verifies the complete typed baseline across all stores before completing
+   any marker, then verifies the completed baseline again. No reset, delete,
+   repair or upsert path exists.
+
+Each normal database-backed service now performs **read-only verification of
+its own store** before returning the client to the original service. It never
+seeds data or expands its service-to-database network permissions. All ten
+application commands and the initializer expose the sole
+`--candidate-initialization-attestation` option before configuration, tuning,
+identity or database access; it emits offline catalog metadata only.
+
+This is a source/compiled-protocol checkpoint, **not MongoDB, Pod restart or
+application-runtime qualification**. Tests use an in-memory store model; even
+a fully completed set of per-store markers is not an atomic eight-database
+transaction. The new recipe is deliberately not accepted by the current image
+lock factory or support controller, and no web dispatch path calls it. Its
+Python metadata validator grants no runtime authority, and self-reported JSON
+alone cannot prove that a particular binary ran.
+
+The [local offline observation](qualification/deathstarbench-hotel-initialization-offline-v1.json)
+retains the actual native Go 1.24.2/darwin-arm64 catalog metadata and context
+receipts: all sixteen initialization test functions passed, all eleven commands
+built and attested identical metadata, and all eleven refused unbound startup.
+The observed source/dataset fingerprints are pinned in a Go golden regression.
+This record does not claim Linux Go 1.21.13 CI results, MongoDB execution,
+image publication or cluster qualification.
+
+Required CI prepares the new recipe twice from the audited checkout, tests and
+builds all eleven commands using the pinned native Go 1.21.13 builder with no
+network, then executes their metadata-only option outside the configuration
+directory with no run identity. It checks that ordinary unbound startup fails,
+and that every command reports the same source-bound dataset fingerprint. Only
+bounded preparation/native-metadata receipts are uploaded; no database or
+initializer write is executed in CI. Example source-only preparation:
+
+```bash
+.venv/bin/python scripts/validate_deathstarbench_hotel_initialization.py prepare \
+  --upstream /absolute/path/to/pinned-deathstarbench \
+  --output /absolute/path/to/new-hotel-initialization-output
+```
+
+The next reviewed slice must explicitly select, publish, smoke-test and adopt
+the **new** recipe rather than rewriting the v1 lock. Subsequent execution
+needs a run/cluster/namespace/storage/Pod-bound controller, durable response-loss
+reconciliation and global prestart verification. Consul registration/restart
+health, ignored preload errors, atomic reservation capacity/authentication,
+semantic transactions and a separate post-warmup dataset epoch remain open.
+Reservations mutate the baseline: this verifier intentionally rejects those
+changes and must not be advertised as general healthy restart recovery.
+Media's dataset rights and runtime gates remain separate and unresolved.
 
 ## Next review slices and release prerequisites
 

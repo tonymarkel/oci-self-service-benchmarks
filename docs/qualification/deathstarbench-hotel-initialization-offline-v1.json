@@ -1,0 +1,203 @@
+{
+  "schema_version": 1,
+  "candidate_schema": "hotel-initialization-offline-observation-v1",
+  "observation_date": "2026-10-15",
+  "candidate_only": true,
+  "released": false,
+  "scope": "local-native-catalog-and-storage-model-tests-only",
+  "upstream_revision": "6ecb09706140f8730b5385c08f1386c654c3c526",
+  "native_go": {
+    "version": "1.24.2",
+    "os": "darwin",
+    "architecture": "arm64",
+    "modules": "vendor",
+    "goproxy": "off",
+    "gosumdb": "off"
+  },
+  "source_preparation": {
+    "independent_rounds": 2,
+    "deterministic": true,
+    "manifest_sha256": "0c95aa1451c5ff062f4d009f9f5db4ff4a9b86922ad26bc81a47a409056af7b8",
+    "prepared_tree_sha256": "84e7cadc32f601bbe36c0ac69e4d78bbf92eb49e3eca7ab0eddff29314a70dd7"
+  },
+  "checks": {
+    "initialization_go_test_functions": 16,
+    "initialization_and_command_go_tests_passed": true,
+    "existing_frontend_and_reservation_go_tests_passed": true,
+    "command_binaries_built": 11,
+    "identical_no_database_attestations": 11,
+    "unbound_startup_refusals_with_exit_2": 11,
+    "attestation_payload_sha256": "24f310de8caaf03603b628ca3a8a6ea738f122dde9a3c4c564c9d4b69ba69a28"
+  },
+  "qualification": {
+    "images_built": false,
+    "images_published": false,
+    "database_executed": false,
+    "dataset_qualified": false,
+    "cloud_resources_created": 0,
+    "cluster_runtime_qualified": false,
+    "application_start_allowed": false,
+    "measurement_qualified": false,
+    "public_release": false
+  },
+  "limitations": [
+    "Local source builds and in-memory protocol/filter tests, not MongoDB command, durability, controller or restart qualification.",
+    "Required PR CI separately uses pinned Go 1.21.13 on Linux; consult its check results rather than inferring them from this local observation.",
+    "Binaries were run with TLS=false (the baked candidate default), no run identity and no main configuration file; upstream TLS package initialization may log to stderr before main.",
+    "Historical JSON, source hashes and fingerprints are not fresh execution/provenance, runtime authority or permission to replay initialization.",
+    "The retained v1 publication/adoption and support-only controller do not accept the new recipe.",
+    "Per-store claims are not a cross-database transaction; semantic/authentication/capacity, Consul/preload/restart and post-warmup gates remain open."
+  ],
+  "dataset_metadata": {
+    "application_start_allowed": false,
+    "candidate_only": true,
+    "candidate_schema": "hotel-initialization-dataset-v1",
+    "canonicalization": "bson-canonical-extjson-recursive-sorted-v1",
+    "collection_count": 11,
+    "collections": [
+      {
+        "component": "attractions",
+        "content_sha256": "sha256:f4e53a83f93d080981d5170e96002755b01dcc2ed973adaa92a8176ce163d9ac",
+        "count": 6,
+        "database": "attractions-db",
+        "logical_key_fields": [
+          "hotelId"
+        ],
+        "logical_keys_sha256": "sha256:fb115394e2af7c74a25356add2254c716ec31bbb2657b77757d5dd63ffbe52c7",
+        "name": "hotels"
+      },
+      {
+        "component": "attractions",
+        "content_sha256": "sha256:2feafea17d34e5c1a61cebe6b40a103da3346dbf6d51ed90274b40563202ccd3",
+        "count": 6,
+        "database": "attractions-db",
+        "logical_key_fields": [
+          "museumId"
+        ],
+        "logical_keys_sha256": "sha256:fb115394e2af7c74a25356add2254c716ec31bbb2657b77757d5dd63ffbe52c7",
+        "name": "museums"
+      },
+      {
+        "component": "attractions",
+        "content_sha256": "sha256:722f4c1586216cd71f59edc82fc8252a8b6c588ed125d281c123cdd34eadd520",
+        "count": 6,
+        "database": "attractions-db",
+        "logical_key_fields": [
+          "restaurantId"
+        ],
+        "logical_keys_sha256": "sha256:fb115394e2af7c74a25356add2254c716ec31bbb2657b77757d5dd63ffbe52c7",
+        "name": "restaurants"
+      },
+      {
+        "component": "geo",
+        "content_sha256": "sha256:e41df05d2341b4a105e8e4cd386939380ca30af77d394c16da76485de27aa6f0",
+        "count": 80,
+        "database": "geo-db",
+        "logical_key_fields": [
+          "hotelId"
+        ],
+        "logical_keys_sha256": "sha256:df7b2d11d4d2143cf8391b374c7b69a59ad6b388962d85b1c9a4cd5867e65069",
+        "name": "geo"
+      },
+      {
+        "component": "profile",
+        "content_sha256": "sha256:2694e9322cdc91444819b0b7fc01f612a7d55e0a359581591549caf25c16b307",
+        "count": 80,
+        "database": "profile-db",
+        "logical_key_fields": [
+          "id"
+        ],
+        "logical_keys_sha256": "sha256:df7b2d11d4d2143cf8391b374c7b69a59ad6b388962d85b1c9a4cd5867e65069",
+        "name": "hotels"
+      },
+      {
+        "component": "rate",
+        "content_sha256": "sha256:ab3856fbebea200c0b4aa0a7f339ffdc68176a5d5a81ef369a969847dcf5b3d4",
+        "count": 27,
+        "database": "rate-db",
+        "logical_key_fields": [
+          "hotelId",
+          "code",
+          "inDate",
+          "outDate",
+          "roomType.code"
+        ],
+        "logical_keys_sha256": "sha256:041a1ea35eb5ee2318cb7fe249482890a3d1c6d4f675bec9094368f4d66eee10",
+        "name": "inventory"
+      },
+      {
+        "component": "recommendation",
+        "content_sha256": "sha256:a97196635bacd5fcac0354758703a766a7c9b5ba4081f29cc24b7c36e3c3648f",
+        "count": 80,
+        "database": "recommendation-db",
+        "logical_key_fields": [
+          "hotelId"
+        ],
+        "logical_keys_sha256": "sha256:df7b2d11d4d2143cf8391b374c7b69a59ad6b388962d85b1c9a4cd5867e65069",
+        "name": "recommendation"
+      },
+      {
+        "component": "reservation",
+        "content_sha256": "sha256:c14b0e71a736355a054e8b878d2a68b3700dc11ae8c57b5f1c4c60dddbb01a07",
+        "count": 80,
+        "database": "reservation-db",
+        "logical_key_fields": [
+          "hotelId"
+        ],
+        "logical_keys_sha256": "sha256:df7b2d11d4d2143cf8391b374c7b69a59ad6b388962d85b1c9a4cd5867e65069",
+        "name": "number"
+      },
+      {
+        "component": "reservation",
+        "content_sha256": "sha256:ccb663bb3d85b1f4794eee6567d90b893549d54fd7bc53d58e16656b7a906ce3",
+        "count": 1,
+        "database": "reservation-db",
+        "logical_key_fields": [
+          "hotelId",
+          "customerName",
+          "inDate",
+          "outDate"
+        ],
+        "logical_keys_sha256": "sha256:56057366444dbb9d68a3626e69cccef95d15b51fa9b53cb8c4203d0f919af0a4",
+        "name": "reservation"
+      },
+      {
+        "component": "review",
+        "content_sha256": "sha256:8523ead1518d0ffb90fe11e6d84f7a08c8d9576a315641fc30323921bd990725",
+        "count": 6,
+        "database": "review-db",
+        "logical_key_fields": [
+          "reviewId"
+        ],
+        "logical_keys_sha256": "sha256:fb115394e2af7c74a25356add2254c716ec31bbb2657b77757d5dd63ffbe52c7",
+        "name": "reviews"
+      },
+      {
+        "component": "user",
+        "content_sha256": "sha256:83f325d287e9858b0f50f49eb27353fdca812bafcd4da0898b2ec39f24ef9e80",
+        "count": 501,
+        "database": "user-db",
+        "logical_key_fields": [
+          "username"
+        ],
+        "logical_keys_sha256": "sha256:0e4d3d37679924fa3cbc7d14246e2713b4575f978f3c8e4836fcb84db12c93c5",
+        "name": "user"
+      }
+    ],
+    "contract_revision": "hotel-separate-initialization-candidate-v1",
+    "database_count": 8,
+    "dataset_fingerprint": "sha256:76974701cecf121db01b511e34d1f543adb76b430146ca4022c1eb81f61d04ee",
+    "dataset_qualified": false,
+    "dataset_revision": "hotel-reservation-deterministic-baseline-candidate-v1",
+    "deterministic_id": "sha256-canonical-logical-key-v1",
+    "document_count": 873,
+    "initialization_executed": false,
+    "measurement_qualified": false,
+    "public_release": false,
+    "recipe_revision": "hotel-reservation-guarded-init-native-go-scratch-candidate-v1",
+    "runtime_qualified": false,
+    "schema_version": 1,
+    "scope": "offline-dataset-construction-only-no-mongodb-execution",
+    "source_fingerprint": "sha256:40c76ecf1623f6e098d3839efc0d2341c416817c94e1c36a6b36a87d9647be49"
+  }
+}

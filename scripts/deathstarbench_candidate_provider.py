@@ -12,15 +12,84 @@ from scripts.deathstarbench_candidate_operator_state import canonical, fingerpri
 
 
 CLEANUP_SOURCE_KEY = 'candidate_cloud_cleanup_source'
+_OPERATOR_JOURNALS = frozenset({'candidate_support_operator', 'hotel_initialization_operator'})
 
 
 class CandidateCloud:
-    def __init__(self, plan, provider_pin, *, persist, emit, oci_config_file=None):
+    def __init__(self, plan, provider_pin, *, persist, emit, oci_config_file=None,
+                 operator_journal_key='candidate_support_operator'):
+        if type(operator_journal_key) is not str or operator_journal_key not in _OPERATOR_JOURNALS:
+            raise ValueError('An explicit supported private operator journal is required.')
         self.plan = plan
         self.pin = copy.deepcopy(provider_pin)
         self.persist, self.emit = persist, emit
         self.oci_config_file = oci_config_file
+        self.operator_journal_key = operator_journal_key
         self._clients = None
+
+    def _cleanup_identity(self, job):
+        """Select exact retained evidence; never fall back to another lifecycle.
+
+        Legacy support behavior remains unchanged. The separate Hotel caller
+        additionally revalidates both immutable pins, its lifecycle record and
+        every retained fresh audit envelope before cleanup source publication.
+        A failed partial provision may legitimately have no completed audit.
+        """
+        if type(self.operator_journal_key) is not str or self.operator_journal_key not in _OPERATOR_JOURNALS:
+            raise ValueError('The private operator journal selector changed outside its reviewed allowlist.')
+        record = job.get(self.operator_journal_key)
+        if self.operator_journal_key == 'candidate_support_operator':
+            return copy.deepcopy((record or {}).get('cloud_identity'))
+        from app import deathstarbench_candidate_operator as support
+        from app.deathstarbench_hotel_initialization_operator import (
+            PIN_KEY, validate_hotel_initialization_pin,
+            validate_hotel_initialization_operator_record,
+        )
+        pin = job.get('candidate_support_pin')
+        support._validate_pin(job, pin, None, cleanup_only=True)
+        hotel_pin = validate_hotel_initialization_pin(job.get(PIN_KEY), pin, cleanup_only=True)
+        record = validate_hotel_initialization_operator_record(record, hotel_pin, pin)
+        identity = record['cloud_identity']
+        audits = record['audits']
+        if identity is None:
+            if audits:
+                raise ValueError('Hotel cleanup has audit evidence without its exact cloud identity.')
+            return None
+        if not isinstance(identity, dict) or not identity or not audits:
+            raise ValueError('Hotel cleanup requires its retained read-only cloud identity audits.')
+        if identity.get('run_id') != job['id'] or identity.get('provider') != self.plan.provider:
+            raise ValueError('Hotel cleanup cloud identity belongs to another run or provider.')
+        for value in audits:
+            audited = support._audit(value, pin)
+            if canonical(audited['cloud_identity']) != canonical(identity):
+                raise ValueError('Hotel cleanup cloud create identities drifted across retained audits.')
+        if self.plan.provider in ('azure', 'gcp'):
+            from scripts import deathstarbench_candidate_cloud_audit as audit
+            if (identity.get('revision') != audit.REVISION
+                    or identity.get('run_id') != job['id'] or identity.get('provider') != self.plan.provider
+                    or identity.get('plan_sha256') != audit._sha(job['plan'])
+                    or not isinstance(identity.get('account'), dict)
+                    or not isinstance(identity.get('resources'), list)):
+                raise ValueError('Hotel cleanup audit belongs to a different run/provider/plan.')
+        return copy.deepcopy(identity)
+
+    def _require_gcp_audited_graph(self, resources, expected, *, complete):
+        """Bind mutable GCP deletion input to independent audited numeric IDs."""
+        from scripts import deathstarbench_candidate_cloud_audit as audit
+        rows = expected['resources']
+        if (not all(isinstance(row, dict) and set(row) == {'prefix', 'id', 'self_link'} for row in rows)
+                or len({row['prefix'] for row in rows}) != len(rows)
+                or {row['prefix'] for row in rows} != set(gcp.DISTRIBUTED_RESOURCE_PREFIXES)):
+            raise ValueError('Hotel GCP cleanup audit has a different exact resource graph.')
+        for row in rows:
+            prefix = row['prefix']
+            identity_key, link_key = prefix + '_id', prefix + '_self_link'
+            if complete or identity_key in resources:
+                if audit._numeric_id(resources.get(identity_key), 'Hotel GCP cleanup numeric identity missing') != row['id']:
+                    raise ValueError('Hotel GCP cleanup resource numeric identity drifted from its audit.')
+            if complete or link_key in resources:
+                if not gcp._scoped_link_equal(resources.get(link_key), row['self_link']):
+                    raise ValueError('Hotel GCP cleanup resource self-link drifted from its audit.')
 
     def _guard(self, job, lease):
         require_acquired_run_lease(lease, job['id'])
@@ -112,15 +181,19 @@ class CandidateCloud:
 
     def destroy_and_prove(self, job, lease):
         self._guard(job, lease)
+        selected_identity = self._cleanup_identity(job)
         from scripts import deathstarbench_candidate_cloud_audit as audit
         source = job.get(CLEANUP_SOURCE_KEY)
         if source is None:
+            if (self.operator_journal_key == 'hotel_initialization_operator'
+                    and self.plan.provider == 'gcp' and selected_identity is not None):
+                self._require_gcp_audited_graph(job['resources'], selected_identity, complete=True)
             value = {
                 'schema_version': 1, 'candidate_schema': 'candidate-support-cleanup-source-v1',
                 'run_id': job['id'], 'provider': self.plan.provider,
                 'pin_fingerprint': job['candidate_support_pin']['fingerprint'],
                 'plan_sha256': fingerprint(job['plan']), 'resources': copy.deepcopy(job['resources']),
-                'cloud_identity': copy.deepcopy(job.get('candidate_support_operator', {}).get('cloud_identity')),
+                'cloud_identity': selected_identity,
             }
             source = {**value, 'fingerprint': fingerprint(value)}
             job[CLEANUP_SOURCE_KEY] = copy.deepcopy(source)
@@ -142,6 +215,14 @@ class CandidateCloud:
                 or not isinstance(source['resources'], dict)
                 or source['fingerprint'] != fingerprint({key: source[key] for key in source if key != 'fingerprint'})):
             raise ValueError('Retained cleanup source differs from its exact run/provider pin.')
+        if self.operator_journal_key == 'hotel_initialization_operator':
+            if canonical(self._cleanup_identity(job)) != canonical(selected_identity):
+                raise ValueError('Hotel audited cloud create identity changed during cleanup source publication.')
+            if canonical(source['cloud_identity']) != canonical(selected_identity):
+                raise ValueError('Retained Hotel cleanup source crossed its audited cloud create identity.')
+            if self.plan.provider == 'gcp' and selected_identity is not None:
+                self._require_gcp_audited_graph(source['resources'], selected_identity, complete=True)
+                self._require_gcp_audited_graph(job['resources'], selected_identity, complete=False)
         original = {**job, 'resources': copy.deepcopy(source['resources'])}
         common = {'persist': self.persist, 'emit': self.emit}
         provider = self.plan.provider

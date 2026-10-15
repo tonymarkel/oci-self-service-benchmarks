@@ -1,6 +1,6 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-15: **published artifacts, support-only K3s staging, guarded Hotel image access and offline initialization-control foundations; not public benchmarks**.
+Status, 2026-10-15: **published artifacts, support-only K3s staging, guarded Hotel image access and private Hotel baseline-initialization/recovery qualification; not public benchmarks**.
 Social Network is still the only released distributed workload. The audited
 foundations now have drift-checked application/frontend, initializer, and
 load-driver preparation tools, plus an explicit native publication pipeline.
@@ -825,19 +825,13 @@ an apparently successful initializer or verifier. Local command-output records
 must match the exact run/dataset/mode/Pod UID and still retain false start gates.
 They are unverified observations, not fresh database or Pod execution proof.
 
-**No cloud/Kubernetes initialization or application executor is implemented by
-this slice.** Nothing applies these new policies/Pods, removes a gate, starts
-MongoDB or application services, or sends benchmark traffic. The next controller
-must freshly verify cloud/cluster ownership, CA, complete admitted Pod specs,
-container images/exit/restart state, and unchanged namespace/Node/PV/PVC/Pod
-identities under its held lease. MongoDB Service/EndpointSlice targets must
-match the exact observed database Pod UIDs/IPs: labels alone are not ownership
-proof. It must persist the one-use latch before releasing a gate, handle lost
-responses without replay, globally verify all stores, and own cleanup. Old
-support-operator success/resume and per-store Go markers cannot substitute for
-that boundary. Service discovery/preload/restart, authentication/atomic
-reservation semantics, measurement epochs and live-cloud qualification remain
-separate prerequisites before UI release.
+These foundations alone implement no executor. The separate live controller
+described below consumes them; their historical JSON and closed factory flags
+are not promoted into execution authority. Old support-operator success/resume
+and per-store Go markers cannot substitute for fresh live checks. Service
+discovery/preload/restart, authentication/atomic reservation semantics,
+measurement epochs and live-cloud release qualification remain separate
+prerequisites before UI release.
 
 The [retained full-byte observation](qualification/deathstarbench-hotel-image-access-v1.json)
 records successful [run 38777055813](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38777055813):
@@ -848,6 +842,195 @@ anonymous token responses were 623,184,724 bytes. The artifact fingerprint
 matches the reviewed guarded publication. The record retains the exact receipt
 hash and per-platform images/counts, without treating that historical JSON as
 a capability or as live workload qualification.
+
+## Private live Hotel initialization controller
+
+`scripts/qualify_deathstarbench_hotel_initialization.py` is a separate,
+cleanup-owning private workflow. It does not change the old support operator,
+Social Network runtime, public form, benchmark dispatch or comparison cohorts.
+It creates the same five-role billable infrastructure, freshly adopts both
+original and guarded artifacts, prepares K3s and validates the original
+support-only stage before adding initialization resources. All ten application
+Deployments remain at zero throughout this workflow.
+
+`app/deathstarbench_hotel_live_controller.py` joins fresh cloud ownership,
+provider volume and read-only filesystem checks with the strict live API
+validator in `app/deathstarbench_hotel_live_k3s.py`. Each observation validates
+the unchanged complete support graph, CA, kube-system/workload Namespace UIDs,
+role Node UIDs, database PV/PVC/Pod identities and container executions.
+Services and controller-owned EndpointSlices must resolve to the exact ready
+support Pod UIDs and private IPs; matching labels alone do not suffice.
+
+Nine additive policies and two standalone, scheduling-gated Pods are created
+once. The live Pod validator accepts only specifically audited Kubernetes
+defaults, rejecting injected containers, credentials, storage, placement,
+environment, command, image or security changes. Discovery must prove that
+every served dynamic mutating-webhook, policy and binding collection is empty;
+unknown mutators, discovery failures and denied reads fail closed. The check is
+repeated immediately before each write, because a pre-admission JSON Patch
+test alone cannot prevent an UPDATE admission mutator from changing an image.
+This is not protection against a concurrent privileged cluster administrator.
+Immediately before dispatch,
+the controller rechecks ownership/storage/API continuity and durably records
+the exclusive local latch. One atomic JSON Patch tests the freshly admitted
+Pod identity and entire spec before removing its gate. There is no Job,
+restart, backoff, reset, repair, apply reconciliation or dispatch retry.
+
+The controller accepts only the exact native image, zero restarts, pinned Pod
+UID, successful terminal exit and bounded run/dataset/mode-specific output.
+It then releases the separate global read-only verifier using the same
+durable-intent policy. Narrow successful initialization evidence does not
+grant application-start, runtime, measurement, all-cloud or public-release
+qualification. Every normal or failed invocation attempts exact owned
+infrastructure destruction and independent absence proof.
+
+An interrupted or uncertain attempt is **cleanup-only**, even if initialization
+finished remotely. The private immutable attempt pin, journal and latch files
+are retained. `--cleanup-only RUN_ID` needs no source adoption, registry access,
+SSH or Kubernetes dispatch; it uses the original provider identity. A fresh
+run with fresh infrastructure is required to try initialization again. The
+qualification-only interruption checkpoints include loss of the accepted
+initializer response before the client parses its acknowledgement.
+
+### Validation status
+
+The controller, admitted-API and cleanup-wrapper tests exercise simulated
+success, response loss, identity drift and denied admission discovery. They do
+not substitute for live MongoDB/K3s initialization qualification.
+
+The first Azure Arm invocation on 2026-10-15 stopped during fresh baseline
+artifact inspection, before allocating a run or provisioning cloud resources.
+The Docker CDN certificate was reissued by the local corporate web gateway,
+but neither Python's default CA bundle, Mozilla's CA bundle nor the existing
+OS-managed trust store validated it. TLS and hostname verification were not
+disabled; no trust anchors were imported or system trust settings changed.
+That initial invocation did not allocate a run or create cloud resources. The
+original support-only evidence is not promoted to satisfy the new controller's
+initialization or verifier gates.
+
+The operator subsequently confirmed that Docker URLs are intentionally blocked
+on the local corporate network and authorized temporary cloud compute for
+registry access. The private Hotel CLI therefore supports an explicit
+`--registry-egress` mapping for operator-owned SSH TCP forwards. Only the seven
+reviewed registry, anonymous-authentication and CDN HTTPS hosts on port 443 use
+this context-bound connector. URLs, HTTP Host, TLS server names, certificate and
+hostname validation, anonymous token scoping, redirect restrictions and full
+byte/digest validation remain unchanged. Global sockets, cloud SDK traffic,
+system proxy settings and system trust are not modified. A failed forward
+never falls back to the blocked direct route.
+
+The mapping must be a private owned regular file; its immutable one-use
+process-local context cannot be restored from a saved observation. The
+separate helper owner must attest the VM, strict SSH host key and restricted
+forwarding configuration and must destroy the helper independently of each
+benchmark's cleanup. The mapping validator does not infer cloud ownership or
+SSH authenticity merely from a listening loopback port. No cloud credentials
+or private SSH keys are copied onto the relay, no VM cloud identity is needed,
+and the helper does not cache or terminate registry HTTPS. Explicit egress
+observations are retained outside public history; they never substitute for
+fresh artifact or image-access capabilities. Cleanup-only recovery refuses the
+mapping option and has no registry/SSH dependency.
+
+The authorized Azure relay subsequently verified the same public Docker config
+through all three registry clients with certificate, hostname and digest checks
+enabled. Its dedicated VM has no managed identity, receives no local cloud
+credentials or private SSH keys, and permits only the seven reviewed SSH TCP
+forwarding destinations. A quota-blocked partial deployment was independently
+proved absent in two Azure checks before the helper was moved to a different
+VM family; its VM, disk, network and SSH host-key identities were preserved.
+
+Azure Arm attempt `4101173fd91d`, using source commit `17acb335`, then passed
+fresh artifact adoption, both full-byte image-access factories, the exact
+four-node K3s readiness checks and backing-service staging with all ten
+application Deployments paused. Initializer preflight stopped before object
+creation or any dispatch intent with an EndpointSlice port-validation error.
+Review found that the validator rejected legitimate empty paused-Service
+placeholders. Kubernetes explicitly creates these
+[zero-Pod placeholders](https://github.com/kubernetes/kubernetes/blob/v1.36.4/staging/src/k8s.io/endpointslice/reconciler.go#L241);
+the API can represent their empty lists as
+[JSON null](https://github.com/kubernetes/kubernetes/issues/135968).
+The run retained its initial journal event, no dispatch latches and a successful
+two-pass independent Azure absence proof. This is useful failure-path evidence,
+not successful initialization or separate global read-only verification.
+
+The validator now accepts only empty, null or omitted ports/endpoints for these
+paused-Service placeholders. Active support Services still require their full
+typed port maps, exact Pod/address/node/UID bindings and ready endpoints; only
+port-list order is ignored. Extra, duplicate, missing or changed active ports
+and any published paused-application endpoint remain failures. Regression
+fixtures include all ten paused placeholders rather than omitting them. This
+normalization does not grant application-start or release authority, and a
+fresh live attempt is required to qualify the changed controller.
+
+With source `a22db227`, GCP Arm attempt `e88f16cf1871` passed the live preflight
+and created both gated Pods. The requested `initialize-response-returned`
+interruption fired after the remote gate-release command returned but before
+the controller parsed its acknowledgement. Exit 130 was expected: the journal
+retained three events and one initializer latch, no verifier latch or exit
+acknowledgement, and an explicitly unknown initialization outcome. There was no
+replay or verifier dispatch. Cleanup completed with two independent absence
+passes covering the twenty expected GCP resources. This was an injected client
+acknowledgement-loss test, not an actual network outage or successful dataset
+initialization.
+
+Azure Arm attempt `35d8be5e471a`, also at `a22db227`, accepted one initializer
+release but stopped during a later status observation because the terminated
+container and Pod phase did not agree. The mismatching phase and exit code were
+not retained, so neither the exact cause nor initialization success is claimed.
+Its one initializer latch remained, no verifier ran, and two independent Azure
+absence passes confirmed cleanup. The pinned Kubernetes implementation can
+[retain a nonterminal Pod phase while container termination is reported](https://github.com/kubernetes/kubernetes/blob/v1.36.4/pkg/kubelet/status/status_manager.go#L1299-L1313).
+The observer now treats only `Pending` or `Running` in this situation as pending
+evidence, after all existing identity, timestamp, reason, signal and container
+checks. It accepts no exit code until the Pod phase is coherent. The existing
+bounded read-only wait continues; dispatch is never repeated. Contradictory
+terminal phases remain failures. The historical Azure failure's exact phase,
+exit status and native outcome remain unknown.
+
+At frozen source `385ed1bb`, GCP Arm attempt `534cf9061b3b` completed the native
+baseline initializer and its separate global read-only verifier. Both exact
+Pods terminated with exit zero and the required run/dataset/mode-specific
+acknowledgements. The journal retained six events and exactly one dispatch
+latch per mode. Fourteen backing-service containers were attested and all ten
+application Deployments remained at zero. The final cloud/storage/API checks
+passed before cleanup; two independent absence passes covered all twenty
+expected GCP resources, and the original process exited zero.
+
+Azure Arm attempt `098353c2175a` used the same frozen source and reached the
+requested `initialize-response-returned` interruption. The remote gate-release
+command had returned, but the client had not parsed its acknowledgement. The
+process exited 130 as expected; three journal events and one initializer latch remained,
+with no exit acknowledgement or verifier dispatch. Initialization remained
+explicitly unknown. Two independent passes proved the exact audited Azure
+resource group absent, covering its twenty-six tracked resource IDs. This
+qualifies the injected client-acknowledgement
+loss and cleanup path, not an actual network outage or successful initializer.
+
+Operator-owned source manifests matched before launch, after launch and after
+both process exits. These local observations are not workload self-attestation
+or signed build provenance. GitHub
+[CI for the tested source](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38811033108)
+passed artifact preparation and all required checks; each Python 3.10/3.14 job
+ran 1,954 tests with one existing skip. The
+[sanitized live observation](qualification/deathstarbench-hotel-live-initialization-v1.json)
+binds each attempt to its own source epoch and retained private evidence hashes.
+Completed full-byte factories do not imply that their complete receipts or
+live byte counters were retained. No application service, benchmark traffic or
+measurement ran; application-start, runtime, measurement, all-cloud and public
+release qualification remain closed.
+
+After both processes exited, the SSH relay was stopped. Cleanup-only recovery
+of the earlier GCP interruption `e88f16cf1871` then exited zero with no plan,
+artifact, registry mapping or SSH options and another two-pass absence proof.
+Its original terminal snapshot and exit-130 log were preserved separately;
+this recovery did not replay initialization or change its unknown outcome.
+The helper was independently destroyed: Azure reported its exact resource
+group and all six pinned child resources absent. A further group-absence
+check used the pinned subscription. The generated private SSH key was removed
+afterward; private audit/recovery evidence and the public key were retained.
+All infrastructure created for these attempts and their separate relay is
+confirmed absent. No TLS roots or global proxy settings were changed, and no
+cloud credentials or private SSH keys were copied to the relay.
 
 ## Next review slices and release prerequisites
 
@@ -866,11 +1049,13 @@ a capability or as live workload qualification.
    Candidate artifact/storage preflight and support-only K3s apply/readiness now
    supply the first boundaries. The private cleanup-owning operator now joins
    those boundaries; live support-stage evidence must be evaluated separately.
-   Guarded application startup and semantic initialization/measurement remain
-   required before release.
-   Add exact dataset and semantic response verification, durable one-shot
-   initialization, unchanged pre/post pod identities, and workload-specific
-   comparison cohorts. Do not populate Hotel/Media metadata with fabricated
+   Guarded application startup and semantic transaction/measurement
+   qualification remain required before release.
+   The private Hotel boundary now supplies durable one-shot baseline
+   initialization and Pod-identity continuity. Remaining work includes
+   service-level dataset/response semantics during guarded application
+   execution, workload-specific comparison cohorts and corresponding Media
+   boundaries. Do not populate Hotel/Media metadata with fabricated
    Social Network Reed98 hashes.
 3. **Live qualification and public release.** Verify permitted and denied
    network paths, semantic transactions, warmup/measurement accounting,

@@ -1,6 +1,6 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-15: **published artifacts, support-only K3s staging, and separate guarded Hotel source/image boundaries; not public benchmarks**.
+Status, 2026-10-15: **published artifacts, support-only K3s staging, guarded Hotel image access and offline initialization-control foundations; not public benchmarks**.
 Social Network is still the only released distributed workload. The audited
 foundations now have drift-checked application/frontend, initializer, and
 load-driver preparation tools, plus an explicit native publication pipeline.
@@ -756,12 +756,107 @@ separate. Two additional local adoption attempts later failed during registry
 reads of the original baseline and were not counted as successful guarded
 adoption. The successful native jobs did not bypass those registry checks.
 
+## Guarded Hotel image access and initialization-control foundations
+
+The explicit manual `hotel-runtime-preflight` choice adds a **read-only image
+qualification**, not a runtime operator. It selects the exact reviewed original
+and guarded lock/publication files, regenerates source preparations and checks
+complete source reconstruction before registry observations. All original
+publication choices and their default remain unchanged.
+
+`app/deathstarbench_hotel_image_access.py` then reads every exact index,
+platform manifest, config and compressed layer body for **seven image
+platforms**: both guarded application architectures, four distinct fixed-x86
+support images and the fixed-x86 driver. It checks descriptor SHA-256s and
+sizes, config architecture and rootfs inventory, bounded layer/aggregate bytes
+and deadlines. Shared layers are downloaded again rather than accepted from a
+cache. There is no Docker, file cache, netrc, cookie store, inherited proxy
+handler or registry credential input. TLS verification and repository-scoped
+anonymous challenges are mandatory; tokens are never forwarded to redirects.
+Only reviewed exact Docker Hub and GHCR/CDN HTTPS hosts are permitted, not
+wildcard hosts or manifest-supplied download URLs. The
+[GitHub container registry documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
+and [hosted-runner endpoint list](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+document public anonymous access and the two allowed GitHub registry/CDN hosts.
+
+The resulting immutable access object belongs to this process/PID and the
+original guarded artifact proof. Copies, pickle/JSON, changed fields and
+crossed artifacts cannot restore authority. Each future attempt must obtain a
+fresh object. Its narrow `anonymous_all_bound_image_bytes_verified` observation
+does **not** qualify a CRI pull, native execution, live initialization, dataset,
+benchmark or public release; those gates remain false. The old support-only
+access capability and support operator are unchanged.
+
+`app/deathstarbench_hotel_runtime.py` separately binds the guarded artifact to
+the **exact original paused support plan and stage**. It requires the same
+baseline artifact fingerprint and every reused image, and derives the run,
+provider, topology, application architecture and database storage identity
+from that plan rather than accepting replacements. It retains the reviewed
+recipe/source/dataset identity and an explicit nonzero attempt UUID. Initializer
+and verifier names derive from that attempt. Rich cluster observations retain
+explicit CA, kube-system Namespace UID (there is no Kubernetes Cluster object
+UID), workload Namespace UID, database Node UID, eight PVC/PV/database-Pod
+identities and initializer Pod UID. These are **caller-supplied, unverified
+observations**, not a live API check or permission. Historical observation
+validation returns only a detached dictionary with freshness/execution false.
+
+`app/deathstarbench_hotel_initialization_stage.py` derives two offline
+standalone Pods, `initialize-empty` and `verify`, with nonempty
+[`schedulingGates`](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-scheduling-readiness/),
+`restartPolicy: Never`, exact guarded platform images, explicit run/dataset
+environment and bounded rootless/read-only/no-token/no-volume security settings.
+There is no Job controller, backoff or automatic replay. Nine additive policies
+limit these Pods to the eight MongoDB services and CoreDNS and permit only the
+matching MongoDB ingress; original application permissions are unchanged.
+The offline JSON Patch template tests the Pod UID, name, namespace, exact
+labels/annotations and entire spec before removing its gate. It deliberately
+fails on unhandled admission defaults or mutation. It is **not** a runnable
+controller or authorization API.
+
+`app/deathstarbench_hotel_initialization_journal.py` provides real private
+local persistence under the original acquired run lease. Canonical bounded
+events are exclusive single-link, no-follow, fsynced files chained to the
+exact run/plan/stage/attempt. Each dispatch intent first persists a separate
+exclusive **run-wide latch**. Latch and event names cannot be reused by a new
+attempt; there is no delete, reset or repair path. Partial writes, fsync/response
+loss, orphan/competing latches, history changes, crossed resource UIDs and lost
+leases fail closed. Reopening any latched attempt is cleanup-only even after
+an apparently successful initializer or verifier. Local command-output records
+must match the exact run/dataset/mode/Pod UID and still retain false start gates.
+They are unverified observations, not fresh database or Pod execution proof.
+
+**No cloud/Kubernetes initialization or application executor is implemented by
+this slice.** Nothing applies these new policies/Pods, removes a gate, starts
+MongoDB or application services, or sends benchmark traffic. The next controller
+must freshly verify cloud/cluster ownership, CA, complete admitted Pod specs,
+container images/exit/restart state, and unchanged namespace/Node/PV/PVC/Pod
+identities under its held lease. MongoDB Service/EndpointSlice targets must
+match the exact observed database Pod UIDs/IPs: labels alone are not ownership
+proof. It must persist the one-use latch before releasing a gate, handle lost
+responses without replay, globally verify all stores, and own cleanup. Old
+support-operator success/resume and per-store Go markers cannot substitute for
+that boundary. Service discovery/preload/restart, authentication/atomic
+reservation semantics, measurement epochs and live-cloud qualification remain
+separate prerequisites before UI release.
+
+The [retained full-byte observation](qualification/deathstarbench-hotel-image-access-v1.json)
+records successful [run 38777055813](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38777055813):
+six exact indexes, seven platform manifests/configs and all 45 compressed layer
+bodies were verified, including repeated downloads of shared layers. Layer
+bodies totalled 623,098,966 bytes; total downloads including metadata and
+anonymous token responses were 623,184,724 bytes. The artifact fingerprint
+matches the reviewed guarded publication. The record retains the exact receipt
+hash and per-platform images/counts, without treating that historical JSON as
+a capability or as live workload qualification.
+
 ## Next review slices and release prerequisites
 
-1. **Immutable artifacts and public access.** Complete native publication and
-   retain the generated locks, build receipts, and offline smoke evidence.
-   Independently qualify anonymous pulls of every exact platform digest before
-   cloud runtime execution. Read-only candidate adoption is not that gate.
+1. **Immutable artifacts and public access.** Hotel now has native guarded
+   publication and complete anonymous byte-access observations for all seven
+   bound image platforms. A later runtime attempt must freshly obtain its own
+   artifact/access capabilities and qualify actual guest/CRI behavior; this
+   historical observation cannot replace those checks. Media remains separate.
+   Read-only candidate adoption alone is not the access gate.
    Version tags/configuration metadata alone are not executed
    backing-image version or CPU-compatibility proof. Preparation receipts alone
    cannot satisfy this gate.

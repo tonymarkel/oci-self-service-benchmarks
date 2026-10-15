@@ -28,6 +28,7 @@ import weakref
 
 from .deathstarbench_candidate_runtime import CandidateRuntimePlan
 from .deathstarbench_candidate_stage import CandidateSupportStageBundle, validate_candidate_support_stage
+from scripts.deathstarbench_registry_egress import https_handler
 
 
 ACCESS_SCHEMA = 'candidate-support-image-access-v1'
@@ -158,7 +159,7 @@ class _AnonymousClient:
         _require(tls.verify_mode == ssl.CERT_REQUIRED and tls.check_hostname,
                  'Anonymous support access requires verified TLS and hostnames.')
         self.opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}), _NoRedirect(), urllib.request.HTTPSHandler(context=tls))
+            urllib.request.ProxyHandler({}), _NoRedirect(), https_handler(tls))
         self.tokens = {}
         self.downloaded_bytes = 0
 

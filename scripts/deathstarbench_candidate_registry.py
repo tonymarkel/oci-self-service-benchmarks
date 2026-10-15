@@ -25,6 +25,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.deathstarbench_artifact_common import PreparationError
+from scripts.deathstarbench_registry_egress import https_handler
 
 
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -81,7 +82,7 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
 
 def _open(url: str, headers: dict[str, str]) -> tuple[bytes, dict[str, str]]:
     request = urllib.request.Request(url, headers=headers)
-    opener = urllib.request.build_opener(_SafeRedirect())
+    opener = urllib.request.build_opener(_SafeRedirect(), https_handler())
     with opener.open(request, timeout=30) as response:
         raw = response.read(MAX_DOCUMENT_BYTES + 1)
         if len(raw) > MAX_DOCUMENT_BYTES:

@@ -906,8 +906,31 @@ OS-managed trust store validated it. TLS and hostname verification were not
 disabled; no trust anchors were imported or system trust settings changed.
 Live initialization, verifier execution, dispatch-response-loss cleanup and
 independent cloud absence qualification remain uncompleted for this controller
-until approved corporate CA trust is restored. The original support-only live
+until registry requests can use an approved reachable network. The original support-only live
 evidence is not promoted to satisfy these new gates.
+
+The operator subsequently confirmed that Docker URLs are intentionally blocked
+on the local corporate network and authorized temporary cloud compute for
+registry access. The private Hotel CLI therefore supports an explicit
+`--registry-egress` mapping for operator-owned SSH TCP forwards. Only the seven
+reviewed registry, anonymous-authentication and CDN HTTPS hosts on port 443 use
+this context-bound connector. URLs, HTTP Host, TLS server names, certificate and
+hostname validation, anonymous token scoping, redirect restrictions and full
+byte/digest validation remain unchanged. Global sockets, cloud SDK traffic,
+system proxy settings and system trust are not modified. A failed forward
+never falls back to the blocked direct route.
+
+The mapping must be a private owned regular file; its immutable one-use
+process-local context cannot be restored from a saved observation. The
+separate helper owner must attest the VM, strict SSH host key and restricted
+forwarding configuration and must destroy the helper independently of each
+benchmark's cleanup. The mapping validator does not infer cloud ownership or
+SSH authenticity merely from a listening loopback port. No cloud credentials
+or private SSH keys are copied onto the relay, no VM cloud identity is needed,
+and the helper does not cache or terminate registry HTTPS. Explicit egress
+observations are retained outside public history; they never substitute for
+fresh artifact or image-access capabilities. Cleanup-only recovery refuses the
+mapping option and has no registry/SSH dependency.
 
 ## Next review slices and release prerequisites
 

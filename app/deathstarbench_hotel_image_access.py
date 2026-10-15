@@ -2,7 +2,10 @@
 
 This is a separate artifact capability, not a runtime/initializer capability.
 No Docker daemon, registry credentials, environment proxies, netrc, cookies,
-image cache, file writes, container execution, or cloud resources are used.
+image cache, file writes or container execution are used. This module creates
+no cloud resources. An explicit private SSH TCP-egress context may change the
+network path without changing HTTPS validation; its owner records that path
+and independently owns and cleans up its relay.
 Historical JSON is evidence only; each attempt must qualify its own capability.
 """
 
@@ -25,6 +28,7 @@ import urllib.request
 import weakref
 
 from .deathstarbench_hotel_initialization_artifacts import GuardedHotelArtifactBinding
+from scripts.deathstarbench_registry_egress import https_handler
 
 
 ACCESS_SCHEMA = 'hotel-guarded-initialization-image-access-v1'
@@ -188,7 +192,7 @@ class _AnonymousClient:
         _require(tls.verify_mode == ssl.CERT_REQUIRED and tls.check_hostname,
                  'Anonymous Hotel access requires verified TLS and hostnames.')
         self.opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}), _NoRedirect(), urllib.request.HTTPSHandler(context=tls))
+            urllib.request.ProxyHandler({}), _NoRedirect(), https_handler(tls))
         self.tokens = {}
         self.downloaded_bytes = 0
 

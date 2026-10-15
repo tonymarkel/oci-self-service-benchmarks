@@ -55,6 +55,8 @@ def _parser():
     for name in _ARTIFACT_OPTIONS:
         parser.add_argument('--' + name.replace('_', '-'), type=Path)
     parser.add_argument('--ssh-env-file', type=Path)
+    parser.add_argument('--registry-egress', type=Path,
+                        help='Private explicit SSH TCP-forward mapping for registry HTTPS; never disables TLS validation.')
     parser.add_argument('--aws-image-pin', type=Path)
     parser.add_argument('--oci-config-file', type=Path)
     parser.add_argument('--oci-profile')
@@ -77,7 +79,8 @@ def _validate_arguments(args):
     if args.reconcile_aws_capacity_rejection and not args.cleanup_only:
         raise ValueError('AWS rejected-capacity reconciliation requires cleanup-only.')
     if args.cleanup_only:
-        if (args.plan is not None or args.ssh_env_file is not None or args.interrupt_after is not None
+        if (args.plan is not None or args.ssh_env_file is not None or args.registry_egress is not None
+                or args.interrupt_after is not None
                 or any(getattr(args, name) is not None for name in (*_ARTIFACT_OPTIONS, *_PROVIDER_OPTIONS))):
             raise ValueError('Cleanup-only accepts no plan, artifact, SSH, provider pin or interruption overrides.')
     elif args.plan is None or any(getattr(args, name) is None for name in _ARTIFACT_OPTIONS):
@@ -99,7 +102,34 @@ def _checkpoint(args, job, name, persist):
     raise application.RunCancelled('Requested private Hotel initialization qualification interruption; do not replay.')
 
 
+def _refresh_registry_observation(value, transport):
+    """Optional network-path history must never suppress cleanup persistence.
+
+    Actual registry reads still fail closed on lost/changed routes. Their
+    historical counters are not an authority required to delete owned cloud
+    infrastructure. Do not swallow cooperative cancellation/BaseException.
+    """
+    try:
+        value['registry_egress_observation'] = transport.metadata()
+    except Exception as exc:
+        value['registry_egress_observation_refresh_failure'] = {
+            'historical_observation_only': True, 'qualification_authority': False,
+            'error_type': type(exc).__name__,
+        }
+
+
 def _run(args, *, store=None):
+    _validate_arguments(args)
+    if args.registry_egress is None:
+        return _run_private(args, store=store)
+    from scripts.deathstarbench_registry_egress import load_mapping, registry_egress
+    # Only these registry clients consume the context-bound HTTPS connector.
+    # Global sockets, cloud SDK traffic, system proxies and trust are unchanged.
+    with registry_egress(load_mapping(args.registry_egress)) as egress:
+        return _run_private(args, store=store, registry_transport=egress)
+
+
+def _run_private(args, *, store=None, registry_transport=None):
     from app.deathstarbench_candidate_image_access import (
         qualify_candidate_support_image_access, require_candidate_support_image_access,
     )
@@ -145,6 +175,8 @@ def _run(args, *, store=None):
                 PIN_KEY: hotel_pin, 'status': 'queued', 'events': [], 'resources': {},
                 'results': [], 'created_at': timestamp, 'updated_at': timestamp,
             }
+            if registry_transport is not None:
+                job['registry_egress_observation'] = registry_transport.metadata()
             store.publish_pin(pin, lease)
             store.publish_hotel_pin(hotel_pin, lease)
             store.save(job, lease)
@@ -171,6 +203,10 @@ def _run(args, *, store=None):
 
         def persist(value):
             value['updated_at'] = application.now()
+            if registry_transport is not None:
+                # Historical network-path evidence only; this cannot recreate
+                # a factory access capability or authorize initialization.
+                _refresh_registry_observation(value, registry_transport)
             store.save(value, lease)
 
         def emit(value, stage, message):
@@ -184,7 +220,9 @@ def _run(args, *, store=None):
             store.require_lease(value['id'], lease)
             return result
 
-        cloud = CandidateCloud(plan, provider_pin, persist=persist, emit=emit, oci_config_file=args.oci_config_file)
+        cloud = CandidateCloud(plan, provider_pin, persist=persist, emit=emit,
+                               oci_config_file=args.oci_config_file,
+                               operator_journal_key=OPERATOR_JOURNAL_KEY)
         support_access_capability = None
 
         def prepare_runtime(value, held):

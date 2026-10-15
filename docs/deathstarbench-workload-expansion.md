@@ -741,6 +741,21 @@ dataset writes, application services or benchmark traffic are started by this
 pipeline. All initialization, runtime, measurement and public-release gates
 remain closed. It does not change support-stage behavior or the public form.
 
+The [retained image observation](qualification/deathstarbench-hotel-guarded-images-v1.json)
+records successful [native workflow run 38767705438](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38767705438):
+both native builds, index assembly and both fresh empty-client native jobs
+passed. Every smoke inspected eleven static native executables, observed eleven
+pure attestations and eleven unbound startup refusals. Complete dataset metadata
+matched between x86 and Arm and the reviewed source golden: eight stores,
+eleven collections and 873 documents. Both fresh native artifact adoptions
+produced the same fingerprint. The record binds exact index/platform/config
+digests and downloaded receipt hashes without treating them as future authority.
+The first publication attempt correctly stopped before assembly on a strict
+BuildKit-default config mismatch; its failed candidate tags/evidence remain
+separate. Two additional local adoption attempts later failed during registry
+reads of the original baseline and were not counted as successful guarded
+adoption. The successful native jobs did not bypass those registry checks.
+
 ## Next review slices and release prerequisites
 
 1. **Immutable artifacts and public access.** Complete native publication and

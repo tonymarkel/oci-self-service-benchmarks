@@ -258,6 +258,23 @@ def _initialization_pod(pod, approved, context):
     return result
 
 
+def _endpoint_ports(value, service_name):
+    """Compare complete port maps without depending on controller list order."""
+    label = 'Hotel EndpointSlice ports for ' + service_name
+    ports = _array(value, label)
+    if not ports:
+        raise CandidateK3sError(label + ' must be nonempty.')
+    names = set()
+    for port in ports:
+        port = _mapping(port, label)
+        if (set(port) != {'name', 'port', 'protocol'} or not isinstance(port['name'], str)
+                or not isinstance(port['protocol'], str) or type(port['port']) is not int
+                or not 1 <= port['port'] <= 65535 or port['name'] in names):
+            raise CandidateK3sError(label + ' drifted.')
+        names.add(port['name'])
+    return sorted(ports, key=lambda port: port['name'])
+
+
 def _endpoint_graph(slices, inventory, normalized, context):
     services = {item['metadata']['name']: item for item in inventory['items'] if item['kind'] == 'Service'}
     pods = {item['metadata']['name']: item for item in inventory['items'] if item['kind'] == 'Pod'}
@@ -278,15 +295,20 @@ def _endpoint_graph(slices, inventory, normalized, context):
         owners = [{'apiVersion': 'v1', 'kind': 'Service', 'name': name, 'uid': service['metadata']['uid'],
                    'controller': True, 'blockOwnerDeletion': True}]
         _exact(metadata.get('ownerReferences'), owners, 'Hotel EndpointSlice Service owner')
-        expected_ports = [{'name': port.get('name', ''), 'port': port['targetPort'], 'protocol': port.get('protocol', 'TCP')}
-                          for port in service['spec']['ports']]
-        _exact(item.get('ports'), expected_ports, 'Hotel EndpointSlice ports')
-        endpoints = _array(item.get('endpoints'), 'Hotel EndpointSlice endpoints')
         if name not in ready:
-            if endpoints:
-                raise CandidateK3sError('Paused Hotel application has published endpoints.')
+            # The pinned controller creates an empty placeholder for a Service
+            # with no Pods. Protobuf storage can round-trip [] to JSON null.
+            for field in ('ports', 'endpoints'):
+                value = item.get(field)
+                if value is not None and (not isinstance(value, list) or value):
+                    raise CandidateK3sError('Paused Hotel application ' + name + ' has nonempty or invalid EndpointSlice ' + field + '.')
             observed[name] = {'service_uid': service['metadata']['uid'], 'endpoint_slice_uid': metadata['uid'], 'pod_ip': None}
             continue
+        expected_ports = [{'name': port.get('name', ''), 'port': port['targetPort'], 'protocol': port.get('protocol', 'TCP')}
+                          for port in service['spec']['ports']]
+        _exact(_endpoint_ports(item.get('ports'), name), _endpoint_ports(expected_ports, name),
+               'Hotel EndpointSlice ports for ' + name)
+        endpoints = _array(item.get('endpoints'), 'Hotel EndpointSlice endpoints for ' + name)
         support_pod = ready[name]
         pod = pods[support_pod['pod_name']]
         pod_ip = pod.get('status', {}).get('podIP')
@@ -588,7 +610,7 @@ else:
 
 
 _REMOTE_HELPERS = support._REMOTE_HELPERS + '\n\n' + '\n\n'.join(inspect.getsource(function) for function in (
-    _exact, _admission_versions, _admission_mutator_absence, _initialization_pod, _endpoint_graph, _live_inventory, _continuity, _parse_document,
+    _exact, _admission_versions, _admission_mutator_absence, _initialization_pod, _endpoint_ports, _endpoint_graph, _live_inventory, _continuity, _parse_document,
 ))
 
 

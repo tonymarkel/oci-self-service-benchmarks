@@ -60,11 +60,28 @@ def inventory(plan, stage, *, created=False):
                                     'endpointslice.kubernetes.io/managed-by': 'endpointslice-controller.k8s.io'},
                          'ownerReferences': [{'apiVersion': 'v1', 'kind': 'Service', 'name': name,
                                               'uid': service['metadata']['uid'], 'controller': True, 'blockOwnerDeletion': True}]},
-            'ports': [{'name': port.get('name', ''), 'port': port['targetPort'], 'protocol': port.get('protocol', 'TCP')}
-                      for port in service['spec']['ports']],
+            'ports': sorted([{'name': port.get('name', ''), 'port': port['targetPort'], 'protocol': port.get('protocol', 'TCP')}
+                             for port in service['spec']['ports']], key=lambda port: port['name']),
             'endpoints': [{'addresses': [address], 'conditions': {'ready': True, 'serving': True, 'terminating': False},
                            'nodeName': pod['spec']['nodeName'], 'targetRef': {'kind': 'Pod', 'namespace': stage.namespace,
                                                                           'name': pod['metadata']['name'], 'uid': pod['metadata']['uid']}}],
+        })
+    support_names = {pod['metadata']['labels']['app.kubernetes.io/component'] for pod in pods}
+    for index, name in enumerate(sorted(set(services) - support_names)):
+        service = services[name]
+        slice_name = name + '-abcde'
+        # The real controller creates all ten zero-Pod placeholders. Repeated
+        # fields may return as null after the API's protobuf storage round trip.
+        empty = None if index % 2 else []
+        result['items'].append({
+            'apiVersion': 'discovery.k8s.io/v1', 'kind': 'EndpointSlice', 'addressType': 'IPv4',
+            'metadata': {'name': slice_name, 'namespace': stage.namespace,
+                         'uid': support_fixtures.identity('EndpointSlice', slice_name),
+                         'labels': {'kubernetes.io/service-name': name,
+                                    'endpointslice.kubernetes.io/managed-by': 'endpointslice-controller.k8s.io'},
+                         'ownerReferences': [{'apiVersion': 'v1', 'kind': 'Service', 'name': name,
+                                              'uid': service['metadata']['uid'], 'controller': True, 'blockOwnerDeletion': True}]},
+            'ports': copy.deepcopy(empty), 'endpoints': copy.deepcopy(empty),
         })
     if created:
         for item in json.loads(stage.canonical_json)['items']:
@@ -80,6 +97,11 @@ def inventory(plan, stage, *, created=False):
                 item['status'] = {'phase': 'Pending', 'conditions': [{'type': 'PodScheduled', 'status': 'False', 'reason': 'SchedulingGated'}]}
             result['items'].append(item)
     return result
+
+
+def endpoint_slice(data, service_name):
+    return next(item for item in data['items'] if item['kind'] == 'EndpointSlice'
+                and item['metadata']['labels']['kubernetes.io/service-name'] == service_name)
 
 
 def document(plan, stage, data, *, logs=None):
@@ -137,6 +159,106 @@ class GuardedHotelLiveK3sTests(unittest.TestCase):
             self.assertTrue(database['pod_ip'].startswith('10.42.'))
             self.assertIn('endpoint_slice_uid', database)
         self.assertEqual(len(after['support_inventory']['items']), len(before['support_inventory']['items']))
+        self.assertEqual(sum(item['pod_ip'] is None for item in after['identity']['endpoints'].values()), 10)
+
+    def test_paused_placeholders_normalize_only_empty_wire_representations(self):
+        missing = object()
+        for created in (False, True):
+            data = inventory(self.plan, self.stage, created=created)
+            baseline = self.parse(data)['identity']
+            for ports in (None, [], missing):
+                for endpoints in (None, [], missing):
+                    with self.subTest(created=created, ports=ports, endpoints=endpoints):
+                        current = copy.deepcopy(data)
+                        selected = endpoint_slice(current, 'frontend')
+                        for field, value in (('ports', ports), ('endpoints', endpoints)):
+                            if value is missing:
+                                selected.pop(field)
+                            else:
+                                selected[field] = copy.deepcopy(value)
+                        self.assertEqual(self.parse(current, expected=baseline)['identity'], baseline)
+
+    def test_paused_placeholders_reject_nonempty_or_wrong_typed_fields(self):
+        for field in ('ports', 'endpoints'):
+            for value in (False, 0, '', {}, [None], [{'unexpected': 'data'}]):
+                with self.subTest(field=field, value=value):
+                    data = inventory(self.plan, self.stage)
+                    endpoint_slice(data, 'frontend')[field] = value
+                    with self.assertRaisesRegex(live.CandidateK3sError, 'frontend'):
+                        self.parse(data)
+        data = inventory(self.plan, self.stage)
+        service = next(item for item in data['items'] if item['kind'] == 'Service' and item['metadata']['name'] == 'frontend')
+        endpoint_slice(data, 'frontend')['ports'] = [
+            {'name': port['name'], 'port': port['targetPort'], 'protocol': port['protocol']}
+            for port in service['spec']['ports']]
+        with self.assertRaisesRegex(live.CandidateK3sError, 'frontend'):
+            self.parse(data)
+
+    def test_paused_placeholder_authority_and_uid_continuity_remain_strict(self):
+        original = inventory(self.plan, self.stage)
+        baseline = self.parse(original)['identity']
+        for mutation in ('owner', 'manager', 'namespace', 'duplicate', 'sliceuid'):
+            with self.subTest(mutation=mutation):
+                data = copy.deepcopy(original)
+                selected = endpoint_slice(data, 'frontend')
+                if mutation == 'owner':
+                    selected['metadata']['ownerReferences'][0]['uid'] = support_fixtures.identity('Service', 'wrong')
+                elif mutation == 'manager':
+                    selected['metadata']['labels']['endpointslice.kubernetes.io/managed-by'] = 'manual'
+                elif mutation == 'namespace':
+                    selected['metadata']['namespace'] = 'default'
+                elif mutation == 'duplicate':
+                    data['items'].append(copy.deepcopy(selected))
+                else:
+                    selected['metadata']['uid'] = support_fixtures.identity('EndpointSlice', 'replacement')
+                with self.assertRaises(live.CandidateK3sError):
+                    self.parse(data, expected=baseline)
+
+    def test_active_multiport_order_is_semantically_equivalent(self):
+        data = inventory(self.plan, self.stage, created=True)
+        selected = endpoint_slice(data, 'jaeger')
+        self.assertEqual(len(selected['ports']), 2)
+        baseline = self.parse(data)['identity']
+        selected['ports'].reverse()
+        self.assertEqual(self.parse(data, expected=baseline)['identity'], baseline)
+
+    def test_active_ports_reject_missing_extra_duplicate_or_wrong_typed_data(self):
+        mutations = [
+            lambda s: s.pop('ports'),
+            lambda s: s.update(ports=None),
+            lambda s: s.update(ports=[]),
+            lambda s: s.update(ports=False),
+            lambda s: s['ports'].pop(),
+            lambda s: s['ports'].append(copy.deepcopy(s['ports'][0])),
+            lambda s: s['ports'].append({'name': 'extra', 'port': 1234, 'protocol': 'TCP'}),
+            lambda s: s['ports'][0].update(name='wrong'),
+            lambda s: s['ports'][0].update(name=None),
+            lambda s: s['ports'][0].update(port=1234),
+            lambda s: s['ports'][0].update(port=True),
+            lambda s: s['ports'][0].update(port='16686'),
+            lambda s: s['ports'][0].update(port=16686.0),
+            lambda s: s['ports'][0].update(port=0),
+            lambda s: s['ports'][0].update(port=65536),
+            lambda s: s['ports'][0].update(protocol='UDP'),
+            lambda s: s['ports'][0].update(protocol=None),
+            lambda s: s['ports'][0].pop('name'),
+            lambda s: s['ports'][0].update(appProtocol='unknown'),
+            lambda s: s['ports'].__setitem__(0, None),
+        ]
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                data = inventory(self.plan, self.stage)
+                mutate(endpoint_slice(data, 'jaeger'))
+                with self.assertRaisesRegex(live.CandidateK3sError, 'jaeger'):
+                    self.parse(data)
+
+    def test_active_support_endpoints_do_not_inherit_empty_placeholder_tolerance(self):
+        for value in (None, [], False, {}, ''):
+            with self.subTest(value=value):
+                data = inventory(self.plan, self.stage)
+                endpoint_slice(data, 'mongodb-geo')['endpoints'] = value
+                with self.assertRaises(live.CandidateK3sError):
+                    self.parse(data)
 
     def test_running_and_terminal_one_shot_state_and_bounded_logs(self):
         data = inventory(self.plan, self.stage, created=True)

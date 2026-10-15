@@ -904,10 +904,9 @@ The Docker CDN certificate was reissued by the local corporate web gateway,
 but neither Python's default CA bundle, Mozilla's CA bundle nor the existing
 OS-managed trust store validated it. TLS and hostname verification were not
 disabled; no trust anchors were imported or system trust settings changed.
-Live initialization, verifier execution, dispatch-response-loss cleanup and
-independent cloud absence qualification remain uncompleted for this controller
-until registry requests can use an approved reachable network. The original support-only live
-evidence is not promoted to satisfy these new gates.
+That initial invocation did not allocate a run or create cloud resources. The
+original support-only evidence is not promoted to satisfy the new controller's
+initialization or verifier gates.
 
 The operator subsequently confirmed that Docker URLs are intentionally blocked
 on the local corporate network and authorized temporary cloud compute for
@@ -931,6 +930,38 @@ and the helper does not cache or terminate registry HTTPS. Explicit egress
 observations are retained outside public history; they never substitute for
 fresh artifact or image-access capabilities. Cleanup-only recovery refuses the
 mapping option and has no registry/SSH dependency.
+
+The authorized Azure relay subsequently verified the same public Docker config
+through all three registry clients with certificate, hostname and digest checks
+enabled. Its dedicated VM has no managed identity, receives no local cloud
+credentials or private SSH keys, and permits only the seven reviewed SSH TCP
+forwarding destinations. A quota-blocked partial deployment was independently
+proved absent in two Azure checks before the helper was moved to a different
+VM family; its VM, disk, network and SSH host-key identities were preserved.
+
+Azure Arm attempt `4101173fd91d`, using source commit `17acb335`, then passed
+fresh artifact adoption, both full-byte image-access factories, the exact
+four-node K3s readiness checks and backing-service staging with all ten
+application Deployments paused. Initializer preflight stopped before object
+creation or any dispatch intent with an EndpointSlice port-validation error.
+Review found that the validator rejected legitimate empty paused-Service
+placeholders. Kubernetes explicitly creates these
+[zero-Pod placeholders](https://github.com/kubernetes/kubernetes/blob/v1.36.4/staging/src/k8s.io/endpointslice/reconciler.go#L241);
+the API can represent their empty lists as
+[JSON null](https://github.com/kubernetes/kubernetes/issues/135968).
+The run retained its initial journal event, no dispatch latches and a successful
+two-pass independent Azure absence proof. This is useful failure-path evidence,
+not successful initialization. Fresh initialization, separate global read-only
+verification and accepted-response-loss qualification are still pending.
+
+The validator now accepts only empty, null or omitted ports/endpoints for these
+paused-Service placeholders. Active support Services still require their full
+typed port maps, exact Pod/address/node/UID bindings and ready endpoints; only
+port-list order is ignored. Extra, duplicate, missing or changed active ports
+and any published paused-application endpoint remain failures. Regression
+fixtures include all ten paused placeholders rather than omitting them. This
+normalization does not grant application-start or release authority, and a
+fresh live attempt is required to qualify the changed controller.
 
 ## Next review slices and release prerequisites
 

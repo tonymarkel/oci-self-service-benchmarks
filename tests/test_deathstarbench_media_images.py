@@ -115,6 +115,12 @@ def fixture(root):
     write(media / "keys/server.key", "PRIVATE KEY demo must be excluded\n")
     write(media / "wrk2/scripts/media-microservices/compose-review.lua", "math.randomseed(os.time())\n")
     git(root, "init", "--quiet")
+    # These short-lived, owned repositories must not outlive their fixtures
+    # through detached commit-triggered Git maintenance. Persist the settings
+    # before the first add/commit so production read-only Git probes also see
+    # the fixture-local policy; do not weaken TemporaryDirectory cleanup.
+    git(root, "config", "--local", "gc.auto", "0")
+    git(root, "config", "--local", "maintenance.auto", "false")
     git(root, "add", ".")
     git(root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "fixture")
     anchors = {relative: common.sha256(root / relative) for relative in prepare.UPSTREAM_ANCHORS}
@@ -177,6 +183,10 @@ class DeathStarBenchMediaPreparationTests(unittest.TestCase):
     def prepare(self, name="contexts"):
         output = self.root / name
         return prepare.prepare_contexts(self.upstream, output), output
+
+    def test_synthetic_repository_disables_background_maintenance(self):
+        self.assertEqual(git(self.upstream, "config", "--local", "--get", "gc.auto"), "0")
+        self.assertEqual(git(self.upstream, "config", "--local", "--get", "maintenance.auto"), "false")
 
     def test_only_media_app_and_frontend_image_contexts_are_prepared(self):
         manifest, output = self.prepare()

@@ -116,6 +116,16 @@ jobs:
         run: |
           python scripts/validate_deathstarbench_hotel_initialization.py prepare --upstream .build/upstream --output .build/hotel-initialization
 
+      - name: Reconstruct guarded Hotel artifact inputs independently (no registry or release)
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from scripts.deathstarbench_hotel_initialization_artifact_common import validate_guarded_preparation
+          identity = validate_guarded_preparation(Path('.build/hotel-initialization/first'), Path('.build/upstream'))
+          print(json.dumps({key: value for key, value in identity.items() if key != 'manifest'}, sort_keys=True))
+          PY
+
       - name: Test guarded Hotel and attest all eleven native binaries without databases
         run: |
           mkdir .build/hotel-initialization-attestations

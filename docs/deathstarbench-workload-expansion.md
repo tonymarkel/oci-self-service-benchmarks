@@ -892,6 +892,23 @@ run with fresh infrastructure is required to try initialization again. The
 qualification-only interruption checkpoints include loss of the accepted
 initializer response before the client parses its acknowledgement.
 
+### Validation status
+
+The controller, admitted-API and cleanup-wrapper tests exercise simulated
+success, response loss, identity drift and denied admission discovery. They do
+not substitute for live MongoDB/K3s initialization qualification.
+
+The first Azure Arm invocation on 2026-10-15 stopped during fresh baseline
+artifact inspection, before allocating a run or provisioning cloud resources.
+The Docker CDN certificate was reissued by the local corporate web gateway,
+but neither Python's default CA bundle, Mozilla's CA bundle nor the existing
+OS-managed trust store validated it. TLS and hostname verification were not
+disabled; no trust anchors were imported or system trust settings changed.
+Live initialization, verifier execution, dispatch-response-loss cleanup and
+independent cloud absence qualification remain uncompleted for this controller
+until approved corporate CA trust is restored. The original support-only live
+evidence is not promoted to satisfy these new gates.
+
 ## Next review slices and release prerequisites
 
 1. **Immutable artifacts and public access.** Hotel now has native guarded

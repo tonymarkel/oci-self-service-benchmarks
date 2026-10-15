@@ -29,6 +29,12 @@ from .k3s_runtime import K3S_BINARY
 
 SCHEMA = 'hotel-guarded-live-k3s-observation-v1'
 MAX_JSON_BYTES = support.MAX_JSON_BYTES
+ADMISSION_GROUP = 'admissionregistration.k8s.io'
+MUTATOR_KINDS = {
+    'mutatingwebhookconfigurations': 'MutatingWebhookConfiguration',
+    'mutatingadmissionpolicies': 'MutatingAdmissionPolicy',
+    'mutatingadmissionpolicybindings': 'MutatingAdmissionPolicyBinding',
+}
 CandidateK3sError = support.CandidateK3sError
 _canonical = support._canonical
 _strict_json = support._strict_json
@@ -45,6 +51,90 @@ _checked_inventory = support._checked_inventory
 def _exact(left, right, label):
     if _canonical(left) != _canonical(right):
         raise CandidateK3sError(label + ' drifted.')
+
+
+def _admission_versions(group):
+    group = _mapping(group, 'Hotel admission API group')
+    if group.get('apiVersion') != 'v1' or group.get('kind') != 'APIGroup' or group.get('name') != ADMISSION_GROUP:
+        raise CandidateK3sError('Hotel admission API group discovery is invalid.')
+    versions = []
+    for item in _array(group.get('versions'), 'Hotel admission served API versions'):
+        item = _mapping(item, 'Hotel admission API version')
+        version = item.get('version')
+        if (set(item) != {'groupVersion', 'version'} or not isinstance(version, str)
+                or not re.fullmatch(r'v[1-9][0-9]{0,2}(?:(?:alpha|beta)[1-9][0-9]{0,2})?', version)
+                or item.get('groupVersion') != ADMISSION_GROUP + '/' + version or version in versions):
+            raise CandidateK3sError('Hotel admission served API version is invalid.')
+        versions.append(version)
+    if not 1 <= len(versions) <= 8 or 'v1' not in versions or group.get('preferredVersion') not in group['versions']:
+        raise CandidateK3sError('Hotel admission API versions are incomplete.')
+    return versions
+
+
+def _admission_mutator_absence(value):
+    """Require successful discovery and empty lists, never a swallowed 403/404.
+
+    Policies are feature-gated across Kubernetes versions. Their absence is
+    accepted only when every version advertised by this live API group has
+    been discovered and no version serves that collection. List metadata is
+    retained in observations but excluded from stable identity: its global
+    etcd resourceVersion changes when unrelated Pod status is updated.
+    """
+    value = _mapping(value, 'Hotel admission mutator evidence')
+    if set(value) != {'api_group', 'discovery', 'inventories'}:
+        raise CandidateK3sError('Hotel admission mutator evidence schema drifted.')
+    versions = _admission_versions(value['api_group'])
+    discovery = _mapping(value['discovery'], 'Hotel admission API discovery')
+    if set(discovery) != {ADMISSION_GROUP + '/' + version for version in versions}:
+        raise CandidateK3sError('Hotel admission API discovery omitted a served version.')
+    expected_paths = {}
+    served_resources = set()
+    for group_version, document in discovery.items():
+        document = _mapping(document, 'Hotel admission API resource list')
+        if document.get('apiVersion') != 'v1' or document.get('kind') != 'APIResourceList' or document.get('groupVersion') != group_version:
+            raise CandidateK3sError('Hotel admission API resource discovery is invalid.')
+        found = set()
+        subresources = set()
+        for resource in _array(document.get('resources'), 'Hotel admission API resources'):
+            resource = _mapping(resource, 'Hotel admission API resource')
+            name = resource.get('name')
+            if not isinstance(name, str) or not re.fullmatch(r'[a-z]+(?:/[a-z]+)?', name) or name in found:
+                raise CandidateK3sError('Hotel admission API resource inventory is invalid.')
+            found.add(name)
+            base = name.split('/')[0]
+            if base.startswith('mutating') or str(resource.get('kind', '')).startswith('Mutating'):
+                if base not in MUTATOR_KINDS or resource.get('kind') != MUTATOR_KINDS[base] or resource.get('namespaced') is not False:
+                    raise CandidateK3sError('Hotel API serves an unapproved admission mutator kind.')
+                if '/' in name:
+                    subresources.add(base)
+                else:
+                    if 'list' not in _array(resource.get('verbs'), 'Hotel mutator API verbs'):
+                        raise CandidateK3sError('Hotel mutator API cannot be independently listed.')
+                    path = group_version + '/' + name
+                    expected_paths[path] = MUTATOR_KINDS[base] + 'List'
+                    served_resources.add(base)
+        if not subresources <= found:
+            raise CandidateK3sError('Hotel admission mutator subresource lacks its collection.')
+    if ADMISSION_GROUP + '/v1/mutatingwebhookconfigurations' not in expected_paths:
+        raise CandidateK3sError('Hotel stable mutating webhook API is missing from discovery.')
+    inventories = _mapping(value['inventories'], 'Hotel admission mutator inventories')
+    if set(inventories) != set(expected_paths):
+        raise CandidateK3sError('Hotel admission mutator collection was not successfully inspected.')
+    for path, kind in expected_paths.items():
+        document = _mapping(inventories[path], 'Hotel admission mutator list')
+        if document.get('kind') != kind or document.get('apiVersion') != path.rsplit('/', 1)[0]:
+            raise CandidateK3sError('Hotel admission mutator list API identity drifted.')
+        metadata = _mapping(document.get('metadata'), 'Hotel admission mutator list metadata')
+        if (not isinstance(metadata.get('resourceVersion'), str) or not metadata['resourceVersion']
+                or len(metadata['resourceVersion']) > 128 or metadata.get('continue') not in (None, '')
+                or metadata.get('remainingItemCount') is not None and (
+                    type(metadata['remainingItemCount']) is not int or metadata['remainingItemCount'] != 0)):
+            raise CandidateK3sError('Hotel admission mutator list is incomplete or paginated.')
+        if _array(document.get('items'), 'Hotel admission mutators') != []:
+            raise CandidateK3sError('Hotel initialization forbids all dynamic admission mutators.')
+    return {'api_group': ADMISSION_GROUP, 'served_versions': sorted(versions),
+            'inspected_collections': sorted(expected_paths), 'mutator_count': 0,
+            'unserved_resources': sorted(set(MUTATOR_KINDS) - served_resources)}
 
 
 def _initialization_pod(pod, approved, context):
@@ -302,7 +392,7 @@ def _continuity(previous, current):
     previous = _mapping(previous, 'Expected Hotel live identity')
     if set(previous) != set(current):
         raise CandidateK3sError('Hotel identity schema drifted.')
-    for key in ('server_ca_sha256', 'kube_system_namespace_uid', 'namespace_uid', 'support_containers', 'endpoints'):
+    for key in ('server_ca_sha256', 'kube_system_namespace_uid', 'namespace_uid', 'support_containers', 'endpoints', 'admission_mutators'):
         _exact(previous[key], current[key], 'Hotel live ' + key)
     old = {(item['kind'], item['name'], item['namespace']): item['uid'] for item in previous['objects']}
     now = {(item['kind'], item['name'], item['namespace']): item['uid'] for item in current['objects']}
@@ -330,7 +420,7 @@ def _parse_document(document, context, expected_identity=None):
                 'run_id': context['run_id'], 'plan_fingerprint': context['hotel_plan_fingerprint'],
                 'stage_fingerprint': context['hotel_stage_fingerprint'],
                 'server_ca_sha256': context['server_ca_sha256'], 'role_nodes': context['role_nodes']}
-    if set(document) != set(expected) | {'inventory', 'kube_system_namespace_uid', 'logs'}:
+    if set(document) != set(expected) | {'inventory', 'kube_system_namespace_uid', 'logs', 'admission_mutators'}:
         raise CandidateK3sError('Hotel live observation envelope schema drifted.')
     _exact({key: document[key] for key in expected}, expected, 'Hotel live observation identity')
     _uid(document['kube_system_namespace_uid'], 'Hotel kube-system namespace')
@@ -339,6 +429,8 @@ def _parse_document(document, context, expected_identity=None):
                   kube_system_namespace_uid=document['kube_system_namespace_uid'])
     result['identity'].update(server_ca_sha256=result['server_ca_sha256'],
                               kube_system_namespace_uid=result['kube_system_namespace_uid'], namespace_uid=result['namespace_uid'])
+    result['identity']['admission_mutators'] = _admission_mutator_absence(document['admission_mutators'])
+    result['admission_mutators'] = json.loads(_canonical(document['admission_mutators']))
     if result['kube_system_namespace_uid'] in {item['uid'] for item in result['identity']['objects']}:
         raise CandidateK3sError('Hotel kube-system UID aliases another object.')
     logs = _mapping(document['logs'], 'Hotel initializer logs')
@@ -370,10 +462,26 @@ def kubectl(arguments, timeout=60):
         raise CandidateK3sError('Hotel kubectl operation failed; no retry or success is inferred.')
     return _strict_json(result.stdout)
 
+def admission_mutators():
+    group = kubectl(['get', '--raw', '/apis/' + ADMISSION_GROUP])
+    evidence = {'api_group': group, 'discovery': {}, 'inventories': {}}
+    for version in _admission_versions(group):
+        group_version = ADMISSION_GROUP + '/' + version
+        resources = kubectl(['get', '--raw', '/apis/' + group_version])
+        evidence['discovery'][group_version] = resources
+        for resource in _array(resources.get('resources'), 'Hotel admission API resources'):
+            name = resource.get('name', '')
+            if isinstance(name, str) and name.split('/')[0] in MUTATOR_KINDS and '/' not in name:
+                path = group_version + '/' + name
+                evidence['inventories'][path] = kubectl(['get', '--raw', '/apis/' + path])
+    _admission_mutator_absence(evidence)
+    return evidence
+
 def collect():
     ca = 'sha256:' + hashlib.sha256(open('/var/lib/rancher/k3s/server/tls/server-ca.crt', 'rb').read(65537)).hexdigest()
     if ca != CONTEXT['server_ca_sha256']:
         raise CandidateK3sError('Hotel live server CA changed.')
+    admission = admission_mutators()
     system = kubectl(['get', 'namespace', 'kube-system', '-o', 'json'])
     _uid(system.get('metadata', {}).get('uid'), 'Hotel kube-system namespace')
     namespace = kubectl(['get', 'namespace', CONTEXT['namespace'], '-o', 'json'])
@@ -399,7 +507,7 @@ def collect():
         'plan_fingerprint': CONTEXT['hotel_plan_fingerprint'], 'stage_fingerprint': CONTEXT['hotel_stage_fingerprint'],
         'server_ca_sha256': ca, 'role_nodes': CONTEXT['role_nodes'],
         'kube_system_namespace_uid': system['metadata']['uid'],
-        'inventory': {'apiVersion': 'v1', 'kind': 'List', 'items': items}, 'logs': {}}
+        'inventory': {'apiVersion': 'v1', 'kind': 'List', 'items': items}, 'logs': {}, 'admission_mutators': admission}
     checked = _parse_document(document, CONTEXT)
     for mode, pod in checked['pods'].items():
         if pod['state'] == 'terminated':
@@ -424,6 +532,7 @@ if OPERATION == 'create':
     if checked['pods'] or any(item['metadata']['name'] in {approved['metadata']['name'] for approved in CONTEXT['initialization_manifest']['items']} for item in before['inventory']['items']):
         raise CandidateK3sError('Hotel initialization objects already exist; creation is never replayed.')
     payload = _canonical(CONTEXT['initialization_manifest']).encode()
+    _exact(_admission_mutator_absence(admission_mutators()), checked['identity']['admission_mutators'], 'Hotel pre-create admission absence')
     completed = subprocess.run([K3S_BINARY, 'kubectl', 'create', '--validate=strict', '--field-manager=deathstarbench-hotel-initialization', '-f', '-'], input=payload, capture_output=True, timeout=120)
     if completed.returncode != 0:
         raise CandidateK3sError('Hotel initialization creation failed or was partial; cleanup only.')
@@ -448,6 +557,7 @@ elif OPERATION == 'release':
     patch.extend([{'op': 'test', 'path': '/spec', 'value': pod['spec']}, {'op': 'remove', 'path': '/spec/schedulingGates'}])
     # Exactly one patch invocation. Ambiguous transport/API response is never
     # retried, recreated, or inferred from a later successful-looking dataset.
+    _exact(_admission_mutator_absence(admission_mutators()), checked['identity']['admission_mutators'], 'Hotel pre-release admission absence')
     completed = subprocess.run([K3S_BINARY, 'kubectl', '-n', CONTEXT['namespace'], 'patch', 'pod', selected['name'], '--type=json', '-p', _canonical(patch), '-o', 'json'], capture_output=True, timeout=60)
     if completed.returncode != 0:
         raise CandidateK3sError('Hotel one-shot gate release failed or is ambiguous; cleanup only.')
@@ -478,7 +588,7 @@ else:
 
 
 _REMOTE_HELPERS = support._REMOTE_HELPERS + '\n\n' + '\n\n'.join(inspect.getsource(function) for function in (
-    _exact, _initialization_pod, _endpoint_graph, _live_inventory, _continuity, _parse_document,
+    _exact, _admission_versions, _admission_mutator_absence, _initialization_pod, _endpoint_graph, _live_inventory, _continuity, _parse_document,
 ))
 
 
@@ -502,6 +612,7 @@ def guarded_hotel_observation_command(plan, stage, role_nodes, expected_ca_sha25
         'import base64, hashlib, ipaddress, json, os, re, subprocess, sys, time, zlib\n'
         'from collections.abc import Mapping\nfrom datetime import datetime\n'
         f'MAX_JSON_BYTES={MAX_JSON_BYTES}\nSCHEMA={SCHEMA!r}\n'
+        f'ADMISSION_GROUP={ADMISSION_GROUP!r}\nMUTATOR_KINDS={MUTATOR_KINDS!r}\n'
         f'_OWNERSHIP_KEYS={support._OWNERSHIP_KEYS!r}\nK3S_BINARY={K3S_BINARY!r}\n'
         f'SCHEDULING_GATE={SCHEDULING_GATE!r}\nCOMPONENTS={COMPONENTS!r}\nMODES={MODES!r}\n'
         f'OPERATION={operation!r}\nMODE={mode!r}\nTIMEOUT_SECONDS={timeout_seconds}\n'

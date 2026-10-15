@@ -864,7 +864,13 @@ support Pod UIDs and private IPs; matching labels alone do not suffice.
 Nine additive policies and two standalone, scheduling-gated Pods are created
 once. The live Pod validator accepts only specifically audited Kubernetes
 defaults, rejecting injected containers, credentials, storage, placement,
-environment, command, image or security changes. Immediately before dispatch,
+environment, command, image or security changes. Discovery must prove that
+every served dynamic mutating-webhook, policy and binding collection is empty;
+unknown mutators, discovery failures and denied reads fail closed. The check is
+repeated immediately before each write, because a pre-admission JSON Patch
+test alone cannot prevent an UPDATE admission mutator from changing an image.
+This is not protection against a concurrent privileged cluster administrator.
+Immediately before dispatch,
 the controller rechecks ownership/storage/API continuity and durably records
 the exclusive local latch. One atomic JSON Patch tests the freshly admitted
 Pod identity and entire spec before removing its gate. There is no Job,

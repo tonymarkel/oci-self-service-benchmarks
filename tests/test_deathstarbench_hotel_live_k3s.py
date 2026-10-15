@@ -20,6 +20,28 @@ ROLES = support_fixtures.ROLE_NODES
 CA = 'sha256:' + '2' * 64
 
 
+def admission_evidence(*, policies=True):
+    group = live.ADMISSION_GROUP
+    versions = ['v1', 'v1beta1'] if policies else ['v1']
+    result = {'api_group': {'apiVersion': 'v1', 'kind': 'APIGroup', 'name': group,
+                           'versions': [{'version': version, 'groupVersion': group + '/' + version} for version in versions],
+                           'preferredVersion': {'version': 'v1', 'groupVersion': group + '/v1'}},
+              'discovery': {}, 'inventories': {}}
+    for version in versions:
+        group_version = group + '/' + version
+        names = ['mutatingwebhookconfigurations'] if version == 'v1' else ['mutatingadmissionpolicies', 'mutatingadmissionpolicybindings']
+        result['discovery'][group_version] = {
+            'apiVersion': 'v1', 'kind': 'APIResourceList', 'groupVersion': group_version,
+            'resources': [{'name': name, 'kind': live.MUTATOR_KINDS[name], 'namespaced': False,
+                           'singularName': '', 'verbs': ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete']}
+                          for name in names]}
+        for name in names:
+            result['inventories'][group_version + '/' + name] = {
+                'apiVersion': group_version, 'kind': live.MUTATOR_KINDS[name] + 'List',
+                'metadata': {'resourceVersion': '123'}, 'items': []}
+    return result
+
+
 def inventory(plan, stage, *, created=False):
     result = support_fixtures.live_inventory(plan.support_stage)
     services = {item['metadata']['name']: item for item in result['items'] if item['kind'] == 'Service'}
@@ -65,7 +87,8 @@ def document(plan, stage, data, *, logs=None):
             'released': False, 'application_start_allowed': False,
             'run_id': plan.run_id, 'plan_fingerprint': plan.fingerprint, 'stage_fingerprint': stage.fingerprint,
             'server_ca_sha256': CA, 'role_nodes': ROLES, 'inventory': data, 'logs': logs or {},
-            'kube_system_namespace_uid': support_fixtures.identity('Namespace', 'kube-system')}
+            'kube_system_namespace_uid': support_fixtures.identity('Namespace', 'kube-system'),
+            'admission_mutators': admission_evidence()}
 
 
 def initialization_pod(data, mode):
@@ -236,6 +259,77 @@ class GuardedHotelLiveK3sTests(unittest.TestCase):
                 with self.assertRaises(live.CandidateK3sError):
                     self.parse(data)
 
+    def test_admission_policy_unserved_only_with_complete_successful_discovery(self):
+        original = document(self.plan, self.stage, inventory(self.plan, self.stage))
+        original['admission_mutators'] = admission_evidence(policies=False)
+        observed = live.parse_guarded_hotel_live_observation(json.dumps(original), self.plan, self.stage, ROLES, CA)
+        self.assertEqual(observed['identity']['admission_mutators']['unserved_resources'],
+                         ['mutatingadmissionpolicies', 'mutatingadmissionpolicybindings'])
+        self.assertEqual(observed['identity']['admission_mutators']['mutator_count'], 0)
+        for mutation in ('missing-version', 'missing-list', 'unknown-mutator', 'active-webhook', 'active-policy', 'active-binding'):
+            with self.subTest(mutation=mutation):
+                current = copy.deepcopy(original)
+                evidence = current['admission_mutators'] = admission_evidence()
+                if mutation == 'missing-version':
+                    evidence['discovery'].pop(live.ADMISSION_GROUP + '/v1beta1')
+                elif mutation == 'missing-list':
+                    evidence['inventories'].pop(live.ADMISSION_GROUP + '/v1beta1/mutatingadmissionpolicies')
+                elif mutation == 'unknown-mutator':
+                    evidence['discovery'][live.ADMISSION_GROUP + '/v1']['resources'].append(
+                        {'name': 'mutatingfuturepolicies', 'kind': 'FutureMutator', 'namespaced': False, 'verbs': ['list']})
+                else:
+                    name = {'active-webhook': 'mutatingwebhookconfigurations', 'active-policy': 'mutatingadmissionpolicies',
+                            'active-binding': 'mutatingadmissionpolicybindings'}[mutation]
+                    selected = next(value for key, value in evidence['inventories'].items() if key.endswith('/' + name))
+                    selected['items'] = [{'metadata': {'name': 'hostile'}}]
+                with self.assertRaises(live.CandidateK3sError):
+                    live.parse_guarded_hotel_live_observation(json.dumps(current), self.plan, self.stage, ROLES, CA)
+
+    def test_empty_mutator_list_revision_changes_do_not_change_stable_identity(self):
+        original = document(self.plan, self.stage, inventory(self.plan, self.stage))
+        before = live.parse_guarded_hotel_live_observation(json.dumps(original), self.plan, self.stage, ROLES, CA)
+        for item in original['admission_mutators']['inventories'].values():
+            item['metadata']['resourceVersion'] = '999'
+        after = live.parse_guarded_hotel_live_observation(json.dumps(original), self.plan, self.stage, ROLES, CA,
+            expected_identity=before['identity'])
+        self.assertEqual(after['identity'], before['identity'])
+        self.assertNotEqual(after['admission_mutators'], before['admission_mutators'])
+
+    def test_embedded_hostile_mutator_or_forbidden_discovery_prevents_all_writes(self):
+        ca_bytes = b'synthetic-certificate-only'
+        ca = 'sha256:' + hashlib.sha256(ca_bytes).hexdigest()
+        for operation, mutation in (('create', 'webhook'), ('release', 'policy'), ('release', 'binding'), ('create', 'forbidden-discovery')):
+            with self.subTest(operation=operation, mutation=mutation):
+                data = inventory(self.plan, self.stage, created=operation == 'release')
+                original = document(self.plan, self.stage, data)
+                original['server_ca_sha256'] = ca
+                expected = live.parse_guarded_hotel_live_observation(json.dumps(original), self.plan, self.stage, ROLES, ca)['identity']
+                hostile = admission_evidence()
+                if mutation != 'forbidden-discovery':
+                    name = {'webhook': 'mutatingwebhookconfigurations', 'policy': 'mutatingadmissionpolicies',
+                            'binding': 'mutatingadmissionpolicybindings'}[mutation]
+                    next(value for key, value in hostile['inventories'].items() if key.endswith('/' + name))['items'] = [{'metadata': {'name': 'hostile'}}]
+                calls = []
+
+                def kubectl(arguments, **kwargs):
+                    calls.append(arguments)
+                    words = arguments[2:]
+                    self.assertEqual(words[:2], ['get', '--raw'])
+                    path = words[2].removeprefix('/apis/')
+                    if mutation == 'forbidden-discovery' and path.endswith('/v1beta1'):
+                        return SimpleNamespace(returncode=1, stdout=b'', stderr=b'Forbidden')
+                    result = hostile['api_group'] if path == live.ADMISSION_GROUP else (
+                        hostile['discovery'][path] if path in hostile['discovery'] else hostile['inventories'][path])
+                    return SimpleNamespace(returncode=0, stdout=json.dumps(result).encode(), stderr=b'')
+
+                command = live.guarded_hotel_observation_command(self.plan, self.stage, ROLES, ca,
+                    operation=operation, mode='initialize-empty' if operation == 'release' else None, expected_identity=expected)
+                with patch('subprocess.run', side_effect=kubectl), patch('builtins.open', mock_open(read_data=ca_bytes)):
+                    with self.assertRaisesRegex(ValueError, 'admission mutators|kubectl operation failed'):
+                        exec(shlex.split(command)[3], {})
+                self.assertTrue(calls)
+                self.assertTrue(all(arguments[2:4] == ['get', '--raw'] for arguments in calls))
+
     def test_command_self_contained_and_exact_one_patch_without_apply_or_scale(self):
         observed = self.parse(inventory(self.plan, self.stage, created=True))
         for operation, mode in (('observe', None), ('create', None), ('release', 'initialize-empty'), ('wait', 'verify')):
@@ -265,7 +359,12 @@ class GuardedHotelLiveK3sTests(unittest.TestCase):
         def kubectl(arguments, **kwargs):
             calls.append(arguments)
             words = arguments[2:]
-            if 'patch' in words:
+            if words[:2] == ['get', '--raw']:
+                path = words[2].removeprefix('/apis/')
+                evidence = original['admission_mutators']
+                result = evidence['api_group'] if path == live.ADMISSION_GROUP else (
+                    evidence['discovery'][path] if path in evidence['discovery'] else evidence['inventories'][path])
+            elif 'patch' in words:
                 operations = json.loads(words[words.index('-p') + 1])
                 pod = initialization_pod(data, 'initialize-empty')
                 tests = {item['path']: item['value'] for item in operations if item['op'] == 'test'}

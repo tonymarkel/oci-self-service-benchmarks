@@ -1,0 +1,87 @@
+name: Guarded Hotel anonymous image-byte preflight (no runtime execution)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  actions: read
+  packages: read
+
+jobs:
+  image-access:
+    name: Reconstruct sources and anonymously verify all seven Hotel image platforms
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out reviewed benchmark source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Check out exact audited upstream and recursive submodules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: delimitrou/DeathStarBench
+          ref: 6ecb09706140f8730b5385c08f1386c654c3c526
+          path: .build/upstream
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - name: Fetch checksum-pinned LuaSocket source
+        run: |
+          set -euo pipefail
+          mkdir -p .build/sources
+          curl --proto '=https' --tlsv1.2 --fail --show-error --location --retry 5 --retry-delay 5 \
+            https://luarocks.org/manifests/lunarmodules/luasocket-3.1.0-1.src.rock \
+            --output .build/sources/luasocket-3.1.0-1.src.rock
+          echo 'f4a207f50a3f99ad65def8e29c54ac9aac668b216476f7fae3fae92413398ed2  .build/sources/luasocket-3.1.0-1.src.rock' | sha256sum --check --strict -
+      - name: Download exact reviewed original Hotel publication inputs (not authority)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 38414696606
+          name: candidate-lock-hotel_reservation-38414696606-1
+          path: .build/baseline
+      - name: Download exact reviewed guarded Hotel publication inputs (not authority)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 38767705438
+          name: hotel-guarded-lock-38767705438-1
+          path: .build/publication
+      - name: Fresh source reconstruction and anonymous exact indexes manifests configs and every layer
+        run: |
+          set -euo pipefail
+          unset REGISTRY_TOKEN REGISTRY_USERNAME DOCKER_AUTH_CONFIG GH_TOKEN GITHUB_TOKEN
+          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
+          unset SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE NETRC
+          python scripts/qualify_deathstarbench_hotel_image_access.py \
+            --upstream .build/upstream --luasocket-rock .build/sources/luasocket-3.1.0-1.src.rock \
+            --root .build/prepared --baseline .build/baseline --publication .build/publication --output .build/access
+      - name: Retain a bounded sanitized failure record if an earlier prerequisite failed
+        if: always()
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          from scripts.qualify_deathstarbench_hotel_image_access import _write_owned, failure_record
+          output = Path('.build/access')
+          if not output.exists():
+              output.mkdir(mode=0o755, parents=True)
+          if not any(output.iterdir()):
+              _write_owned(output, 'qualification-failure.json', failure_record(RuntimeError()))
+          PY
+      - name: Preserve historical byte-access observations (never a runtime capability)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hotel-image-access-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/access/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Summarize the intentionally closed execution boundary
+        if: success()
+        run: |
+          echo 'All seven Hotel image platforms were anonymously byte-verified. No Docker, cloud, Kubernetes, database, initializer, application, or benchmark was executed. Hotel and Media remain unreleased.' >> "$GITHUB_STEP_SUMMARY"

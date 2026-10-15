@@ -43,7 +43,7 @@ class GuardedHotelWorkflowTests(unittest.TestCase):
         options = re.findall(r'^          - ([a-z-]+)$', trigger, re.MULTILINE)
         self.assertEqual(options, [
             'load-driver', 'workload-images', 'hotel-images', 'media-images',
-            'hotel-media-images', 'hotel-initialization-images', 'candidate-runtime-preflight',
+            'hotel-media-images', 'hotel-initialization-images', 'hotel-runtime-preflight', 'candidate-runtime-preflight',
         ])
         guarded = job(self.wrapper, 'publish-guarded-hotel')
         self.assertIn("if: github.event.inputs.publication == 'hotel-initialization-images'", guarded)

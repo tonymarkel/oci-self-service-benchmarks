@@ -825,19 +825,13 @@ an apparently successful initializer or verifier. Local command-output records
 must match the exact run/dataset/mode/Pod UID and still retain false start gates.
 They are unverified observations, not fresh database or Pod execution proof.
 
-**No cloud/Kubernetes initialization or application executor is implemented by
-this slice.** Nothing applies these new policies/Pods, removes a gate, starts
-MongoDB or application services, or sends benchmark traffic. The next controller
-must freshly verify cloud/cluster ownership, CA, complete admitted Pod specs,
-container images/exit/restart state, and unchanged namespace/Node/PV/PVC/Pod
-identities under its held lease. MongoDB Service/EndpointSlice targets must
-match the exact observed database Pod UIDs/IPs: labels alone are not ownership
-proof. It must persist the one-use latch before releasing a gate, handle lost
-responses without replay, globally verify all stores, and own cleanup. Old
-support-operator success/resume and per-store Go markers cannot substitute for
-that boundary. Service discovery/preload/restart, authentication/atomic
-reservation semantics, measurement epochs and live-cloud qualification remain
-separate prerequisites before UI release.
+These foundations alone implement no executor. The separate live controller
+described below consumes them; their historical JSON and closed factory flags
+are not promoted into execution authority. Old support-operator success/resume
+and per-store Go markers cannot substitute for fresh live checks. Service
+discovery/preload/restart, authentication/atomic reservation semantics,
+measurement epochs and live-cloud release qualification remain separate
+prerequisites before UI release.
 
 The [retained full-byte observation](qualification/deathstarbench-hotel-image-access-v1.json)
 records successful [run 38777055813](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38777055813):
@@ -848,6 +842,49 @@ anonymous token responses were 623,184,724 bytes. The artifact fingerprint
 matches the reviewed guarded publication. The record retains the exact receipt
 hash and per-platform images/counts, without treating that historical JSON as
 a capability or as live workload qualification.
+
+## Private live Hotel initialization controller
+
+`scripts/qualify_deathstarbench_hotel_initialization.py` is a separate,
+cleanup-owning private workflow. It does not change the old support operator,
+Social Network runtime, public form, benchmark dispatch or comparison cohorts.
+It creates the same five-role billable infrastructure, freshly adopts both
+original and guarded artifacts, prepares K3s and validates the original
+support-only stage before adding initialization resources. All ten application
+Deployments remain at zero throughout this workflow.
+
+`app/deathstarbench_hotel_live_controller.py` joins fresh cloud ownership,
+provider volume and read-only filesystem checks with the strict live API
+validator in `app/deathstarbench_hotel_live_k3s.py`. Each observation validates
+the unchanged complete support graph, CA, kube-system/workload Namespace UIDs,
+role Node UIDs, database PV/PVC/Pod identities and container executions.
+Services and controller-owned EndpointSlices must resolve to the exact ready
+support Pod UIDs and private IPs; matching labels alone do not suffice.
+
+Nine additive policies and two standalone, scheduling-gated Pods are created
+once. The live Pod validator accepts only specifically audited Kubernetes
+defaults, rejecting injected containers, credentials, storage, placement,
+environment, command, image or security changes. Immediately before dispatch,
+the controller rechecks ownership/storage/API continuity and durably records
+the exclusive local latch. One atomic JSON Patch tests the freshly admitted
+Pod identity and entire spec before removing its gate. There is no Job,
+restart, backoff, reset, repair, apply reconciliation or dispatch retry.
+
+The controller accepts only the exact native image, zero restarts, pinned Pod
+UID, successful terminal exit and bounded run/dataset/mode-specific output.
+It then releases the separate global read-only verifier using the same
+durable-intent policy. Narrow successful initialization evidence does not
+grant application-start, runtime, measurement, all-cloud or public-release
+qualification. Every normal or failed invocation attempts exact owned
+infrastructure destruction and independent absence proof.
+
+An interrupted or uncertain attempt is **cleanup-only**, even if initialization
+finished remotely. The private immutable attempt pin, journal and latch files
+are retained. `--cleanup-only RUN_ID` needs no source adoption, registry access,
+SSH or Kubernetes dispatch; it uses the original provider identity. A fresh
+run with fresh infrastructure is required to try initialization again. The
+qualification-only interruption checkpoints include loss of the accepted
+initializer response before the client parses its acknowledgement.
 
 ## Next review slices and release prerequisites
 

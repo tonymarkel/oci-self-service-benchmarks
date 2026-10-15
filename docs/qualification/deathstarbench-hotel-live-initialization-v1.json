@@ -1,0 +1,1233 @@
+{
+  "attempts": [
+    {
+      "absence_passes": 2,
+      "adoption_scope": "fresh-source-and-manifest-config-native-receipt-validation-not-full-compressed-layer-access",
+      "application_architecture": "aarch64",
+      "application_service_dispatch_performed": false,
+      "application_shape": "Standard_D8ps_v6",
+      "benchmark_measurement_performed": false,
+      "classification": "provisioning-vcpu-quota-rejection-before-runtime",
+      "cleanup_complete": true,
+      "cleanup_failure": null,
+      "cloud_resources_partially_created": true,
+      "exit_code": 1,
+      "failure_type": "ResourceExistsError",
+      "frozen_live_launch_commit_operator_reported": "17acb33507b106bc0b0bc08e2e0d993ec099f4fc",
+      "global_readonly_verification_completed": false,
+      "guarded_artifact_adoption_completed": true,
+      "guarded_artifact_fingerprint": "sha256:71949735027ff9b51ab5091b7061d37a45ed37f1dfaaab5d38dca9b476071df4",
+      "guarded_full_byte_access_factory_completed": false,
+      "independent_absence_proved": true,
+      "initialization_complete": false,
+      "initialization_dispatched": false,
+      "kubernetes_workload_controller_contacted": false,
+      "new_run_allocated": true,
+      "original_artifact_adoption_completed": true,
+      "original_artifact_fingerprint": "sha256:5ffb28eba5643a61e79e33c5fe472f2c73d13c550c155a2c6760c7c440129bd2",
+      "private_evidence": {
+        "cleanup_proof": {
+          "canonical_json_sha256": "sha256:851e59f31ebe98ead70a652df2f3d9fb0ca8006e682a82055be35386b283989d"
+        },
+        "hotel_initialization_pin": {
+          "canonical_json_sha256": "sha256:3710eb2194a0f76ca2b6892af00b0e75d42a2b47f65f6080564a521602fa66ee",
+          "raw_sha256": "sha256:3710eb2194a0f76ca2b6892af00b0e75d42a2b47f65f6080564a521602fa66ee"
+        },
+        "operator_record": {
+          "canonical_json_sha256": "sha256:c9fdc34c1230f37ac140046d9975cea42a4db748fb2b0c1170a03f52bb3fae16"
+        },
+        "outcome": {
+          "canonical_json_sha256": "sha256:e0616fd8a12451f11ed912cb1f81dbcf3ce80f496bc0eb077d552f6ded251b96"
+        },
+        "outcome_log_raw_sha256": "sha256:4124a31a4924fa11146946728df77a106fa9756240c53f7a268181b141b8c482",
+        "provider_absence_observation": {
+          "canonical_json_sha256": "sha256:259f3a3e1aa6633b94f0d892b7b4c87cc36b49c4d1dcbed3d4622996a66604e4"
+        },
+        "registry_egress_observation": {
+          "canonical_json_sha256": "sha256:79d75e4645f98717117543e4fba8aac008fc221aa2835d0631ca0deb2724def2"
+        },
+        "state": {
+          "canonical_json_sha256": "sha256:c40be6857bf221d13b800919093c0d393b3659e6adcbd30d3e5b0b7f07820bf5",
+          "raw_sha256": "sha256:aa75c9c7822df0cc21b78ca4aaea57f24b5ed03a91a6847a0c63464f451dba29"
+        },
+        "support_pin": {
+          "canonical_json_sha256": "sha256:fdbb57c1b2e6d0ee0efcaeb379fb78f7c0cbff73b558abe988f2458f0092dab5",
+          "raw_sha256": "sha256:fdbb57c1b2e6d0ee0efcaeb379fb78f7c0cbff73b558abe988f2458f0092dab5"
+        }
+      },
+      "provider": "azure",
+      "recorded_initialize_intents": 0,
+      "recorded_verify_intents": 0,
+      "recovery_policy": "cleanup-only-never-replay",
+      "registry_transport_configuration_sha256": "sha256:babc6714e1ddc69e42bcaf09bb1384bdf01cb205071fc3710d7baaa649b69bb7",
+      "run_id": "ade27ba54217",
+      "runtime_preparation_reached": false,
+      "support_full_byte_access_factory_completed": false,
+      "support_stage_complete": false
+    },
+    {
+      "absence_passes": 2,
+      "adoption_scope": "fresh-original-and-guarded-artifact-adoption-and-both-full-byte-access-factories-before-live-preflight",
+      "application_architecture": "aarch64",
+      "application_deployment_count": 10,
+      "application_replica_values": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "application_service_dispatch_performed": false,
+      "application_shape": "Standard_D8ps_v6",
+      "backing_service_runtime_observed": true,
+      "benchmark_measurement_performed": false,
+      "classification": "preflight-validation-rejection-before-create",
+      "cleanup_complete": true,
+      "cleanup_failure": null,
+      "cloud_resources_created": true,
+      "controller_preflight_reached": true,
+      "database_execution_verified": false,
+      "dispatch_latch_count": 0,
+      "executed_commit_independently_attested_by_private_job": false,
+      "exit_code": 1,
+      "failure_label": "Hotel EndpointSlice ports drifted.",
+      "failure_type": "SSHCommandError",
+      "frozen_live_launch_commit_operator_reported": "17acb33507b106bc0b0bc08e2e0d993ec099f4fc",
+      "global_readonly_verification_completed": false,
+      "guarded_artifact_adoption_completed": true,
+      "guarded_artifact_fingerprint": "sha256:71949735027ff9b51ab5091b7061d37a45ed37f1dfaaab5d38dca9b476071df4",
+      "guarded_full_byte_access_factory_completed": true,
+      "guarded_full_byte_access_receipt_retained": false,
+      "guarded_live_layer_byte_count": null,
+      "independent_absence_proved": true,
+      "initialization_complete": false,
+      "initialization_dispatched": false,
+      "initialization_executed": false,
+      "initialization_kubernetes_mutation_performed": false,
+      "journal_event_count": 1,
+      "journal_state": "created",
+      "kubernetes_workload_controller_contacted": true,
+      "new_run_allocated": true,
+      "original_artifact_adoption_completed": true,
+      "original_artifact_fingerprint": "sha256:5ffb28eba5643a61e79e33c5fe472f2c73d13c550c155a2c6760c7c440129bd2",
+      "private_evidence": {
+        "cleanup_proof": {
+          "canonical_json_sha256": "sha256:863f96d2bd57b7f7f067106dbe3e5bf1dc6a4dc9e0e1359850c3dcd44bcd3718"
+        },
+        "controller_record": {
+          "canonical_json_sha256": "sha256:d4ed6abce64f97034fd80314d3366cc4792805e111699f70bfcb3bfe8dc079e9"
+        },
+        "hotel_initialization_pin": {
+          "canonical_json_sha256": "sha256:e463205d8a027f04d23adf73a787ea4b7cf63ac5e59a794d7c2d4764692e791a",
+          "raw_sha256": "sha256:e463205d8a027f04d23adf73a787ea4b7cf63ac5e59a794d7c2d4764692e791a"
+        },
+        "journal_created_event": {
+          "canonical_json_sha256": "sha256:a8cd58e2cd11e68536d4f9d1f6ab4c0d15adea1807e258d2b6f267664d1c24ee",
+          "raw_sha256": "sha256:a8cd58e2cd11e68536d4f9d1f6ab4c0d15adea1807e258d2b6f267664d1c24ee"
+        },
+        "operator_record": {
+          "canonical_json_sha256": "sha256:cd0419a2c478bda675e630151ed984e0f2640d0ff83b5b2873fd24ca3faf5fa6"
+        },
+        "outcome": {
+          "canonical_json_sha256": "sha256:5ede9806ab5056d35cb843770b6992a0bbe27f5f300c385556e7d74cd565ef5d"
+        },
+        "outcome_log_raw_sha256": "sha256:8572c55986c8e70f6718162bb3eead6fa9063669357e8f1f450d382026dc84ee",
+        "provider_absence_observation": {
+          "canonical_json_sha256": "sha256:cea16c45190e270541d5077cec6edc88c7ae556548576177b23e27bb64743c41"
+        },
+        "registry_egress_observation": {
+          "canonical_json_sha256": "sha256:0b498c94cdf114492536ed497d23b56ee7039202e3ca05f4343bb86de4686d04"
+        },
+        "state": {
+          "canonical_json_sha256": "sha256:8b20e4dc76803c1f505ab6746c233b187a4373f2e69e6b83ad9b5cbf8d631e2b",
+          "raw_sha256": "sha256:8b20e4dc76803c1f505ab6746c233b187a4373f2e69e6b83ad9b5cbf8d631e2b"
+        },
+        "support_pin": {
+          "canonical_json_sha256": "sha256:a52466bd4db26bf6a02984197f5ff8369e37ed67e2000f4032a6482fe04b6b57",
+          "raw_sha256": "sha256:a52466bd4db26bf6a02984197f5ff8369e37ed67e2000f4032a6482fe04b6b57"
+        },
+        "support_stage_archive": {
+          "canonical_json_sha256": "sha256:e91f042b1be10d8995b1c8f22c503e908b33732eb39acdbdff7bb822f91496c5"
+        },
+        "support_stage_snapshot": {
+          "canonical_json_sha256": "sha256:a582255d7231577ef33275dd9e3e7ab00da79825589d01889e6b0cbe73b7c04a"
+        }
+      },
+      "provider": "azure",
+      "recorded_initialize_intents": 0,
+      "recorded_verify_intents": 0,
+      "recovery_policy": "cleanup-only-never-replay",
+      "registry_transport_configuration_sha256": "sha256:2a8d5d58d9cb5d2ec9b4414408702000410a94ac7914f7311742521bb07ef7bd",
+      "run_id": "4101173fd91d",
+      "runtime_preparation_reached": true,
+      "support_full_byte_access_factory_completed": true,
+      "support_full_byte_downloaded_bytes": 425184850,
+      "support_stage_complete": true,
+      "support_stage_state": "support_ready_applications_paused"
+    },
+    {
+      "absence_passes": 2,
+      "acknowledgement_loss_scope": "remote gate-release command returned; interruption occurred before the controller parsed its returned observation",
+      "adoption_scope": "fresh-original-and-guarded-artifact-adoption-and-both-full-byte-access-factories-before-live-controller",
+      "application_architecture": "aarch64",
+      "application_deployment_count": 10,
+      "application_replica_values": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "application_service_dispatch_performed": false,
+      "application_shape": "c4a-standard-8",
+      "application_start_allowed": false,
+      "backing_service_runtime_observed": true,
+      "benchmark_measurement_performed": false,
+      "checkpoint": "initialize-response-returned",
+      "checkpoint_mode": "graceful",
+      "checkpoint_recorded_at": "2026-10-15T21:13:36.193408+00:00",
+      "classification": "graceful-initialize-response-returned-acknowledgement-loss-and-cleanup",
+      "cleanup_complete": true,
+      "cleanup_failure": null,
+      "cleanup_only_followup": {
+        "exit_code": null,
+        "observation_status": "not-yet-observed",
+        "registry_and_ssh_free_execution_observed": null
+      },
+      "cloud_resources_created": true,
+      "controller_preflight_reached": true,
+      "database_execution_verified": false,
+      "dispatch_latch_count": 1,
+      "executed_commit_independently_attested_by_private_job": false,
+      "exit_code": 130,
+      "exit_code_scope": "original-interrupted-qualification-process-not-any-subsequent-cleanup-only-command",
+      "expected_absent_resource_count": 20,
+      "failure_interrupted": true,
+      "failure_type": "RunCancelled",
+      "frozen_live_launch_commit_operator_reported": "a22db227572dad009d409ee1f8f8ff8b587a0bfd",
+      "frozen_tracked_source_manifest_sha256": "sha256:e5209c1710c96daaaafcda2cfb48fbdd63f4b2345800542f0f10ef02a1172b95",
+      "global_readonly_verification_completed": false,
+      "guarded_artifact_adoption_completed": true,
+      "guarded_artifact_fingerprint": "sha256:71949735027ff9b51ab5091b7061d37a45ed37f1dfaaab5d38dca9b476071df4",
+      "guarded_full_byte_access_factory_completed": true,
+      "guarded_full_byte_access_fingerprint_from_dispatch_intent": "sha256:4d31df1f973be69c2db1935d1e2db598323df98b787bcf998d95cdccb058d69a",
+      "guarded_full_byte_access_receipt_retained": false,
+      "guarded_live_layer_byte_count": null,
+      "independent_absence_proved": true,
+      "initialization_complete": false,
+      "initialization_dispatch_acknowledged": false,
+      "initialization_dispatch_intent_recorded": true,
+      "initialization_dispatched": null,
+      "initialization_executed": null,
+      "initialization_kubernetes_mutation_performed": true,
+      "initialization_kubernetes_mutation_scope": "exact gated Pods and additive policies created; initializer completion was not acknowledged",
+      "initializer_exit_observation_count": 0,
+      "initializer_latch_count": 1,
+      "journal_event_count": 3,
+      "journal_event_file_count": 3,
+      "journal_events": [
+        "created",
+        "blocked-pods-recorded",
+        "initialize-intent-recorded"
+      ],
+      "journal_state": "initialize-intent-recorded",
+      "kubernetes_workload_controller_contacted": true,
+      "new_run_allocated": true,
+      "original_artifact_adoption_completed": true,
+      "original_artifact_fingerprint": "sha256:5ffb28eba5643a61e79e33c5fe472f2c73d13c550c155a2c6760c7c440129bd2",
+      "private_evidence": {
+        "cleanup_proof": {
+          "canonical_json_sha256": "sha256:577477aa2016fc9455943045239b742e5a53adfe2a11c901064e5929421e16a1"
+        },
+        "controller_record": {
+          "canonical_json_sha256": "sha256:d03b88d48cf0d9c3d9263c87f1f1ab680ee84f8b740ae69aff6c9783e7bbf65c"
+        },
+        "frozen_source_receipt": {
+          "canonical_json_sha256": "sha256:8fb8e0c5b5a0e841365cdf6fad775904bbd04aee9c3b53fd5fc9883cc6951295",
+          "raw_sha256": "sha256:ca171a6c89d3de9e6f7765fa589f9bedfb9f17c2d987af23323369e846d0e8f3"
+        },
+        "hotel_initialization_pin": {
+          "canonical_json_sha256": "sha256:7a4ad43c95afe2fe1caa4df44845053336739d1542a3de4d95af4b745ce97e88",
+          "raw_sha256": "sha256:7a4ad43c95afe2fe1caa4df44845053336739d1542a3de4d95af4b745ce97e88"
+        },
+        "initializer_latch": {
+          "canonical_json_sha256": "sha256:2559939658187a14a03bdea1a80c3a9aa012517af1fe1e27e5fc5589662010f5",
+          "raw_sha256": "sha256:2559939658187a14a03bdea1a80c3a9aa012517af1fe1e27e5fc5589662010f5"
+        },
+        "interruption_record": {
+          "canonical_json_sha256": "sha256:15287cd648dfc766866fee9e4dd91695717d1f44ba7bf9e8f58f3253e9b5f298"
+        },
+        "journal_blocked_pods_event": {
+          "canonical_json_sha256": "sha256:6883581017c00cac0560b520d0b0c8ef98ebb7f2a0e633f17799f9c246bbc997",
+          "raw_sha256": "sha256:6883581017c00cac0560b520d0b0c8ef98ebb7f2a0e633f17799f9c246bbc997"
+        },
+        "journal_created_event": {
+          "canonical_json_sha256": "sha256:d39d66705f1490ebd1f3bf9cd8cbac8ba0f73982b38aaccab4964e50d0e0994f",
+          "raw_sha256": "sha256:d39d66705f1490ebd1f3bf9cd8cbac8ba0f73982b38aaccab4964e50d0e0994f"
+        },
+        "journal_initialize_intent_event": {
+          "canonical_json_sha256": "sha256:239fea644b06ee795391714c60f1d9e7d07c9c6a3e78c919de8ea6bb2bddcc38",
+          "raw_sha256": "sha256:239fea644b06ee795391714c60f1d9e7d07c9c6a3e78c919de8ea6bb2bddcc38"
+        },
+        "operator_record": {
+          "canonical_json_sha256": "sha256:e286afe0ff6d7c04d3af14e2fba03bf64002c0c2589cb69c6b9c18faa9c19e07"
+        },
+        "original_interrupted_state": {
+          "canonical_json_sha256": "sha256:ef52c26f2c972a84f9f70934139e2228845c961e4dfaa3bc2ce77e4c3ac39191",
+          "raw_sha256": "sha256:ef52c26f2c972a84f9f70934139e2228845c961e4dfaa3bc2ce77e4c3ac39191"
+        },
+        "outcome": {
+          "canonical_json_sha256": "sha256:ef650709ff7c47bc5ff087e0dcc768c0aed12c330c21f1980367f83fd27a61a3"
+        },
+        "outcome_log_raw_sha256": "sha256:5a42296bf389ec03428703edefa12932982edb35867512a1601ecd3d45f26a67",
+        "provider_absence_observation": {
+          "canonical_json_sha256": "sha256:e42067c5993b070e3359beb09e8f23f97312a714860b78835aac981930b25a29"
+        },
+        "registry_egress_observation": {
+          "canonical_json_sha256": "sha256:0b498c94cdf114492536ed497d23b56ee7039202e3ca05f4343bb86de4686d04"
+        },
+        "support_full_byte_receipt": {
+          "canonical_json_sha256": "sha256:c856e799ca3cb5223e349620c56a62a3c6c3dfbeff97b073a6888c1949af6832"
+        },
+        "support_pin": {
+          "canonical_json_sha256": "sha256:460d4428f28d37b96b4755658b666762aa66aec510ab9f0524c46e0276427025",
+          "raw_sha256": "sha256:460d4428f28d37b96b4755658b666762aa66aec510ab9f0524c46e0276427025"
+        },
+        "support_stage_archive": {
+          "canonical_json_sha256": "sha256:29488c11de26a9e7338a9a183c60a52ee922e4c74c590449409d9d93d9cf2a00"
+        },
+        "support_stage_snapshot": {
+          "canonical_json_sha256": "sha256:0312d6e2edb4a9eda1fd4ec482735dd74207a3df11d7bb5a32a5d56267df1f83"
+        }
+      },
+      "provider": "gcp",
+      "recorded_initialize_intents": 1,
+      "recorded_verify_intents": 0,
+      "recovery_policy": "cleanup-only-never-replay",
+      "registry_transport_configuration_sha256": "sha256:2a8d5d58d9cb5d2ec9b4414408702000410a94ac7914f7311742521bb07ef7bd",
+      "run_id": "e88f16cf1871",
+      "runtime_preparation_reached": true,
+      "source_freeze_basis": "operator-owned repository checks before and after launch, not saved-job or workload self-attestation",
+      "support_full_byte_access_factory_completed": true,
+      "support_full_byte_downloaded_bytes": 425184849,
+      "support_pod_count": 14,
+      "support_stage_complete": true,
+      "support_stage_state": "support_ready_applications_paused",
+      "verifier_exit_observation_count": 0,
+      "verifier_latch_count": 0
+    },
+    {
+      "absence_passes": 2,
+      "actual_initializer_exit_code": null,
+      "actual_initializer_terminal_phase": null,
+      "adoption_scope": "fresh-original-and-guarded-artifact-adoption-and-both-full-byte-access-factories-before-live-controller",
+      "application_architecture": "aarch64",
+      "application_deployment_count": 10,
+      "application_replica_values": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "application_service_dispatch_performed": false,
+      "application_shape": "Standard_D8ps_v6",
+      "application_start_allowed": false,
+      "backing_service_runtime_observed": true,
+      "benchmark_measurement_performed": false,
+      "classification": "accepted-initializer-release-followed-by-status-validation-rejection-and-cleanup",
+      "cleanup_complete": true,
+      "cleanup_failure": null,
+      "cloud_resources_created": true,
+      "completed_at": "2026-10-15T21:24:55.357201+00:00",
+      "controller_preflight_reached": true,
+      "database_execution_verified": false,
+      "dispatch_latch_count": 1,
+      "executed_commit_independently_attested_by_private_job": false,
+      "exit_code": 1,
+      "failure_interrupted": false,
+      "failure_label": "terminal phase and exit status disagree",
+      "failure_type": "SSHCommandError",
+      "frozen_live_launch_commit_operator_reported": "a22db227572dad009d409ee1f8f8ff8b587a0bfd",
+      "frozen_tracked_source_manifest_sha256": "sha256:e5209c1710c96daaaafcda2cfb48fbdd63f4b2345800542f0f10ef02a1172b95",
+      "global_readonly_verification_completed": false,
+      "guarded_artifact_adoption_completed": true,
+      "guarded_artifact_fingerprint": "sha256:71949735027ff9b51ab5091b7061d37a45ed37f1dfaaab5d38dca9b476071df4",
+      "guarded_full_byte_access_factory_completed": true,
+      "guarded_full_byte_access_fingerprint_from_dispatch_intent": "sha256:1569de2aa94a1e56196679b5c82acbb9ea467934674cb5d6739a4de8b418c009",
+      "guarded_full_byte_access_receipt_retained": false,
+      "guarded_live_layer_byte_count": null,
+      "independent_absence_proved": true,
+      "initialization_complete": false,
+      "initialization_dispatch_acknowledged": true,
+      "initialization_dispatch_intent_recorded": true,
+      "initialization_dispatched": true,
+      "initialization_dispatched_scope": "UID-bound scheduling-gate removal returned an accepted observation; native initializer completion was not verified",
+      "initialization_executed": null,
+      "initialization_kubernetes_mutation_performed": true,
+      "initialization_kubernetes_mutation_scope": "exact gated Pods and additive policies created, then initializer gate removed once; verifier remained gated",
+      "initializer_exit_observation_count": 0,
+      "initializer_latch_count": 1,
+      "journal_event_count": 3,
+      "journal_event_file_count": 3,
+      "journal_events": [
+        "created",
+        "blocked-pods-recorded",
+        "initialize-intent-recorded"
+      ],
+      "journal_state": "initialize-intent-recorded",
+      "kubernetes_workload_controller_contacted": true,
+      "last_accepted_initializer_observation": {
+        "container_exit_code": null,
+        "pod_phase": "Pending",
+        "state": "pending",
+        "verifier_state": "gated"
+      },
+      "new_run_allocated": true,
+      "original_artifact_adoption_completed": true,
+      "original_artifact_fingerprint": "sha256:5ffb28eba5643a61e79e33c5fe472f2c73d13c550c155a2c6760c7c440129bd2",
+      "post_run_source_receipt_reference": "source-postrun-a22db22",
+      "private_evidence": {
+        "cleanup_proof": {
+          "canonical_json_sha256": "sha256:bd625d5517faa52b0bcaf5789be6d8054128f9733101b238e80b9f8fa79410ec"
+        },
+        "controller_record": {
+          "canonical_json_sha256": "sha256:16dc7054bdb6069ecb3ca64e6e9751aece9ea0a8288eb46ff660801a1b3ae2ee"
+        },
+        "frozen_source_receipt": {
+          "canonical_json_sha256": "sha256:8fb8e0c5b5a0e841365cdf6fad775904bbd04aee9c3b53fd5fc9883cc6951295",
+          "raw_sha256": "sha256:ca171a6c89d3de9e6f7765fa589f9bedfb9f17c2d987af23323369e846d0e8f3"
+        },
+        "hotel_initialization_pin": {
+          "canonical_json_sha256": "sha256:f864247540539756e8966cfb82e9376964432a9b2e7df6d00eeb1fdceaac8e42",
+          "raw_sha256": "sha256:f864247540539756e8966cfb82e9376964432a9b2e7df6d00eeb1fdceaac8e42"
+        },
+        "initializer_latch": {
+          "canonical_json_sha256": "sha256:8748d8ee20c3675f100e496aa37787957c09f8dc7da3560a09e54275a17b6fca",
+          "raw_sha256": "sha256:8748d8ee20c3675f100e496aa37787957c09f8dc7da3560a09e54275a17b6fca"
+        },
+        "journal_blocked_pods_event": {
+          "canonical_json_sha256": "sha256:c2147732fba066980ef1c612b80268156fd26aee8a4dca9c12e06dabc0abdadc",
+          "raw_sha256": "sha256:c2147732fba066980ef1c612b80268156fd26aee8a4dca9c12e06dabc0abdadc"
+        },
+        "journal_created_event": {
+          "canonical_json_sha256": "sha256:6c5b674aba2cefd9a0fe811beaf9bea255db2db29b5f50490790b87a81698511",
+          "raw_sha256": "sha256:6c5b674aba2cefd9a0fe811beaf9bea255db2db29b5f50490790b87a81698511"
+        },
+        "journal_initialize_intent_event": {
+          "canonical_json_sha256": "sha256:4b995aec446adee930b8e07b0909d32a3114a360bfeb4741fa0b7a4b2b92cfe5",
+          "raw_sha256": "sha256:4b995aec446adee930b8e07b0909d32a3114a360bfeb4741fa0b7a4b2b92cfe5"
+        },
+        "last_accepted_live_observation": {
+          "canonical_json_sha256": "sha256:ca77243b5abae0fc77a137fd3e8af63c41a32b4555ec5463511b066d1f6e3783"
+        },
+        "operator_record": {
+          "canonical_json_sha256": "sha256:2e94b43ce5ac098b75c1d6ea1d6b36c8bb01654f5b6553e5c522e7527f70c2d3"
+        },
+        "outcome": {
+          "canonical_json_sha256": "sha256:23d2a77bc5d79516badbfdc78fbb3e058c5d9b9cf8c8ec3fa7f69dc436b4311c"
+        },
+        "outcome_log_raw_sha256": "sha256:2562a4368e1094a0a0fd209ba3d2bb4f156ca5584d20eef8736a50d9a25dd838",
+        "provider_absence_observation": {
+          "canonical_json_sha256": "sha256:698ac352b4eeb6cb0df5b9fa4d38a648c1f7e0037c60ed6ea7928d5fa8f9b149"
+        },
+        "registry_egress_observation": {
+          "canonical_json_sha256": "sha256:0b498c94cdf114492536ed497d23b56ee7039202e3ca05f4343bb86de4686d04"
+        },
+        "state": {
+          "canonical_json_sha256": "sha256:dd0e9de2da8cb8dd5a0235ddf87ad40e2b1f280ee8003d1a86a32c443c83bb1a",
+          "raw_sha256": "sha256:dd0e9de2da8cb8dd5a0235ddf87ad40e2b1f280ee8003d1a86a32c443c83bb1a"
+        },
+        "support_full_byte_receipt": {
+          "canonical_json_sha256": "sha256:f8d81ae648db63ac28f19a86aee438253ad478c311458c14310a069d8e403f66"
+        },
+        "support_pin": {
+          "canonical_json_sha256": "sha256:c3c643b9dd997513ba71bcc4eea357e81cb4e4fa36e7bed57e8b694aa71aa183",
+          "raw_sha256": "sha256:c3c643b9dd997513ba71bcc4eea357e81cb4e4fa36e7bed57e8b694aa71aa183"
+        },
+        "support_stage_archive": {
+          "canonical_json_sha256": "sha256:470d06bc5a05dfd7c4a79ccf47c835ec944fef45bab78849b0ce21599edab4a2"
+        },
+        "support_stage_snapshot": {
+          "canonical_json_sha256": "sha256:9de025fffaa160a3941deeeade3adfbd95f5b95653c3f5bd89c6b46f564a5ef7"
+        }
+      },
+      "provider": "azure",
+      "recorded_initialize_intents": 1,
+      "recorded_verify_intents": 0,
+      "recovery_policy": "cleanup-only-never-replay",
+      "registry_transport_configuration_sha256": "sha256:2a8d5d58d9cb5d2ec9b4414408702000410a94ac7914f7311742521bb07ef7bd",
+      "run_id": "35d8be5e471a",
+      "runtime_preparation_reached": true,
+      "source_freeze_basis": "operator-owned repository checks before and after launch, not saved-job or workload self-attestation",
+      "status_validation_failure_cause": "not-established-from-retained-evidence; no successful exit or transient-phase cause is inferred",
+      "support_full_byte_access_factory_completed": true,
+      "support_full_byte_downloaded_bytes": 425184850,
+      "support_pod_count": 14,
+      "support_stage_complete": true,
+      "support_stage_state": "support_ready_applications_paused",
+      "verifier_exit_observation_count": 0,
+      "verifier_latch_count": 0
+    },
+    {
+      "absence_passes": 2,
+      "absence_scope": "two provider absence passes over the exact twenty expected GCP resources; no unowned resource deletion",
+      "active_support_container_count": 14,
+      "actual_initializer_exit_code": 0,
+      "actual_initializer_terminal_phase": "Succeeded",
+      "actual_verifier_exit_code": 0,
+      "actual_verifier_terminal_phase": "Succeeded",
+      "adoption_scope": "fresh-original-and-guarded-artifact-adoption-and-both-full-byte-access-factories-before-live-controller",
+      "all_application_replicas_zero": true,
+      "application_architecture": "aarch64",
+      "application_deployment_count": 10,
+      "application_memory_gib": 16,
+      "application_replica_values": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "application_service_dispatch_performed": false,
+      "application_shape": "c4a-standard-4",
+      "application_start_allowed": false,
+      "application_vcpus": 4,
+      "applications_paused": true,
+      "backing_service_runtime_observed": true,
+      "benchmark_measurement_performed": false,
+      "classification": "one-shot-native-initialization-and-global-readonly-verification-applications-paused",
+      "cleanup_complete": true,
+      "cleanup_failure": null,
+      "cloud_qualified": false,
+      "cloud_resources_created": true,
+      "completed_at": "2026-10-15T22:03:02.406110+00:00",
+      "controller_preflight_reached": true,
+      "controller_state": "initialized-and-globally-verified-applications-paused",
+      "database_execution_verified": true,
+      "dispatch_latch_count": 2,
+      "executed_commit_independently_attested_by_private_job": false,
+      "exit_code": 0,
+      "exit_code_scope": "completed-private-live-initialization-operator-not-application-or-measurement-release",
+      "expanded_plan_canonical_json_sha256": "sha256:7c30c1b080d66ddd8992f4a55b1241b617c77d49611e29ebdb6026ea4f1c744d",
+      "expected_absent_resource_count": 20,
+      "failure_interrupted": false,
+      "failure_type": null,
+      "frozen_live_launch_commit_operator_reported": "385ed1bb5ab163249d5e7c9dd16f6cfef6e8247d",
+      "frozen_tracked_source_manifest_sha256": "sha256:cc6ad7d6e0413d523faa1357ada02ae468bda10320c18f4e275606b91ee305c7",
+      "global_readonly_verification_completed": true,
+      "guarded_artifact_adoption_completed": true,
+      "guarded_artifact_fingerprint": "sha256:71949735027ff9b51ab5091b7061d37a45ed37f1dfaaab5d38dca9b476071df4",
+      "guarded_full_byte_access_factory_completed": true,
+      "guarded_full_byte_access_fingerprint_from_dispatch_intent": "sha256:ab157e1efa429b1df37ccfcb3f66acfe2c5d02c3e1a684ecd1d1bb895e76bbcf",
+      "guarded_full_byte_access_receipt_retained": false,
+      "guarded_live_layer_byte_count": null,
+      "independent_absence_proved": true,
+      "initialization_complete": true,
+      "initialization_dispatch_acknowledged": true,
+      "initialization_dispatch_intent_recorded": true,
+      "initialization_dispatched": true,
+      "initialization_executed": true,
+      "initialization_kubernetes_mutation_performed": true,
+      "initialization_kubernetes_mutation_scope": "exact gated Pods and additive policies created; initializer then readonly verifier released once each; all application deployments remained paused",
+      "initializer_exit_observation_count": 1,
+      "initializer_latch_count": 1,
+      "journal_event_count": 6,
+      "journal_event_file_count": 6,
+      "journal_events": [
+        "created",
+        "blocked-pods-recorded",
+        "initialize-intent-recorded",
+        "initialize-exit-recorded",
+        "verify-intent-recorded",
+        "verify-exit-recorded"
+      ],
+      "journal_state": "verify-exit-recorded",
+      "kubernetes_workload_controller_contacted": true,
+      "measurement_qualified": false,
+      "native_execution_observation": {
+        "acknowledgement_dataset_contract": "sha256:7d1e07da21efdf9df9cf2062f09546b8eb153c03af69be9e2cb4a635956d6681",
+        "acknowledgement_modes": [
+          "initialize-empty",
+          "verify"
+        ],
+        "acknowledgement_run_and_mode_matched": true,
+        "acknowledgements_matched_journal_exit_payloads": true,
+        "architecture": "arm64",
+        "both_container_exit_codes": 0,
+        "both_last_states_empty": true,
+        "both_pod_terminations_completed": true,
+        "both_restart_counts": 0,
+        "database_verification_completed": true,
+        "image": "ghcr.io/tonymarkel/deathstarbench-hotel-app@sha256:33fa3dbaa84430cb4d44467926cdfd74560ebee031c6a5808bbd40673e614ba9",
+        "native_artifact_qemu_used": false,
+        "native_artifact_runner_architecture": "aarch64"
+      },
+      "new_run_allocated": true,
+      "original_artifact_adoption_completed": true,
+      "original_artifact_fingerprint": "sha256:5ffb28eba5643a61e79e33c5fe472f2c73d13c550c155a2c6760c7c440129bd2",
+      "plan_fingerprint": "sha256:c33b39d7b69329d19a237f4a98b547d9d4a3e04a0add6671d6f71b20f066c794",
+      "plan_hash_scope": "raw launcher file bytes, jq-canonical expanded saved plan, provider-audit expanded plan and authority fingerprint are distinct encodings or objects",
+      "post_run_source_receipt_reference": "source-postrun-385ed1b",
+      "private_evidence": {
+        "cleanup_proof": {
+          "canonical_json_sha256": "sha256:1ee84320e47f3a443b0c80be22d7e347338ce09eb79c51dade4c8fe7325efe9a"
+        },
+        "cleanup_source_archive": {
+          "canonical_json_sha256": "sha256:676cea42970c1bfae9f2da8f8146861b20b5eba77031775aaea555500f75333e"
+        },
+        "controller_record": {
+          "canonical_json_sha256": "sha256:e6f7e02a078eac92a8bba46c08525c9dad3597f925b9c8b56e9e2632f96bfb1f"
+        },
+        "frozen_source_receipt": {
+          "canonical_json_sha256": "sha256:60295a34fbdca7468d32422479004f18d37d2aa6f6042af70387d2508c83c6e8",
+          "raw_sha256": "sha256:423f657fb1a8f90fed4f1a01b223cbbdf88413d59127bc9bee5c3889b731d5f8"
+        },
+        "hotel_initialization_pin": {
+          "canonical_json_sha256": "sha256:d7aaf3b3425d941f9d69773d1bf805b321f0e82139a921b917ae9e1fb7bfcbe9",
+          "raw_sha256": "sha256:d7aaf3b3425d941f9d69773d1bf805b321f0e82139a921b917ae9e1fb7bfcbe9"
+        },
+        "initializer_latch": {
+          "canonical_json_sha256": "sha256:7db3d3ecd57a119bcd6a9782b1bad07b036065d1eea80055e7a26c4f96538292",
+          "raw_sha256": "sha256:7db3d3ecd57a119bcd6a9782b1bad07b036065d1eea80055e7a26c4f96538292"
+        },
+        "journal_blocked_pods_event": {
+          "canonical_json_sha256": "sha256:5b0a4ef60de9d0ca6fbc782292bb0de221907d9b2c4148a7f14167f91e15de49",
+          "raw_sha256": "sha256:5b0a4ef60de9d0ca6fbc782292bb0de221907d9b2c4148a7f14167f91e15de49"
+        },
+        "journal_created_event": {
+          "canonical_json_sha256": "sha256:3860c9c87fd838da211d52a29849dbe334feafa481e1d6252a4139dbb58cc0dc",
+          "raw_sha256": "sha256:3860c9c87fd838da211d52a29849dbe334feafa481e1d6252a4139dbb58cc0dc"
+        },
+        "journal_initialize_exit_event": {
+          "canonical_json_sha256": "sha256:68ec65e082990aa54dc04493455ce943b4573dd5dc1641097436398407a8ee23",
+          "raw_sha256": "sha256:68ec65e082990aa54dc04493455ce943b4573dd5dc1641097436398407a8ee23"
+        },
+        "journal_initialize_intent_event": {
+          "canonical_json_sha256": "sha256:c9bf7fc1aae7b02cc2608de2d2be2db6e247d3b98bbf5cfaff9792540377be73",
+          "raw_sha256": "sha256:c9bf7fc1aae7b02cc2608de2d2be2db6e247d3b98bbf5cfaff9792540377be73"
+        },
+        "journal_verify_exit_event": {
+          "canonical_json_sha256": "sha256:17c3dc0692e65b20d6ed23d9d61abb5cd2f05ce9ddc0d14d64ac748417959792",
+          "raw_sha256": "sha256:17c3dc0692e65b20d6ed23d9d61abb5cd2f05ce9ddc0d14d64ac748417959792"
+        },
+        "journal_verify_intent_event": {
+          "canonical_json_sha256": "sha256:c192ef35da803049c4bea6034a185b3257a0bc5418b3e0680de71c4cf36d23e7",
+          "raw_sha256": "sha256:c192ef35da803049c4bea6034a185b3257a0bc5418b3e0680de71c4cf36d23e7"
+        },
+        "last_accepted_live_observation": {
+          "canonical_json_sha256": "sha256:79ff223e4051c94b07329fcf443dd39e653bd2a313469041b98499dca6916d49"
+        },
+        "operator_record": {
+          "canonical_json_sha256": "sha256:a58107ecb94eb491f78dee91245e3d80b888b685f353b27178a2f574aaf525fd"
+        },
+        "outcome": {
+          "canonical_json_sha256": "sha256:c29bf47c37563d582926e7a774e7fb40981685c11030ab4ed3c28730300710ce"
+        },
+        "outcome_log_raw_sha256": "sha256:ee34b620b38637e50c32945043b0c13d37c6c44e88183663dfc7402af77c0da4",
+        "provider_absence_observation": {
+          "canonical_json_sha256": "sha256:8684591fe6b09d1d860dd220835323672c19d3793a0c773edafa4f791b7cda5b"
+        },
+        "registry_egress_observation": {
+          "canonical_json_sha256": "sha256:0b498c94cdf114492536ed497d23b56ee7039202e3ca05f4343bb86de4686d04"
+        },
+        "state": {
+          "canonical_json_sha256": "sha256:8b27c2b2e8c6e5ed7dabbc659408b5e72e91b7db7785e50871c44a2a1adad715",
+          "raw_sha256": "sha256:8b27c2b2e8c6e5ed7dabbc659408b5e72e91b7db7785e50871c44a2a1adad715"
+        },
+        "support_full_byte_receipt": {
+          "canonical_json_sha256": "sha256:4839a46bb5ccb7ecde89934e8f782581cd4bdd902f9f1a2fe045619e1431014f"
+        },
+        "support_pin": {
+          "canonical_json_sha256": "sha256:51148522124f4663747cb8102f5c732742893c5c48894c84e0a88ed88bf476bc",
+          "raw_sha256": "sha256:51148522124f4663747cb8102f5c732742893c5c48894c84e0a88ed88bf476bc"
+        },
+        "support_stage_archive": {
+          "canonical_json_sha256": "sha256:a43a2a34804e1509dbadc411abdad2a5d95e02de7908c5fcb4dd0f85b6412ece"
+        },
+        "support_stage_snapshot": {
+          "canonical_json_sha256": "sha256:d41aed6482fb0ac5adcc5ab45529b03a268b38cf00d8656dd30c0b8ae26d0dc0"
+        },
+        "verifier_latch": {
+          "canonical_json_sha256": "sha256:9ca756f98f793c0b4253692c6550c12fc8fd2e43f18964ea8c3a44f45a3bfdec",
+          "raw_sha256": "sha256:9ca756f98f793c0b4253692c6550c12fc8fd2e43f18964ea8c3a44f45a3bfdec"
+        }
+      },
+      "provider": "gcp",
+      "provider_audit_expanded_plan_sha256": "sha256:fb268c62ac2bc2b9a1a71eca98eacf238e599cdedacbd213067e724d33d3f681",
+      "public_dispatch_enabled": false,
+      "public_release": false,
+      "raw_launcher_plan_sha256": "sha256:5ddaf4d4e9da26a9468661f4c6cec1f2564d012804cee64171d6ae8b794245ec",
+      "recorded_initialize_intents": 1,
+      "recorded_verify_intents": 1,
+      "recovery_policy": "cleanup-only-never-replay",
+      "registry_transport_configuration_sha256": "sha256:2a8d5d58d9cb5d2ec9b4414408702000410a94ac7914f7311742521bb07ef7bd",
+      "replay_performed": false,
+      "run_id": "534cf9061b3b",
+      "runtime_preparation_reached": true,
+      "runtime_qualified": false,
+      "source_freeze_basis": "operator-owned matching pre-launch, post-launch and post-run repository manifests; not saved-job or workload self-attestation",
+      "stage_fingerprint": "sha256:83e60e7bb57549459fe898bdd39e19891a28dbcbb617f79d07a0a5539ed8e5d6",
+      "support_full_byte_access_factory_completed": true,
+      "support_full_byte_downloaded_bytes": 425184850,
+      "support_stage_complete": true,
+      "support_stage_state": "support_ready_applications_paused",
+      "verifier_exit_observation_count": 1,
+      "verifier_latch_count": 1
+    },
+    {
+      "absence_passes": 2,
+      "absence_scope": "two Azure provider absence passes for the exact originally owned resource group; no twenty-resource absence count is claimed",
+      "acknowledgement_loss_scope": "remote initializer gate-release SSH command returned; injected interruption occurred before local returned-observation parsing or acceptance; not an observed real network loss",
+      "active_support_container_count": 14,
+      "actual_initializer_exit_code": null,
+      "actual_initializer_terminal_phase": null,
+      "actual_verifier_exit_code": null,
+      "actual_verifier_terminal_phase": null,
+      "adoption_scope": "fresh-original-and-guarded-artifact-adoption-and-both-full-byte-access-factories-before-live-controller",
+      "all_application_replicas_zero": true,
+      "application_architecture": "aarch64",
+      "application_deployment_count": 10,
+      "application_memory_gib": 16,
+      "application_replica_values": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "application_service_dispatch_performed": false,
+      "application_shape": "Standard_D4ps_v6",
+      "application_start_allowed": false,
+      "application_vcpus": 4,
+      "applications_paused": true,
+      "backing_service_runtime_observed": true,
+      "benchmark_measurement_performed": false,
+      "checkpoint": "initialize-response-returned",
+      "checkpoint_mode": "graceful",
+      "checkpoint_recorded_at": "2026-10-15T21:56:44.148497+00:00",
+      "classification": "graceful-initialize-response-returned-acknowledgement-loss-and-cleanup",
+      "cleanup_complete": true,
+      "cleanup_failure": null,
+      "cloud_qualified": false,
+      "cloud_resources_created": true,
+      "completed_at": "2026-10-15T22:01:02.678588+00:00",
+      "controller_preflight_reached": true,
+      "controller_state": "failed-cleanup-only",
+      "database_execution_verified": false,
+      "dispatch_latch_count": 1,
+      "exact_original_cloud_identity_validated": true,
+      "executed_commit_independently_attested_by_private_job": false,
+      "exit_code": 130,
+      "exit_code_scope": "expected interrupted qualification process; not successful native initialization",
+      "expanded_plan_canonical_json_sha256": "sha256:3795b86fa3bc9b1b2c0f2a35af259e8c263984d79a6a504c85df97c35171321a",
+      "failure_interrupted": true,
+      "failure_type": "RunCancelled",
+      "frozen_live_launch_commit_operator_reported": "385ed1bb5ab163249d5e7c9dd16f6cfef6e8247d",
+      "frozen_tracked_source_manifest_sha256": "sha256:cc6ad7d6e0413d523faa1357ada02ae468bda10320c18f4e275606b91ee305c7",
+      "global_readonly_verification_completed": false,
+      "guarded_artifact_adoption_completed": true,
+      "guarded_artifact_fingerprint": "sha256:71949735027ff9b51ab5091b7061d37a45ed37f1dfaaab5d38dca9b476071df4",
+      "guarded_full_byte_access_factory_completed": true,
+      "guarded_full_byte_access_fingerprint_from_dispatch_intent": "sha256:c7e02354b0c60fa93b2e111c35c489721179e69d5d5bdaf59ee3cd58e7949afc",
+      "guarded_full_byte_access_receipt_retained": false,
+      "guarded_live_layer_byte_count": null,
+      "independent_absence_proved": true,
+      "initialization_complete": false,
+      "initialization_dispatch_acknowledged": false,
+      "initialization_dispatch_intent_recorded": true,
+      "initialization_dispatched": null,
+      "initialization_executed": null,
+      "initialization_kubernetes_mutation_performed": true,
+      "initialization_kubernetes_mutation_scope": "exact gated Pods and additive policies created; initializer release command returned before local acknowledgement; no verifier release or replay",
+      "initializer_exit_observation_count": 0,
+      "initializer_latch_count": 1,
+      "journal_event_count": 3,
+      "journal_event_file_count": 3,
+      "journal_events": [
+        "created",
+        "blocked-pods-recorded",
+        "initialize-intent-recorded"
+      ],
+      "journal_state": "initialize-intent-recorded",
+      "kubernetes_workload_controller_contacted": true,
+      "last_locally_acknowledged_observation_scope": "both Pods gated before release; this stale snapshot cannot establish whether the initializer actually executed",
+      "measurement_qualified": false,
+      "native_artifact_receipt": {
+        "live_execution_acknowledged": false,
+        "qemu_used": false,
+        "runner_architecture": "aarch64"
+      },
+      "new_run_allocated": true,
+      "original_artifact_adoption_completed": true,
+      "original_artifact_fingerprint": "sha256:5ffb28eba5643a61e79e33c5fe472f2c73d13c550c155a2c6760c7c440129bd2",
+      "original_audited_resource_ids_matched_expected_count": 26,
+      "plan_fingerprint": "sha256:920f72c827d5d08377263008d2c8e4344dc5420db4da1113147ecc98f0eb22d9",
+      "plan_hash_scope": "raw launcher file bytes, jq-canonical expanded saved plan, provider-audit expanded plan and authority fingerprint are distinct encodings or objects",
+      "post_run_source_receipt_reference": "source-postrun-385ed1b",
+      "private_evidence": {
+        "cleanup_proof": {
+          "canonical_json_sha256": "sha256:94944bb987e6fb41ebe3f9657854621a0fc1b6afac97744efaa648239fed9567"
+        },
+        "cleanup_source_archive": {
+          "canonical_json_sha256": "sha256:fcf86f3375cf2ea02cf66a2cb3a366838df2694c3defe65391de7aba737d0fd6"
+        },
+        "controller_record": {
+          "canonical_json_sha256": "sha256:ec5722a3bca90301efe99ff6a56212c06ae76ffef4770d53a2af76885b23e0ac"
+        },
+        "frozen_source_receipt": {
+          "canonical_json_sha256": "sha256:60295a34fbdca7468d32422479004f18d37d2aa6f6042af70387d2508c83c6e8",
+          "raw_sha256": "sha256:423f657fb1a8f90fed4f1a01b223cbbdf88413d59127bc9bee5c3889b731d5f8"
+        },
+        "hotel_initialization_pin": {
+          "canonical_json_sha256": "sha256:4506a6b38f5ff1951795ddc8d52f68ad3a9eebe40b6f8391aebe50bf994bdc8e",
+          "raw_sha256": "sha256:4506a6b38f5ff1951795ddc8d52f68ad3a9eebe40b6f8391aebe50bf994bdc8e"
+        },
+        "initializer_latch": {
+          "canonical_json_sha256": "sha256:62d6e83dfe42d366ce4d9b242c38ed8b040908cdcf489b87e2063fc06ffac7b8",
+          "raw_sha256": "sha256:62d6e83dfe42d366ce4d9b242c38ed8b040908cdcf489b87e2063fc06ffac7b8"
+        },
+        "interruption_record": {
+          "canonical_json_sha256": "sha256:b9b42296fcee5a2758413755d613109d728d0185dcea94560cfa1ce03b5ab647"
+        },
+        "journal_blocked_pods_event": {
+          "canonical_json_sha256": "sha256:8baf83fbd6f2c0d6e559ee48f145ec49f6562ba5af6f656b44581988e6b15e37",
+          "raw_sha256": "sha256:8baf83fbd6f2c0d6e559ee48f145ec49f6562ba5af6f656b44581988e6b15e37"
+        },
+        "journal_created_event": {
+          "canonical_json_sha256": "sha256:1660bf82c2f305512828806e81688761e0cec2525cd50aa3d730dbe69af99bef",
+          "raw_sha256": "sha256:1660bf82c2f305512828806e81688761e0cec2525cd50aa3d730dbe69af99bef"
+        },
+        "journal_initialize_intent_event": {
+          "canonical_json_sha256": "sha256:c61a1d3f1dbb8c6b28f0dc1cc950ff867e06e2b2c3de79483a84d96d0a538227",
+          "raw_sha256": "sha256:c61a1d3f1dbb8c6b28f0dc1cc950ff867e06e2b2c3de79483a84d96d0a538227"
+        },
+        "operator_record": {
+          "canonical_json_sha256": "sha256:37f2271c3b3a2889ae94a4a8eca346b1d302876afead09b2782022c7bf487a74"
+        },
+        "outcome": {
+          "canonical_json_sha256": "sha256:f2ddda3b1bd75e99457fc3f5d1908415b0340d6dda811bc68e893dcb339069c4"
+        },
+        "outcome_log_raw_sha256": "sha256:ddf30b39553e7bf57701eb3f889167adc294b8002f271a633d6d7c63fe2b1aab",
+        "provider_absence_observation": {
+          "canonical_json_sha256": "sha256:1a72a96b79b445325c4142b00a70320b86b162373b69a9e9c7c105d472907a71"
+        },
+        "registry_egress_observation": {
+          "canonical_json_sha256": "sha256:0b498c94cdf114492536ed497d23b56ee7039202e3ca05f4343bb86de4686d04"
+        },
+        "state": {
+          "canonical_json_sha256": "sha256:e58ea9f5fcd84362ef46303d7fd9f167360c2efd7cbe8f1dfe046fcae1083e38",
+          "raw_sha256": "sha256:e58ea9f5fcd84362ef46303d7fd9f167360c2efd7cbe8f1dfe046fcae1083e38"
+        },
+        "support_full_byte_receipt": {
+          "canonical_json_sha256": "sha256:32e62ba098aa674408f3428a9c8a24c9a291e4aed4066b900fa4cde67ff310ad"
+        },
+        "support_pin": {
+          "canonical_json_sha256": "sha256:ce2854bc9e1b636fb882e899249d39f7aa1e5d58670e8b015a317bce3838640c",
+          "raw_sha256": "sha256:ce2854bc9e1b636fb882e899249d39f7aa1e5d58670e8b015a317bce3838640c"
+        },
+        "support_stage_archive": {
+          "canonical_json_sha256": "sha256:4e2df9c24b2a5671a7c2d8d4ac9a3fff02bbc0178c55e2e76d8cc80a0c9dc15b"
+        },
+        "support_stage_snapshot": {
+          "canonical_json_sha256": "sha256:9e1d4babe2701421805284fb9eae9a026c5adbb08305ce49752eb248ac233584"
+        }
+      },
+      "provider": "azure",
+      "provider_audit_expanded_plan_sha256": "sha256:c484a3cddabcf11063a9bcd3c04d1de59782dcc442ac6d10390e5cd5f5aedc1a",
+      "public_dispatch_enabled": false,
+      "public_release": false,
+      "raw_launcher_plan_sha256": "sha256:6f29f2e1c189d831c6d17e2940a0574c75b4873a37ec76c91c26bf5ecd7a39d4",
+      "recorded_initialize_intents": 1,
+      "recorded_verify_intents": 0,
+      "recovery_policy": "cleanup-only-never-replay",
+      "registry_transport_configuration_sha256": "sha256:2a8d5d58d9cb5d2ec9b4414408702000410a94ac7914f7311742521bb07ef7bd",
+      "replay_performed": false,
+      "run_id": "098353c2175a",
+      "runtime_preparation_reached": true,
+      "runtime_qualified": false,
+      "source_freeze_basis": "operator-owned matching pre-launch, post-launch and post-run repository manifests; not saved-job or workload self-attestation",
+      "stage_fingerprint": "sha256:e600b0f07404b00d36abbae1fa1b57886c41a76e6b5a4fc9faa3496fec6d1881",
+      "support_full_byte_access_factory_completed": true,
+      "support_full_byte_downloaded_bytes": 425184850,
+      "support_stage_complete": true,
+      "support_stage_state": "support_ready_applications_paused",
+      "verifier_exit_observation_count": 0,
+      "verifier_latch_count": 0
+    }
+  ],
+  "candidate_only": true,
+  "candidate_schema": "hotel-guarded-live-initialization-observation-summary-v1",
+  "ci": {
+    "all_required_checks_successful": true,
+    "artifact_preparation_check_successful": true,
+    "check_status_basis": "operator-reported read-only GitHub PR check observation",
+    "head_commit": "385ed1bb5ab163249d5e7c9dd16f6cfef6e8247d",
+    "python_tests": [
+      {
+        "python": "3.10",
+        "skipped": 1,
+        "successful": true,
+        "tests_run": 1954
+      },
+      {
+        "python": "3.14",
+        "skipped": 1,
+        "successful": true,
+        "tests_run": 1954
+      }
+    ],
+    "run_id": 38811033108,
+    "test_count_basis": "operator-reported completed CI test results",
+    "url": "https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38811033108"
+  },
+  "ci_epochs": [
+    {
+      "all_required_checks_successful": true,
+      "artifact_preparation_check_successful": true,
+      "check_status_basis": "read-only GitHub PR check observation",
+      "head_commit": "17acb33507b106bc0b0bc08e2e0d993ec099f4fc",
+      "python_tests": [
+        {
+          "python": "3.10",
+          "skipped": 1,
+          "successful": true,
+          "tests_run": 1943
+        },
+        {
+          "python": "3.14",
+          "skipped": 1,
+          "successful": true,
+          "tests_run": 1943
+        }
+      ],
+      "run_id": 38798360240,
+      "test_count_basis": "operator-reported completed CI test results",
+      "url": "https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38798360240"
+    },
+    {
+      "all_required_checks_successful": true,
+      "artifact_preparation_check_successful": true,
+      "check_status_basis": "operator-reported read-only GitHub PR check observation",
+      "head_commit": "385ed1bb5ab163249d5e7c9dd16f6cfef6e8247d",
+      "python_tests": [
+        {
+          "python": "3.10",
+          "skipped": 1,
+          "successful": true,
+          "tests_run": 1954
+        },
+        {
+          "python": "3.14",
+          "skipped": 1,
+          "successful": true,
+          "tests_run": 1954
+        }
+      ],
+      "run_id": 38811033108,
+      "test_count_basis": "operator-reported completed CI test results",
+      "url": "https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38811033108"
+    }
+  ],
+  "cleanup_only_recoveries": [
+    {
+      "absence_passes": 2,
+      "cleanup_complete": true,
+      "cleanup_failure": null,
+      "command_scope": "private qualification CLI --cleanup-only e88f16cf1871; no plan, artifact, SSH or registry options",
+      "completed_at": "2026-10-15T22:03:58.135892+00:00",
+      "exit_code": 0,
+      "expected_absent_resource_count": 20,
+      "independent_absence_proved": true,
+      "initialization_complete": false,
+      "initialization_or_verification_dispatched_in_recovery": false,
+      "initializer_latch_count_after_recovery": 1,
+      "journal_event_count_after_recovery": 3,
+      "observation_basis": "operator-observed exact cleanup-only invocation after relay shutdown, plus retained terminal state and outcome; not factory authority",
+      "observation_id": "e88f16cf1871-cleanup-only-followup",
+      "operator_attempt": 2,
+      "operator_observed_relay_stopped_before_command": true,
+      "operator_state": "cleanup_complete",
+      "original_attempt_row_preserved": true,
+      "original_interrupted_snapshot_sha256": "sha256:ef52c26f2c972a84f9f70934139e2228845c961e4dfaa3bc2ce77e4c3ac39191",
+      "original_interrupted_source_commit": "a22db227572dad009d409ee1f8f8ff8b587a0bfd",
+      "original_interruption_outcome_replaced": false,
+      "original_pins_preserved": true,
+      "original_process_exit_code": 130,
+      "private_evidence": {
+        "cleanup_proof": {
+          "canonical_json_sha256": "sha256:577477aa2016fc9455943045239b742e5a53adfe2a11c901064e5929421e16a1"
+        },
+        "operator_record": {
+          "canonical_json_sha256": "sha256:943cf41152a40e6a60aa93cbb8a6e5d503af63c08ab170097b53a19da10d730a"
+        },
+        "original_interrupted_state": {
+          "canonical_json_sha256": "sha256:ef52c26f2c972a84f9f70934139e2228845c961e4dfaa3bc2ce77e4c3ac39191",
+          "raw_sha256": "sha256:ef52c26f2c972a84f9f70934139e2228845c961e4dfaa3bc2ce77e4c3ac39191"
+        },
+        "outcome": {
+          "canonical_json_sha256": "sha256:c287cd8107ed2db44961d1cd9dc006cf5bc96487d6113182a521b5f794af119a"
+        },
+        "outcome_log_raw_sha256": "sha256:aeed39bf5cab33a8b16d11d0878761bfe73cd1a37c680ae43eb8251613c1139a",
+        "provider_absence_observation": {
+          "canonical_json_sha256": "sha256:e42067c5993b070e3359beb09e8f23f97312a714860b78835aac981930b25a29"
+        },
+        "state": {
+          "canonical_json_sha256": "sha256:2736c78848217a98958c9cd214f7e08ae9be29f4f6d631ae16d7ab004025e832",
+          "raw_sha256": "sha256:2736c78848217a98958c9cd214f7e08ae9be29f4f6d631ae16d7ab004025e832"
+        }
+      },
+      "recovery_policy": "cleanup-only-never-replay",
+      "registry_and_ssh_free_execution_observed": true,
+      "run_id": "e88f16cf1871",
+      "source_commit_operator_reported": "385ed1bb5ab163249d5e7c9dd16f6cfef6e8247d",
+      "supersedes_only_pending_followup_observation_in_original_row": true,
+      "verifier_latch_count_after_recovery": 0
+    }
+  ],
+  "closed_gates": {
+    "all_clouds_qualified": false,
+    "application_start_allowed": false,
+    "dataset_qualified": false,
+    "measurement_qualified": false,
+    "public_release": false,
+    "runtime_qualified": false
+  },
+  "draft_status": "final-sanitized-observation-summary-no-release-authority",
+  "hash_encoding": {
+    "canonical_json_sha256": "SHA-256 of recursive sorted-key compact finite UTF-8 JSON, unescaped Unicode, followed by one LF; jq -cS-style encoding",
+    "raw_sha256": "SHA-256 of exact retained file bytes"
+  },
+  "limitations": [
+    "This is a sanitized observation summary, not signed provenance, recoverable factory authority, a release decision or evidence that public dispatch is enabled.",
+    "The current-source positive GCP run observed native one-shot initialization and global readonly verification while applications stayed paused; it did not start application services, send benchmark traffic or qualify runtime, measurement, dataset or all-cloud release gates.",
+    "The Azure acknowledgement-loss case is an injected graceful interruption after the SSH initializer-release command returned but before local acknowledgement parsing; it is not an observed real network failure. Actual native initializer completion and exit are unknown, and no verifier or replay was dispatched.",
+    "Historical failures retain their original source epochs and terminal snapshots. The original e88f16cf1871 interrupted exit-130 row remains unchanged; its then-pending cleanup-only field is resolved only by the separately recorded exit-0 recovery observation, not by rewriting that row.",
+    "All benchmark attempts have their own two-pass absence evidence. GCP proofs cover twenty expected resources; Azure proofs cover each exact originally owned resource group. These are distinct from the helper's group-exists-false plus ARM group-and-six-child-404 checks.",
+    "The helper resize preserved the original resource/create identities, host key, ingress and NVMe controller. The helper was later stopped and destroyed with explicit absence checks; its generated private SSH key was removed only after proof. The helper proof is not described as two absence passes.",
+    "Both full-byte access factories completed before the current-source live controllers, but guarded full-byte receipts and byte counts were not retained. Their dispatch-intent fingerprints are retained; no guarded byte count is inferred from support or historical image workflows.",
+    "Matching operator-owned pre-launch, post-launch and post-run source manifests associate the current observations with the reported frozen commit. The private jobs and workloads do not independently self-attest the exact executed repository commit.",
+    "Artifact receipts demonstrate native aarch64 preparation without QEMU; only the GCP positive row has acknowledged native initialization and verification completion. No broader architecture, provider, performance or application-readiness qualification is implied.",
+    "Private account identifiers, cloud resource identifiers, addresses, object UIDs, helper hostnames, credentials and key paths are omitted. Hashes identify retained private evidence without restoring execution authority."
+  ],
+  "pending_qualification": [],
+  "post_run_source_receipts": [
+    {
+      "basis": "operator-owned repository check after both process exits; not a workload or saved-job self-attestation",
+      "both_processes_exited_before_followup_source_edits": true,
+      "canonical_json_sha256": "sha256:b09d15452b3186383f4da0e4849b4748e8d3b045fea54519fc39098db6187573",
+      "launch_receipt_canonical_json_sha256": "sha256:8fb8e0c5b5a0e841365cdf6fad775904bbd04aee9c3b53fd5fc9883cc6951295",
+      "launch_receipt_raw_sha256": "sha256:ca171a6c89d3de9e6f7765fa589f9bedfb9f17c2d987af23323369e846d0e8f3",
+      "launch_receipt_replaced": false,
+      "manifest_matches_launch_receipt": true,
+      "post_run_tracked_source_manifest_sha256": "sha256:e5209c1710c96daaaafcda2cfb48fbdd63f4b2345800542f0f10ef02a1172b95",
+      "qualification_authority": false,
+      "raw_sha256": "sha256:1480b27975a2e2e63bb3f8e64da90e88e0f9b792db69195bfb046c8262f0281f",
+      "receipt_id": "source-postrun-a22db22",
+      "repository_observed_at_utc": "2026-10-15T21:26:44Z",
+      "source_commit": "a22db227572dad009d409ee1f8f8ff8b587a0bfd"
+    },
+    {
+      "azure_response_loss_process_exit_code": 130,
+      "basis": "operator-owned repository check after both process exits; not a workload or saved-job self-attestation",
+      "both_processes_exited_before_followup_source_edits": true,
+      "canonical_json_sha256": "sha256:cd2218e187b32dd578740f17e29df9fdec128d0bce180276e444206acc0e7e3c",
+      "gcp_positive_process_exit_code": 0,
+      "launch_receipt_canonical_json_sha256": "sha256:60295a34fbdca7468d32422479004f18d37d2aa6f6042af70387d2508c83c6e8",
+      "launch_receipt_raw_sha256": "sha256:423f657fb1a8f90fed4f1a01b223cbbdf88413d59127bc9bee5c3889b731d5f8",
+      "launch_receipt_replaced": false,
+      "manifest_matches_launch_receipt": true,
+      "post_run_tracked_source_manifest_sha256": "sha256:cc6ad7d6e0413d523faa1357ada02ae468bda10320c18f4e275606b91ee305c7",
+      "qualification_authority": false,
+      "raw_sha256": "sha256:e50895a67d4c92d13f2362f01348228ff5d283af1e9cf81170e94849254c7c8d",
+      "receipt_id": "source-postrun-385ed1b",
+      "repository_observation_completed_before_utc": "2026-10-15T22:03:14Z",
+      "source_commit": "385ed1bb5ab163249d5e7c9dd16f6cfef6e8247d"
+    }
+  ],
+  "public_ui_enabled": false,
+  "qualification_authority": false,
+  "qualification_observations": [
+    {
+      "native_success_observed": true,
+      "observation_status": "observed",
+      "run_id": "534cf9061b3b",
+      "scenario": "successful-one-shot-initialization-and-global-readonly-verification"
+    },
+    {
+      "native_success_observed": null,
+      "observation_status": "observed",
+      "real_network_loss_observed": false,
+      "run_id": "098353c2175a",
+      "scenario": "graceful-initialize-response-returned-acknowledgement-loss-and-cleanup"
+    },
+    {
+      "observation_status": "observed",
+      "recovery_observation_reference": "e88f16cf1871-cleanup-only-followup",
+      "run_id": "e88f16cf1871",
+      "scenario": "cleanup-only-without-plan-artifact-registry-or-ssh-inputs"
+    },
+    {
+      "observation_status": "observed",
+      "qualification_authority": false,
+      "scenario": "registry-egress-helper-final-absence"
+    }
+  ],
+  "recorded_at": "2026-10-15T22:09:41+00:00",
+  "registry_helper": {
+    "additional_group_exists_check_result": false,
+    "additional_group_exists_check_used_pinned_subscription": true,
+    "approved_registry_auth_cdn_host_count": 7,
+    "authorized_purpose": "registry-egress-only",
+    "cleanup_complete": true,
+    "cleanup_observation_qualification_authority": false,
+    "cleanup_observation_status": "final-absence-observed",
+    "cloud_credentials_copied_to_helper": false,
+    "cloud_identity_grants_required": false,
+    "final_cleanup_observation": {
+      "canonical_json_sha256": "sha256:d65f69768e865beb71813be847483671907adb242f360832edb61d63e94fa240",
+      "raw_sha256": "sha256:c900795cb6af724c8c5505f3d3f7799f4badce75f62de0254b4035b17b1f5f1a"
+    },
+    "final_observation_completed_before_utc": "2026-10-15T22:07:41Z",
+    "final_state": "destroyed",
+    "generated_private_ssh_key_removed_after_absence_proof": true,
+    "global_socket_routing_changed": false,
+    "global_urllib_opener_installed": false,
+    "helper_absence_proof_scope": "exact-owned graph audit before deletion, group-exists false, ARM resource-group 404 and all six pinned child-resource 404s; not a two-pass benchmark absence proof",
+    "helper_credential_copy_claim_basis": "operator-attested provisioning and forwarding design",
+    "independent_absence_proved": true,
+    "private_destroy_log_raw_sha256": "sha256:c4133c1e11f425fed3dab4b09b3b033102e90936096cda4f69cd5fcb68c3c42a",
+    "private_final_helper_state_snapshot": {
+      "canonical_json_sha256": "sha256:71c9bf73225f28bc20aee703a2bb4d74d0791d9f81f89206ab134d36a4bcd472",
+      "raw_sha256": "sha256:347d1dcade718afdd9fb871020ce8b4da95be7e94575b28da5614d84557947f2"
+    },
+    "private_forward_mapping": {
+      "canonical_json_sha256": "sha256:e5d49afa2e3d9676c78e89c95a258f80e2f58f2d319e6faf2f8cab0034dbd6b4",
+      "raw_sha256": "sha256:2a8d5d58d9cb5d2ec9b4414408702000410a94ac7914f7311742521bb07ef7bd"
+    },
+    "private_helper_script_snapshot_raw_sha256": "sha256:b7a344c660b83c075530903aff3789f84e602704a01251bd644b2208b9dd1a68",
+    "private_helper_state_snapshot": {
+      "canonical_json_sha256": "sha256:a5f09f6121dc96103a6ba29155002961e2beafa36fab66f061ad7259093c3315",
+      "raw_sha256": "sha256:ab2f457e0572cab308d9ddf7f8d7f1975e4c0180705b37d6dd4228cd63701636"
+    },
+    "private_ssh_keys_copied_to_helper": false,
+    "provider": "azure",
+    "public_key_and_private_audit_evidence_retained": true,
+    "registry_diagnostic": {
+      "all_three_clients_verified_same_config_bytes": true,
+      "config_bytes": 7797,
+      "config_digest": "sha256:a2d7cadf7261c768ecdbea5e04da19adc262c249647feb774116ace24fc8dd7d",
+      "private_probe": {
+        "canonical_json_sha256": "sha256:c45eea3c3f9578193dc5dfd0cb5b893331279dff1787e5a6d206151029cc4cb2",
+        "raw_sha256": "sha256:219abf66bf60530ffe27c54d28427ef13693330c085c8b71c84dac84dcc2741e"
+      },
+      "scope": "one-exact-public-config-through-all-three-clients-not-full-image-or-layer-qualification"
+    },
+    "relay_destroy_process_exit_code": 0,
+    "relay_foreground_runner_exit_code": 130,
+    "relay_runner_exit_was_requested_stop": true,
+    "resize": {
+      "disk_controller_type": "NVMe",
+      "disk_controller_type_unchanged": true,
+      "host_key_unchanged": true,
+      "ingress_unchanged": true,
+      "initial_shape": "Standard_D2as_v7",
+      "intended_shape": "Standard_D2s_v7",
+      "observed_shape": "Standard_D2s_v7",
+      "private_resize_journal": {
+        "canonical_json_sha256": "sha256:a3b77f947f20df655f48d9031edfeb5181f40d6c3a8839f9756fb1c10a6074ba"
+      },
+      "private_resize_outcome": {
+        "canonical_json_sha256": "sha256:98a97fb0035225572d2ee18edb6d82ace63eff001e5e3e768b9c348d315e4ec3",
+        "raw_sha256": "sha256:59589c9162fd4de68269cabee22f41be5f8a10fec2caa24d01b94328b1259822"
+      },
+      "reason": "free-vcpu-quota-for-independent-benchmark-role-provisioning",
+      "same_create_identity_after_completed_resize_verified": true,
+      "same_resource_ids_after_completed_resize_verified": true,
+      "status": "complete"
+    },
+    "restricted_ssh_forwarding_hardening_recorded": true,
+    "strict_host_key_control_plane_attestation_recorded": true,
+    "system_proxy_or_trust_settings_changed": false,
+    "tls_hostname_and_certificate_validation_unchanged": true,
+    "tls_termination_at_helper": false,
+    "transport": "operator-owned-ssh-tcp-forward",
+    "tunnel_running": false
+  },
+  "released": false,
+  "schema_version": 1,
+  "scope": "private-one-shot-hotel-initialization-verification-and-injected-acknowledgement-loss-with-cleanup-only-recovery-and-helper-absence",
+  "source": {
+    "executed_commit_independently_attested_by_private_job": false,
+    "frozen_live_launch_commit_operator_reported": "385ed1bb5ab163249d5e7c9dd16f6cfef6e8247d",
+    "manifest_method": "git-tracked Python, shell and requirements.txt file hashes aggregated from repository root; operator-owned pre-launch, post-launch and post-run receipts agree",
+    "post_launch_receipt": {
+      "canonical_json_sha256": "sha256:d8780c415625edb42574831b72486b230f3ba9076b2a536227a3308b640ca563",
+      "raw_sha256": "sha256:190a745a23b4b6608a4bd393d51c7cc127d3d781e4b30a4eef58ea225464939a"
+    },
+    "post_run_receipt_reference": "source-postrun-385ed1b",
+    "pre_launch_receipt": {
+      "canonical_json_sha256": "sha256:60295a34fbdca7468d32422479004f18d37d2aa6f6042af70387d2508c83c6e8",
+      "raw_sha256": "sha256:423f657fb1a8f90fed4f1a01b223cbbdf88413d59127bc9bee5c3889b731d5f8"
+    },
+    "private_launch_source_manifest_sha256": "sha256:cc6ad7d6e0413d523faa1357ada02ae468bda10320c18f4e275606b91ee305c7",
+    "qualification_authority": false,
+    "source_scope": "current-source GCP positive and Azure injected-response-loss observations only; historical attempts retain their own source epoch",
+    "tested_code_commit": "385ed1bb5ab163249d5e7c9dd16f6cfef6e8247d"
+  },
+  "source_epochs": [
+    {
+      "attempt_run_ids": [
+        "ade27ba54217",
+        "4101173fd91d"
+      ],
+      "executed_commit_independently_attested_by_private_job": false,
+      "frozen_live_launch_commit_operator_reported": "17acb33507b106bc0b0bc08e2e0d993ec099f4fc",
+      "private_launch_source_manifest_sha256": null,
+      "tested_code_commit": "17acb33507b106bc0b0bc08e2e0d993ec099f4fc"
+    },
+    {
+      "attempt_run_ids": [
+        "e88f16cf1871",
+        "35d8be5e471a"
+      ],
+      "executed_commit_independently_attested_by_private_job": false,
+      "post_run_source_receipt_reference": "source-postrun-a22db22",
+      "source_commit": "a22db227572dad009d409ee1f8f8ff8b587a0bfd"
+    },
+    {
+      "attempt_run_ids": [
+        "534cf9061b3b",
+        "098353c2175a"
+      ],
+      "executed_commit_independently_attested_by_private_job": false,
+      "post_run_source_receipt_reference": "source-postrun-385ed1b",
+      "source_commit": "385ed1bb5ab163249d5e7c9dd16f6cfef6e8247d"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-15: **published artifacts, support-only K3s staging, guarded Hotel image access and offline initialization-control foundations; not public benchmarks**.
+Status, 2026-10-15: **published artifacts, support-only K3s staging, guarded Hotel image access and private Hotel baseline-initialization/recovery qualification; not public benchmarks**.
 Social Network is still the only released distributed workload. The audited
 foundations now have drift-checked application/frontend, initializer, and
 load-driver preparation tools, plus an explicit native publication pipeline.
@@ -984,7 +984,53 @@ The observer now treats only `Pending` or `Running` in this situation as pending
 evidence, after all existing identity, timestamp, reason, signal and container
 checks. It accepts no exit code until the Pod phase is coherent. The existing
 bounded read-only wait continues; dispatch is never repeated. Contradictory
-terminal phases remain failures. Fresh positive qualification is still pending.
+terminal phases remain failures. The historical Azure failure's exact phase,
+exit status and native outcome remain unknown.
+
+At frozen source `385ed1bb`, GCP Arm attempt `534cf9061b3b` completed the native
+baseline initializer and its separate global read-only verifier. Both exact
+Pods terminated with exit zero and the required run/dataset/mode-specific
+acknowledgements. The journal retained six events and exactly one dispatch
+latch per mode. Fourteen backing-service containers were attested and all ten
+application Deployments remained at zero. The final cloud/storage/API checks
+passed before cleanup; two independent absence passes covered all twenty
+expected GCP resources, and the original process exited zero.
+
+Azure Arm attempt `098353c2175a` used the same frozen source and reached the
+requested `initialize-response-returned` interruption. The remote gate-release
+command had returned, but the client had not parsed its acknowledgement. The
+process exited 130 as expected; three journal events and one initializer latch remained,
+with no exit acknowledgement or verifier dispatch. Initialization remained
+explicitly unknown. Two independent passes proved the exact audited Azure
+resource group absent, covering its twenty-six tracked resource IDs. This
+qualifies the injected client-acknowledgement
+loss and cleanup path, not an actual network outage or successful initializer.
+
+Operator-owned source manifests matched before launch, after launch and after
+both process exits. These local observations are not workload self-attestation
+or signed build provenance. GitHub
+[CI for the tested source](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38811033108)
+passed artifact preparation and all required checks; each Python 3.10/3.14 job
+ran 1,954 tests with one existing skip. The
+[sanitized live observation](qualification/deathstarbench-hotel-live-initialization-v1.json)
+binds each attempt to its own source epoch and retained private evidence hashes.
+Completed full-byte factories do not imply that their complete receipts or
+live byte counters were retained. No application service, benchmark traffic or
+measurement ran; application-start, runtime, measurement, all-cloud and public
+release qualification remain closed.
+
+After both processes exited, the SSH relay was stopped. Cleanup-only recovery
+of the earlier GCP interruption `e88f16cf1871` then exited zero with no plan,
+artifact, registry mapping or SSH options and another two-pass absence proof.
+Its original terminal snapshot and exit-130 log were preserved separately;
+this recovery did not replay initialization or change its unknown outcome.
+The helper was independently destroyed: Azure reported its exact resource
+group and all six pinned child resources absent. A further group-absence
+check used the pinned subscription. The generated private SSH key was removed
+afterward; private audit/recovery evidence and the public key were retained.
+All infrastructure created for these attempts and their separate relay is
+confirmed absent. No TLS roots or global proxy settings were changed, and no
+cloud credentials or private SSH keys were copied to the relay.
 
 ## Next review slices and release prerequisites
 
@@ -1003,11 +1049,13 @@ terminal phases remain failures. Fresh positive qualification is still pending.
    Candidate artifact/storage preflight and support-only K3s apply/readiness now
    supply the first boundaries. The private cleanup-owning operator now joins
    those boundaries; live support-stage evidence must be evaluated separately.
-   Guarded application startup and semantic initialization/measurement remain
-   required before release.
-   Add exact dataset and semantic response verification, durable one-shot
-   initialization, unchanged pre/post pod identities, and workload-specific
-   comparison cohorts. Do not populate Hotel/Media metadata with fabricated
+   Guarded application startup and semantic transaction/measurement
+   qualification remain required before release.
+   The private Hotel boundary now supplies durable one-shot baseline
+   initialization and Pod-identity continuity. Remaining work includes
+   service-level dataset/response semantics during guarded application
+   execution, workload-specific comparison cohorts and corresponding Media
+   boundaries. Do not populate Hotel/Media metadata with fabricated
    Social Network Reed98 hashes.
 3. **Live qualification and public release.** Verify permitted and denied
    network paths, semantic transactions, warmup/measurement accounting,

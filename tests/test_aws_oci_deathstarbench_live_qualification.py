@@ -202,6 +202,33 @@ class AwsOciDistributedQualificationTests(unittest.TestCase):
             ),
         }
 
+    def test_oci_pin_accepts_exact_root_tenancy_or_child_compartment_identity(self):
+        for identity in ('ocid1.compartment.oc1..candidate', 'ocid1.tenancy.oc1..candidate'):
+            with self.subTest(identity=identity):
+                pin = {**self.oci_pin(), 'compartment_id': identity}
+                validated = qualification._validate_provider_pin(pin)
+                self.assertEqual(validated, pin)
+                self.assertEqual(validated['compartment_id'], identity)
+                plan = qualification._plan(self.args('oci'), self.ssh(), validated)
+                self.assertEqual(plan.compartment_id, identity)
+                self.assertEqual(
+                    qualification._oci_inputs(validated, self.ssh())['compartment_id'],
+                    identity,
+                )
+
+    def test_oci_pin_rejects_unrelated_or_malformed_compartment_ocids(self):
+        for identity in (
+            'ocid1.image.oc1.iad.candidate', 'ocid1.user.oc1..candidate',
+            'ocid1.tenancies.oc1..candidate', 'ocid1.tenancy.',
+            'ocid1.compartment.', 'ocid1.tenancy.oc1..candidate/other',
+            'ocid1.tenancy.oc1..candidate\n', ' ocid1.tenancy.oc1..candidate',
+            '', None,
+        ):
+            with self.subTest(identity=identity), self.assertRaisesRegex(
+                qualification.QualificationError, 'compartment_id is invalid',
+            ):
+                qualification._validate_provider_pin({**self.oci_pin(), 'compartment_id': identity})
+
     def job(self, provider='aws'):
         args = self.args(provider)
         pin = self.aws_pin() if provider == 'aws' else self.oci_pin()

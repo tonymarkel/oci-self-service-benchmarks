@@ -38,9 +38,11 @@ EVENTS = ('created', 'blocked-pods-recorded', 'initialize-intent-recorded',
 MAX_BYTES = 65536
 UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z')
 CLOSED = {'initializer_authorized': False, 'runtime_authorized': False,
+          'released': False, 'initialization_executed': False, 'database_executed': False,
           'database_execution_verified': False, 'live_identity_verified': False,
           'application_start_allowed': False, 'dataset_qualified': False,
-          'measurement_qualified': False, 'public_release': False}
+          'runtime_qualified': False, 'measurement_qualified': False,
+          'cloud_qualified': False, 'anonymous_pull_qualified': False, 'public_release': False}
 
 
 class GuardedHotelJournalError(ValueError):

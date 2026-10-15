@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "candidate_schema": "hotel-guarded-image-access-observation-v1",
+  "observed_at": "2026-10-15T17:25:35.257819+00:00",
+  "scope": "full-compressed-image-byte-access-only-no-runtime-executor",
+  "workflow_run": "https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38777055813",
+  "workflow_head_sha": "213ed7ca79aafca04cbcf3853824849d55e74545",
+  "workflow_conclusion": "success",
+  "artifact": "hotel-image-access-38777055813-1",
+  "receipt_file": "image-access.json",
+  "receipt_sha256": "b4f636e0708dc9b2eb3ff25c82c46706e3f7085375755659c1b6f62096d9951f",
+  "access_fingerprint": "sha256:a45b9960f3bde8526af96f4e29333aad7a478c50252883484d6c8b6dc453dd69",
+  "guarded_artifact_fingerprint": "sha256:71949735027ff9b51ab5091b7061d37a45ed37f1dfaaab5d38dca9b476071df4",
+  "guarded_lock_sha256": "ddb175985a0555adca5d2457198a289f588aa847301c95dd47e1f5ae4796fee6",
+  "guarded_publication_sha256": "2bfcf18580a4a2092896816ffa4eb2a451d97a69d31b22a263ec4c4548d6701b",
+  "source_preparations_regenerated_before_registry_access": true,
+  "original_and_guarded_artifacts_freshly_adopted": true,
+  "anonymous_all_bound_image_bytes_verified": true,
+  "platform_image_count": 7,
+  "index_count": 6,
+  "compressed_layer_body_count": 45,
+  "compressed_layer_bytes": 623098966,
+  "downloaded_bytes_including_metadata_and_anonymous_tokens": 623184724,
+  "shared_layers_downloaded_again": true,
+  "images": {
+    "consul": {
+      "image": "docker.io/hashicorp/consul@sha256:5290ee6943eeac0350f193c8dc52ff27eb1042dd6f39ee597068e779c0ce4a9f",
+      "platform": "linux/amd64", "layers": 9, "compressed_layer_bytes": 82848984
+    },
+    "hotel-reservation@linux/amd64": {
+      "image": "ghcr.io/tonymarkel/deathstarbench-hotel-app@sha256:c86dfa0649a602d74b15eb85dc0cce27008e05d017beb9c341a6add20aafdd6f",
+      "platform": "linux/amd64", "layers": 6, "compressed_layer_bytes": 63393466
+    },
+    "hotel-reservation@linux/arm64": {
+      "image": "ghcr.io/tonymarkel/deathstarbench-hotel-app@sha256:33fa3dbaa84430cb4d44467926cdfd74560ebee031c6a5808bbd40673e614ba9",
+      "platform": "linux/arm64", "layers": 6, "compressed_layer_bytes": 58475707
+    },
+    "jaeger": {
+      "image": "docker.io/jaegertracing/all-in-one@sha256:f1f9682412cfca7a2d4c3f612f8eb79216222ca791589b04485d71a0b6bc80b9",
+      "platform": "linux/amd64", "layers": 5, "compressed_layer_bytes": 34260354
+    },
+    "load-driver": {
+      "image": "ghcr.io/tonymarkel/deathstarbench-hotel-load-driver@sha256:911e797bffcabe968d05424d05e4bee0ced19718544e7d44e064881d0f4326b4",
+      "platform": "linux/amd64", "layers": 5, "compressed_layer_bytes": 76098461
+    },
+    "memcached": {
+      "image": "docker.io/library/memcached@sha256:405390d9c38a0e3d59f34088c2265a710da10e5e9f3cdeb4fb5264c829509aa5",
+      "platform": "linux/amd64", "layers": 6, "compressed_layer_bytes": 32894836
+    },
+    "mongodb": {
+      "image": "docker.io/library/mongo@sha256:f7a950ee4a1cc048300cd3b3da3e939974eb8278525101ac917dbed1a3ce3d51",
+      "platform": "linux/amd64", "layers": 8, "compressed_layer_bytes": 275127158
+    }
+  },
+  "client": {
+    "registry_credentials_used": false,
+    "docker_config_loaded": false,
+    "local_image_cache_used": false,
+    "environment_proxy_credentials_used": false,
+    "netrc_loaded": false,
+    "cookies_used": false,
+    "file_writes_performed": false,
+    "tokens_forwarded_to_redirect_targets": false,
+    "anonymous_repository_scoped_bearer_tokens": true
+  },
+  "limitations": [
+    "This records one complete source/registry access attempt, not signed build provenance, image execution, CRI pull qualification or future registry availability.",
+    "The actual process-local access object cannot be restored from this JSON; every later attempt/resume must freshly adopt sources/artifacts and obtain its own capability.",
+    "Offline run/stage/cluster observation and local fsynced intent-journal tests do not qualify a live Kubernetes executor, MongoDB initialization or application startup.",
+    "No Kubernetes/cloud executor was implemented or invoked in this slice. No cloud infrastructure, images, datasets, application services or benchmark traffic were created or run by this qualification.",
+    "All public/runtime/initialization/measurement gates remain closed. Historical workflow artifacts have 90-day retention and cannot replace fresh verification."
+  ],
+  "gates": {
+    "initializer_authorized": false,
+    "runtime_authorized": false,
+    "database_executed": false,
+    "initialization_executed": false,
+    "application_start_allowed": false,
+    "dataset_qualified": false,
+    "runtime_qualified": false,
+    "measurement_qualified": false,
+    "cloud_qualified": false,
+    "anonymous_pull_qualified": false,
+    "anonymous_layer_pull_qualified": false,
+    "public_release": false
+  }
+}

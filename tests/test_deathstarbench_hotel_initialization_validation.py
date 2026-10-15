@@ -62,6 +62,8 @@ class HotelInitializationValidationTests(unittest.TestCase):
                                          'context_sha256': tree_sha256(app)}},
                     'seed_source': {'source_fingerprint_input': identity, 'source_fingerprint': source_fingerprint,
                                     'generator_revision': validation.seed.GENERATOR_REVISION,
+                                    'arithmetic_policy': validation.seed.arithmetic_policy(),
+                                    'schema_version': 1, 'candidate_only': True, 'released': False,
                                     'qualification_authority': False, 'generated_source_sha256': generated}}
         self.write(root / 'context-manifest.json', manifest)
         return manifest

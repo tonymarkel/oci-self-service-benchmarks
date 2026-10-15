@@ -25,7 +25,7 @@ def metadata_fixture():
         'candidate_only': True,
         'contract_revision': 'hotel-separate-initialization-candidate-v1',
         'recipe_revision': 'hotel-reservation-guarded-init-native-go-scratch-candidate-v1',
-        'dataset_revision': 'hotel-reservation-deterministic-baseline-candidate-v1',
+        'dataset_revision': 'hotel-reservation-deterministic-rounded-baseline-candidate-v1',
         'source_fingerprint': SOURCE,
         'canonicalization': 'bson-canonical-extjson-recursive-sorted-v1',
         'deterministic_id': 'sha256-canonical-logical-key-v1',

@@ -5,6 +5,7 @@ package initialization_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"strings"
@@ -194,11 +195,15 @@ func TestDatasetExactInventoryDeterminismAndCopyIsolation(t *testing.T) {
 func TestOfflineCompiledCatalogGoldenIdentities(t *testing.T) {
 	// Observed from the offline native catalog, not MongoDB execution, dataset
 	// qualification or runtime qualification. The pinned builder must agree.
-	const source = "sha256:40c76ecf1623f6e098d3839efc0d2341c416817c94e1c36a6b36a87d9647be49"
-	const fingerprint = "sha256:76974701cecf121db01b511e34d1f543adb76b430146ca4022c1eb81f61d04ee"
+	const source = "sha256:c1748d9114e5ff567cc16939054c14ec5e2184a288c60b4cfdb7bfd733f0f176"
+	const fingerprint = "sha256:7d1e07da21efdf9df9cf2062f09546b8eb153c03af69be9e2cb4a635956d6681"
 	d := dataset(t)
 	if catalog.SourceFingerprint != source || d.Metadata().SourceFingerprint != source || d.Fingerprint() != fingerprint {
-		t.Fatal("offline compiled catalog identity differs from the reviewed golden baseline")
+		metadata, err := json.Marshal(d.Metadata())
+		if err != nil {
+			t.Fatal("cannot encode offline metadata diagnostics", err)
+		}
+		t.Fatalf("offline compiled catalog identity differs from the reviewed golden baseline: actual_source=%s actual_dataset=%s metadata=%s", catalog.SourceFingerprint, d.Fingerprint(), metadata)
 	}
 }
 

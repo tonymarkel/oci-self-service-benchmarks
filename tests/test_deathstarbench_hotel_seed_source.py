@@ -54,6 +54,14 @@ def fixture(component):
             '\t\tsum := sha256.Sum256([]byte(suffix))\n'
             '\t\tnewUsers = append(newUsers, User{seededUsername(suffix), fmt.Sprintf("%x", sum)})\n\t}\n'
         )
+    if component in {'geo', 'profile', 'recommendation'}:
+        kind = 'float32' if component == 'profile' else 'float64'
+        construction += (
+            '\tfor i := 7; i <= 80; i++ {\n'
+            f'\t\tlat := 37.7835 + {kind}(i)/500.0*3\n'
+            f'\t\tlon := -122.41 + {kind}(i)/500.0*4\n'
+            '\t\t_ = lat\n\t\t_ = lon\n\t}\n'
+        )
     generating = '' if component in {'attractions', 'review'} else seed._GENERATING
     if component == 'reservation':
         targets = (
@@ -169,6 +177,72 @@ class HotelSeedSourceTests(unittest.TestCase):
         self.assertEqual(receipts['generated_source_sha256'], {
             relative: hashlib.sha256(source.encode()).hexdigest() for relative, source in generated.items()})
         self.assertEqual(inputs['source_files'], self.trusted)
+        self.assertEqual(inputs['arithmetic_policy'], seed.arithmetic_policy())
+        self.assertEqual(receipts['arithmetic_policy'], inputs['arithmetic_policy'])
+        self.assertEqual(inputs['generator_revision'], 'hotel-typed-seed-source-candidate-v2')
+
+    def test_exact_six_typed_rounding_barriers_are_bound_without_comparison_rounding(self):
+        sources = seed.generate_seed_sources(self.app)
+        receipts = seed.seed_source_receipts(self.app)
+        policy = seed.arithmetic_policy()
+        self.assertEqual(policy['revision'], 'hotel-seed-explicit-ieee754-operation-rounding-v1')
+        self.assertEqual(policy['rule'], 'explicit-target-type-conversions-after-division-product-and-sum')
+        self.assertEqual(len(policy['expressions']), 6)
+        self.assertEqual([(item['component'], item['variable'], item['float_type']) for item in policy['expressions']], [
+            ('geo', 'lat', 'float64'), ('geo', 'lon', 'float64'),
+            ('profile', 'lat', 'float32'), ('profile', 'lon', 'float32'),
+            ('recommendation', 'lat', 'float64'), ('recommendation', 'lon', 'float64'),
+        ])
+        for item in policy['expressions']:
+            source = sources[f'initialization/seeddata/{item["component"]}/seed.go']
+            kind = item['float_type']
+            base, scale = ('37.7835', '3') if item['variable'] == 'lat' else ('-122.41', '4')
+            expected = f'{kind}({kind}({base}) + {kind}({kind}({kind}(i) / {kind}(500.0)) * {kind}({scale})))'
+            self.assertEqual(item['replacement'], expected)
+            self.assertEqual(source.count(f'\t\t{item["variable"]} := {expected}'), 1)
+            self.assertNotIn(f'{item["variable"]} := {item["original"]}', source)
+            self.assertIn(f'{item["variable"]} := {item["original"]}', (self.app / f'cmd/{item["component"]}/db.go').read_text())
+        for path, receipt in receipts['source_files'].items():
+            changed = path.split('/')[1] in {'geo', 'profile', 'recommendation'}
+            self.assertEqual(receipt['original_construction_sha256'] != receipt['generated_construction_sha256'], changed)
+        # Original typed row literals and non-coordinate arithmetic stay exact;
+        # no row re-encoding, decimal quantization or EJSON tolerance is added.
+        self.assertIn('&seedRow{37.7835 + float32(7)/500.0*3}', sources['initialization/seeddata/geo/seed.go'])
+        self.assertNotIn('math.Round', '\n'.join(sources.values()))
+
+    def test_arithmetic_policy_is_detached_and_semantic_revision_changes_source_binding(self):
+        initial = seed.seed_source_receipts(self.app)
+        policy = seed.arithmetic_policy()
+        policy['expressions'][0]['float_type'] = 'wrong'
+        self.assertEqual(seed.arithmetic_policy()['expressions'][0]['float_type'], 'float64')
+        with mock.patch.object(seed, 'ARITHMETIC_POLICY_REVISION', 'changed-test-only-arithmetic-policy'):
+            changed = seed.seed_source_receipts(self.app)
+        self.assertNotEqual(initial['source_fingerprint'], changed['source_fingerprint'])
+        self.assertEqual(initial['source_fingerprint_input']['source_files'], changed['source_fingerprint_input']['source_files'])
+
+    def test_missing_duplicate_wrong_type_or_extra_coordinate_assignments_refuse(self):
+        original = fixture('geo')
+        lat = '\t\tlat := 37.7835 + float64(i)/500.0*3\n'
+        lon = '\t\tlon := -122.41 + float64(i)/500.0*4\n'
+        mutations = (
+            original.replace(lat, ''),
+            original.replace(lat, lat + lat),
+            original.replace('lat := 37.7835 + float64(i)', 'lat := 37.7835 + float32(i)'),
+            original.replace('float64(i)/500.0*3', 'float64(i)/500.0*2'),
+            original.replace(lat + lon, lon + lat),
+            original.replace(lat, lat + '\t\tlat += 1\n'),
+            original.replace(lat, lat + '\t\tlon = 4\n'),
+        )
+        for text in mutations:
+            with self.subTest(mutation=text[-100:]):
+                self.update('geo', text, trust=True)
+                with self.assertRaisesRegex(seed.PreparationError, 'arithmetic inventory/type drifted'):
+                    seed.generate_seed_sources(self.app)
+        self.update('geo', original, trust=True)
+        unknown = fixture('review').replace(seed._URI, '\t\tlat := 37.0\n' + seed._URI)
+        self.update('review', unknown, trust=True)
+        with self.assertRaisesRegex(seed.PreparationError, 'arithmetic inventory/type drifted'):
+            seed.generate_seed_sources(self.app)
 
     def test_only_explicit_required_imports_are_retained(self):
         generated = seed.generate_seed_sources(self.app)

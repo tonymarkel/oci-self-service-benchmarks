@@ -17,8 +17,8 @@
   "source_preparation": {
     "independent_rounds": 2,
     "deterministic": true,
-    "manifest_sha256": "0c95aa1451c5ff062f4d009f9f5db4ff4a9b86922ad26bc81a47a409056af7b8",
-    "prepared_tree_sha256": "84e7cadc32f601bbe36c0ac69e4d78bbf92eb49e3eca7ab0eddff29314a70dd7"
+    "manifest_sha256": "d46264c4c99b2f27050091b2a395de63a4eaa1aebce8d43717dc0fb29b923c97",
+    "prepared_tree_sha256": "c454b4916450f222a5cfb546803c2ad2a5e26562bc62c377d90cb831ed1ab412"
   },
   "checks": {
     "initialization_go_test_functions": 16,
@@ -27,7 +27,7 @@
     "command_binaries_built": 11,
     "identical_no_database_attestations": 11,
     "unbound_startup_refusals_with_exit_2": 11,
-    "attestation_payload_sha256": "24f310de8caaf03603b628ca3a8a6ea738f122dde9a3c4c564c9d4b69ba69a28"
+    "attestation_payload_sha256": "7c719182ff6b60f36b386a16f9547782e19da23a8ff55e9cf15ca293c4344072"
   },
   "qualification": {
     "images_built": false,
@@ -46,7 +46,8 @@
     "Binaries were run with TLS=false (the baked candidate default), no run identity and no main configuration file; upstream TLS package initialization may log to stderr before main.",
     "Historical JSON, source hashes and fingerprints are not fresh execution/provenance, runtime authority or permission to replay initialization.",
     "The retained v1 publication/adoption and support-only controller do not accept the new recipe.",
-    "Per-store claims are not a cross-database transaction; semantic/authentication/capacity, Consul/preload/restart and post-warmup gates remain open."
+    "Per-store claims are not a cross-database transaction; semantic/authentication/capacity, Consul/preload/restart and post-warmup gates remain open.",
+    "Translated darwin/amd64 execution is an arithmetic diagnostic only; native Linux Go 1.21.13 release-builder checks remain separate."
   ],
   "dataset_metadata": {
     "application_start_allowed": false,
@@ -90,7 +91,7 @@
       },
       {
         "component": "geo",
-        "content_sha256": "sha256:e41df05d2341b4a105e8e4cd386939380ca30af77d394c16da76485de27aa6f0",
+        "content_sha256": "sha256:c07243dc395c097ebd79c6eebc1215aeb8ea5aa697b350f6dba1fcdf0c677abc",
         "count": 80,
         "database": "geo-db",
         "logical_key_fields": [
@@ -127,7 +128,7 @@
       },
       {
         "component": "recommendation",
-        "content_sha256": "sha256:a97196635bacd5fcac0354758703a766a7c9b5ba4081f29cc24b7c36e3c3648f",
+        "content_sha256": "sha256:34dc423979db3580ec63e05ba91d140669fe5312f0c64dbf8e172ee8de6efb78",
         "count": 80,
         "database": "recommendation-db",
         "logical_key_fields": [
@@ -186,9 +187,9 @@
     ],
     "contract_revision": "hotel-separate-initialization-candidate-v1",
     "database_count": 8,
-    "dataset_fingerprint": "sha256:76974701cecf121db01b511e34d1f543adb76b430146ca4022c1eb81f61d04ee",
+    "dataset_fingerprint": "sha256:7d1e07da21efdf9df9cf2062f09546b8eb153c03af69be9e2cb4a635956d6681",
     "dataset_qualified": false,
-    "dataset_revision": "hotel-reservation-deterministic-baseline-candidate-v1",
+    "dataset_revision": "hotel-reservation-deterministic-rounded-baseline-candidate-v1",
     "deterministic_id": "sha256-canonical-logical-key-v1",
     "document_count": 873,
     "initialization_executed": false,
@@ -198,6 +199,30 @@
     "runtime_qualified": false,
     "schema_version": 1,
     "scope": "offline-dataset-construction-only-no-mongodb-execution",
-    "source_fingerprint": "sha256:40c76ecf1623f6e098d3839efc0d2341c416817c94e1c36a6b36a87d9647be49"
+    "source_fingerprint": "sha256:c1748d9114e5ff567cc16939054c14ec5e2184a288c60b4cfdb7bfd733f0f176"
+  },
+  "arithmetic_regression": {
+    "initial_ci_golden_failure": "https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38760791670",
+    "initial_unrounded_source_fingerprint": "sha256:40c76ecf1623f6e098d3839efc0d2341c416817c94e1c36a6b36a87d9647be49",
+    "initial_unrounded_arm_dataset_fingerprint": "sha256:76974701cecf121db01b511e34d1f543adb76b430146ca4022c1eb81f61d04ee",
+    "initial_unrounded_x86_diagnostic_dataset_fingerprint": "sha256:d7897c2559b32c56dd967253f781a1dde42c7bff8d1da108905fa21f1496c896",
+    "differing_content_collections": [
+      "geo/geo",
+      "recommendation/recommendation"
+    ],
+    "logical_keys_equal": true,
+    "cause": "Go permits FMA; original arm64 binary emitted FMADDD for geo coordinates while GOAMD64=v1 emitted separate division/multiplication/addition.",
+    "generator_revision": "hotel-typed-seed-source-candidate-v2",
+    "arithmetic_policy_revision": "hotel-seed-explicit-ieee754-operation-rounding-v1",
+    "typed_expression_replacements": 6,
+    "fixed_native_arm_and_translated_x86_metadata_byte_identical": true,
+    "x86_diagnostic": {
+      "go_version": "1.24.2",
+      "os": "darwin",
+      "architecture": "amd64",
+      "goamd64": "v1",
+      "execution": "Rosetta translation on arm64; not native Linux qualification"
+    },
+    "lossy_rounding_in_data_comparisons": false
   }
 }

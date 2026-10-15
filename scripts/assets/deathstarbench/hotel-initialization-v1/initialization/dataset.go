@@ -22,7 +22,7 @@ import (
 
 const Revision = "hotel-separate-initialization-candidate-v1"
 const RecipeRevision = "hotel-reservation-guarded-init-native-go-scratch-candidate-v1"
-const DatasetRevision = "hotel-reservation-deterministic-baseline-candidate-v1"
+const DatasetRevision = "hotel-reservation-deterministic-rounded-baseline-candidate-v1"
 const MarkerCollection = "_hotel_candidate_initialization"
 
 type Collection struct {

@@ -605,11 +605,12 @@ lock adoption and support-only operator remain unchanged.
 recipe not wired into publication or adoption**:
 `hotel-reservation-guarded-init-native-go-scratch-candidate-v1`. It first
 validates the complete original preparation, retains that input receipt, then
-extracts the eight exact typed Go seed constructors into a pure catalog. This
-preserves original floating-point expressions, nested types and decimal user
-names; Python does not invent or approximate the row data. The generated
-source fingerprint binds the extraction revision, eight full source hashes,
-and all eleven collection/row mappings.
+extracts the eight exact typed Go seed constructors into a pure catalog. Nested
+types and decimal user names are preserved; six audited coordinate expressions
+gain explicit typed rounding steps. Python does not evaluate or approximate the
+row data. The generated source fingerprint binds the extraction revision,
+eight full source hashes, all eleven collection/row mappings, and the complete
+arithmetic policy and its exact original/replacement anchors.
 
 The new Go library constructs exactly **873 baseline documents in eleven
 collections across eight stores**, rejects duplicate/foreign logical keys and
@@ -617,6 +618,17 @@ incorrect BSON types, assigns deterministic logical-key `_id` values, and
 computes canonical typed content and logical-key hashes. Its complete metadata
 fingerprint includes the source binding. These are actual catalog-construction
 hashes, not Social Network dataset identifiers.
+
+The initial golden check caught a genuine Arm/x86 difference: Go permits
+fused multiply-add to skip an intermediate rounding step. The same Go compiler
+emitted FMA on Arm and separate division/multiplication/addition on x86; geo
+and recommendation records consequently had different content hashes despite
+identical logical keys. The generator's versioned rounding policy now forces
+each operation's original float32/float64 precision, as specified by the
+[Go floating-point rules](https://go.dev/ref/spec#Floating_point_operators).
+The dataset uses the distinct
+`hotel-reservation-deterministic-rounded-baseline-candidate-v1` revision.
+Canonicalization and MongoDB comparisons do not round away stored-data drift.
 
 The distinct `hotel-initialize` command supports only explicit
 `initialize-empty` and read-only `verify` modes. Identity, dataset fingerprint,

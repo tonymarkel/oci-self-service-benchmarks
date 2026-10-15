@@ -19,7 +19,7 @@ from typing import Any
 
 CONTRACT_REVISION = 'hotel-separate-initialization-candidate-v1'
 RECIPE_REVISION = 'hotel-reservation-guarded-init-native-go-scratch-candidate-v1'
-DATASET_REVISION = 'hotel-reservation-deterministic-baseline-candidate-v1'
+DATASET_REVISION = 'hotel-reservation-deterministic-rounded-baseline-candidate-v1'
 DATASET_SCHEMA = 'hotel-initialization-dataset-v1'
 CANONICALIZATION = 'bson-canonical-extjson-recursive-sorted-v1'
 DETERMINISTIC_ID = 'sha256-canonical-logical-key-v1'

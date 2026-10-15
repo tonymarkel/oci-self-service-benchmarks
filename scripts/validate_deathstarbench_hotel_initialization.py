@@ -66,6 +66,7 @@ def _json(raw):
 def _source_fingerprint():
     identity = {
         'generator_revision': seed.GENERATOR_REVISION,
+        'arithmetic_policy': seed.arithmetic_policy(),
         'source_files': seed.PREPARED_SOURCE_SHA256,
         'collections': [
             {'component': component, 'database': component + '-db', 'name': name,
@@ -103,6 +104,9 @@ def _validate_preparation(files) -> dict:
     _require(isinstance(receipts, dict) and receipts.get('source_fingerprint_input') == identity
              and receipts.get('source_fingerprint') == source_fingerprint
              and receipts.get('generator_revision') == seed.GENERATOR_REVISION
+             and receipts.get('arithmetic_policy') == seed.arithmetic_policy()
+             and type(receipts.get('schema_version')) is int and receipts['schema_version'] == 1
+             and receipts.get('candidate_only') is True and receipts.get('released') is False
              and receipts.get('qualification_authority') is False,
              'Compiled Hotel seed source binding differs.')
     generated = receipts.get('generated_source_sha256')

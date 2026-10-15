@@ -234,6 +234,15 @@ class GuardedHotelJournalTests(unittest.TestCase):
         self.pin(store)
         self.intent(store)
         latch = self.directory / journal.LATCHES['initialize-empty']
+        original = latch.read_bytes()
+        for key, alias in (('schema_version', True), ('application_start_allowed', 0)):
+            changed = json.loads(original)
+            changed['identity'][key] = alias
+            latch.write_bytes(journal._canonical(changed))
+            with self.subTest(key=key), self.assertRaises(journal.GuardedHotelJournalError):
+                self.open()
+            self.assertEqual(latch.read_bytes(), journal._canonical(changed))
+        latch.write_bytes(original)  # Test-owned fixture only, not a repair API.
         latch.unlink()
         with self.assertRaises(journal.GuardedHotelJournalError):
             self.open()

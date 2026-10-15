@@ -277,7 +277,8 @@ class GuardedHotelInitializationJournal:
         for mode, name in LATCHES.items():
             if name in names:
                 value = self._read(directory, name)
-                _require(set(value) == {'identity', 'intent'} and value['identity'] == self._identity(),
+                _require(set(value) == {'identity', 'intent'}
+                         and _canonical(value['identity']) == _canonical(self._identity()),
                          'Hotel dispatch latch belongs to another plan or attempt.')
                 latches[mode] = value
         for index, mode in ((2, 'initialize-empty'), (4, 'verify')):

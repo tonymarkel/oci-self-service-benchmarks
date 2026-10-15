@@ -1,6 +1,6 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-15: **published artifacts, support-only K3s staging, and an additive offline Hotel initialization recipe; not public benchmarks**.
+Status, 2026-10-15: **published artifacts, support-only K3s staging, and separate guarded Hotel source/image boundaries; not public benchmarks**.
 Social Network is still the only released distributed workload. The audited
 foundations now have drift-checked application/frontend, initializer, and
 load-driver preparation tools, plus an explicit native publication pipeline.
@@ -602,7 +602,7 @@ cross-database ownership. The published v1 recipe, its preparation API, image
 lock adoption and support-only operator remain unchanged.
 
 `scripts/prepare_deathstarbench_hotel_initialization.py` adds a **separate
-recipe not wired into publication or adoption**:
+recipe, not accepted by the original v1 publication/adoption or runtime APIs**:
 `hotel-reservation-guarded-init-native-go-scratch-candidate-v1`. It first
 validates the complete original preparation, retains that input receipt, then
 extracts the eight exact typed Go seed constructors into a pure catalog. Nested
@@ -654,7 +654,7 @@ identity or database access; it emits offline catalog metadata only.
 This is a source/compiled-protocol checkpoint, **not MongoDB, Pod restart or
 application-runtime qualification**. Tests use an in-memory store model; even
 a fully completed set of per-store markers is not an atomic eight-database
-transaction. The new recipe is deliberately not accepted by the current image
+transaction. The new recipe is deliberately not accepted by the original image
 lock factory or support controller, and no web dispatch path calls it. Its
 Python metadata validator grants no runtime authority, and self-reported JSON
 alone cannot prove that a particular binary ran.
@@ -681,8 +681,8 @@ initializer write is executed in CI. Example source-only preparation:
   --output /absolute/path/to/new-hotel-initialization-output
 ```
 
-The next reviewed slice must explicitly select, publish, smoke-test and adopt
-the **new** recipe rather than rewriting the v1 lock. Subsequent execution
+The separate image checkpoint below explicitly selects, publishes, smoke-tests
+and adopts the **new** recipe rather than rewriting the v1 lock. Subsequent execution
 needs a run/cluster/namespace/storage/Pod-bound controller, durable response-loss
 reconciliation and global prestart verification. Consul registration/restart
 health, ignored preload errors, atomic reservation capacity/authentication,
@@ -690,6 +690,56 @@ semantic transactions and a separate post-warmup dataset epoch remain open.
 Reservations mutate the baseline: this verifier intentionally rejects those
 changes and must not be advertised as general healthy restart recovery.
 Media's dataset rights and runtime gates remain separate and unresolved.
+
+## Separate guarded Hotel image checkpoint
+
+The existing manual publication wrapper has a new explicit
+`hotel-initialization-images` choice; its `load-driver` default and all original
+routes are unchanged. The reusable guarded workflow builds only the new Hotel
+app/initializer image, natively on `ubuntu-24.04` and `ubuntu-24.04-arm`, without
+QEMU. Unique `guard-init-6ecb097-<run>-<attempt>` tags use the existing public
+Hotel app repository; old tags, digests and v1 locks are not rewritten. Media
+and Social Network are not rebuilt.
+
+Before registry observation, the source boundary independently reconstructs
+the complete guarded preparation from the audited Git checkout. It compares
+the full tree, modes, licenses, retained v1 receipt and manifest while holding
+no-follow file descriptors and detecting input changes. Historical receipt
+hashes alone are not a substitute for this reconstruction. The exact reviewed
+Hotel v1 lock/publication from run `38414696606` are freshly adopted through the
+original factory; its fixed x86 support and load-driver images are reused, not
+rebuilt or silently replaced.
+
+Each native runner pulls the exact app platform manifest, validates its raw
+registry config and local config identity, and inspects a stopped container's
+filesystem without extracting it onto the host. All eleven binaries must be
+static native ELF64 executables, with exact baked config/license inventories
+and no embedded private keys or mutable runtime clone commands. Hardened
+containers then execute only the pure metadata option and ordinary unbound
+startup refusal: no network, read-only filesystem, non-root user, no added
+capabilities, bounded memory/processes/output/deadlines and owned-container
+cleanup. The upstream TLS-disabled informational event is accepted narrowly;
+other unexpected logs fail the check. Every command on both architectures
+must attest identical complete source-bound dataset metadata.
+
+Assembly validates both original native receipts and fresh registry bytes
+before publishing a multi-platform index. The new
+`GuardedHotelArtifactBinding` is a separate immutable artifact-only type: it
+cannot be converted to the existing candidate runtime plan and has no runtime
+manifest API. Adoption rechecks source reconstruction, native receipts, exact
+index membership/config bytes and the original baseline. Serialized evidence
+and CI smoke are observations, not signed binary-build provenance or permission
+to initialize a database.
+
+Separate fresh native jobs repeat the exact app pull and offline smoke with
+an empty Docker client configuration and no supplied registry credentials.
+This is **Docker-client isolation only**, not independent full-layer download,
+proxy independence or proof of absent daemon/host credentials. The general
+`anonymous_pull_qualified` gate remains false; support/driver layers are not
+reexecuted by these jobs. No cloud resources, MongoDB processes, K3s workloads,
+dataset writes, application services or benchmark traffic are started by this
+pipeline. All initialization, runtime, measurement and public-release gates
+remain closed. It does not change support-stage behavior or the public form.
 
 ## Next review slices and release prerequisites
 

@@ -43,7 +43,11 @@ SCHEMA = 'hotel-guarded-initialization-image-smoke-v1'
 SCOPE = 'offline-native-image-attestation-and-unbound-startup-refusal-only-no-mongodb'
 PROGRAMS = tuple(sorted((*original.HOTEL_PROGRAMS, 'hotel-initialize')))
 EXECUTABLES = tuple('/go/bin/' + name for name in PROGRAMS)
-ENVIRONMENT = ['TLS=false', 'GOGC=100', 'MEMC_TIMEOUT=2', 'LOG_LEVEL=INFO']
+# BuildKit materializes Docker's standard Linux PATH for scratch images even
+# though the Dockerfile declares only the four workload variables. No identity
+# or caller-provided PATH is allowed: binaries always use absolute exec paths.
+ENVIRONMENT = ['PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+               'TLS=false', 'GOGC=100', 'MEMC_TIMEOUT=2', 'LOG_LEVEL=INFO']
 METHODS = [
     'verified-registry-manifest-and-config-bytes',
     'stopped-container-export-no-host-extraction',
@@ -204,7 +208,12 @@ def _runtime_config(value):
     _require(value.get('Healthcheck') is None, 'Scratch image must not contain healthcheck commands.')
     for field in ('Hostname', 'Domainname', 'Image', 'StopSignal'):
         _require(value.get(field) is None or value[field] == '', 'Unexpected scratch image ' + field + '.')
-    for field in ('AttachStdin', 'AttachStdout', 'AttachStderr', 'Tty', 'OpenStdin', 'StdinOnce', 'ArgsEscaped', 'NetworkDisabled'):
+    # BuildKit may retain legacy ArgsEscaped=true for Linux JSON CMD. It does
+    # not introduce shell/Windows execution: OCI OS is checked as Linux and
+    # both CMD and the smoke's absolute exec-form entrypoints are exact above.
+    _require('ArgsEscaped' not in value or type(value['ArgsEscaped']) is bool,
+             'Scratch image ArgsEscaped must be an actual boolean.')
+    for field in ('AttachStdin', 'AttachStdout', 'AttachStderr', 'Tty', 'OpenStdin', 'StdinOnce', 'NetworkDisabled'):
         _require(field not in value or value[field] is False, 'Unexpected scratch image ' + field + '.')
     return copy.deepcopy(value)
 

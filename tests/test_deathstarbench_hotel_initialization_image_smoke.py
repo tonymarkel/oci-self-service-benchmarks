@@ -344,6 +344,24 @@ class GuardedHotelSmokeTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(PreparationError):
                 smoke._runtime_config({**self.config, 'Labels': {**labels, **change}})
 
+    def test_actual_linux_buildkit_path_and_legacy_args_escaped_are_narrowly_accepted(self):
+        actual = {**self.config, 'ArgsEscaped': True,
+                  'Labels': {'org.opencontainers.image.source': 'https://github.com/example/repo',
+                             'org.opencontainers.image.revision': 'a' * 40}}
+        self.assertEqual(smoke._runtime_config(actual), actual)
+        self.assertEqual(smoke._runtime_config({**actual, 'ArgsEscaped': False})['ArgsEscaped'], False)
+        for env in (
+            ['PATH=/tmp:/usr/bin', *smoke.ENVIRONMENT[1:]],
+            smoke.ENVIRONMENT[1:],
+            [*smoke.ENVIRONMENT, 'PATH=/tmp'],
+            [*smoke.ENVIRONMENT, 'HOTEL_CANDIDATE_RUN_ID=123456abcdef'],
+        ):
+            with self.subTest(env=env), self.assertRaises(PreparationError):
+                smoke._runtime_config({**actual, 'Env': env})
+        for escaped in (0, 1, 'true', None, [], {}):
+            with self.subTest(args_escaped=escaped), self.assertRaises(PreparationError):
+                smoke._runtime_config({**actual, 'ArgsEscaped': escaped})
+
     def test_only_audited_bounded_tls_event_is_permitted_before_service_main(self):
         smoke._validate_stderr(TLS_LOG, path='/go/bin/frontend', attest=True)
         smoke._validate_stderr(TLS_LOG + smoke._refusal_stderr('/go/bin/frontend'), path='/go/bin/frontend', attest=False)

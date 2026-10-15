@@ -403,6 +403,12 @@ class CandidateK3sTests(_CandidateCaseMixin, unittest.TestCase):
             self.assertNotIn('--prune', command)
             self.assertNotIn("'delete'", command)
 
+    def test_remote_helpers_are_frozen_at_module_import(self):
+        plan, stage, _ = self.case()
+        with patch.object(k3s.inspect, 'getsource', side_effect=AssertionError('runtime source reread')):
+            command = k3s.candidate_support_readiness_command(plan, stage, ROLE_NODES)
+        compile(shlex.split(command)[3], '<frozen-candidate-remote>', 'exec')
+
 
 class CandidateRemoteSimulationTests(_CandidateCaseMixin, unittest.TestCase):
     """Execute generated Python with a fake API and a private test lock path."""

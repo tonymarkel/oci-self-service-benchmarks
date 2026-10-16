@@ -1,6 +1,6 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-16: **published artifacts, support-only K3s staging, guarded Hotel image access, private Hotel baseline-initialization/recovery qualification and separate native startup-safe Hotel image publication/adoption and full-byte access qualification; not public benchmarks**.
+Status, 2026-10-16: **published artifacts, support-only K3s staging, guarded Hotel image access, private Hotel baseline-initialization/recovery qualification, separate native startup-safe Hotel image publication/adoption and full-byte access qualification, and an offline startup runtime/stage foundation; not public benchmarks**.
 Social Network is still the only released distributed workload. The audited
 foundations now have drift-checked application/frontend, initializer, and
 load-driver preparation tools, plus an explicit native publication pipeline.
@@ -1230,6 +1230,65 @@ fingerprint from the reviewed publication. Complete source reconstruction
 passed again after the transfers. All publication and unrelated qualification
 jobs were skipped. Documentation follow-ups do not change the qualified
 implementation, published recipe or selected image identities.
+
+## Offline startup Hotel runtime and gated application stage
+
+`StartupHotelRuntimePlan` separately binds freshly adopted startup artifacts,
+the original process-local `StartupHotelImageAccess` capability, and the exact
+original candidate support plan/stage. Validation rechecks those typed proofs;
+an old guarded binding, copied JSON, previous workflow success or saved
+initialization completion is not a substitute. The new schema records the
+native app manifest/config, startup policy and attestations, source/configuration
+and dataset identities, support/baseline fingerprints, topology, provider,
+run and database storage identity. The older runtime and stage types remain
+unchanged and do not accept these new contracts.
+
+Initialization and startup attempt IDs are distinct nonzero canonical UUIDs.
+Recording an initialization attempt does **not** assert that it ran or completed.
+The plan lists the live cluster, namespace, storage, database and application Pod
+identities that a future controller must independently bind; none has been
+observed or verified by this offline factory. Saved snapshots can only be
+compared with a freshly validated typed plan, never adopted as authority.
+
+`StartupHotelStartupStage` renders exactly ten standalone application Pods,
+including the frontend, behind `deathstarbench.io/hotel-startup-controller`
+scheduling gates. Each uses the selected immutable native startup image and
+audited component command/ports, no runtime arguments, `restartPolicy: Never`
+and a 900-second deadline. This is a bounded qualification template, not a
+released benchmark duration or performance resource contract. No Deployment,
+Job, Service, network rule, volume or RBAC object is added. The bound original
+support stage retains all ten application Deployments at zero replicas; its
+audited service selectors and network policies are not broadened.
+
+Every Pod explicitly supplies `TLS=false` and all six startup identity fields.
+Pod UID and IP are populated through the Kubernetes Downward API; the startup
+binary separately requires a canonical private IPv4 address. These expressions
+are not proof of a live Pod or permitted dispatch.
+Containers are rootless with a read-only root filesystem, dropped capabilities,
+runtime-default seccomp, bounded CPU/memory and no service-account token, host
+namespace, secret, storage mount or injected initializer. No TCP probe is
+presented as semantic readiness. The entire manifest and metadata must match
+deterministic reconstruction; self-rehashing a changed image, environment,
+command, Pod inventory, security setting or scheduling gate does not make it
+acceptable.
+
+There is no API client, apply/start operation, gate-release patch or serialized
+authority constructor in this slice. The tests use real factory adoption and
+synthetic OCI byte verification with explicitly stubbed source/native fixture
+edges; they do not qualify a live cluster or actual application startup. No
+new registry publication, cloud deployment, database execution, application
+service or benchmark run is part of this checkpoint. The existing CI still
+uses isolated Go toolchain containers for offline source checks; these are not
+application startup or live qualification. All initialization, application-start,
+runtime, dataset, measurement, cleanup and public-release gates remain closed.
+
+The next controller slice must freshly verify initialization and support
+continuity, own exact live admission/object identities, durably consume
+single-use dispatch intent, and retain cleanup-only recovery for uncertain
+starts, lost responses, replacements or interruptions. Scheduling gates and
+Pod templates alone cannot satisfy any of those checks. Discovery/registration,
+verified preloads, semantic requests and restart/failure qualification remain
+separate live gates. Hotel and Media are still unavailable in the public form.
 
 ## Next review slices and release prerequisites
 

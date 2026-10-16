@@ -155,6 +155,41 @@ jobs:
             '
           python scripts/validate_deathstarbench_hotel_initialization.py verify --preparation .build/hotel-initialization/first --native-evidence .build/hotel-initialization-attestations --output .build/hotel-initialization-native
 
+      - name: Verify separate Hotel startup-safe preparation twice (no publication)
+        run: |
+          python scripts/validate_deathstarbench_hotel_startup.py prepare --upstream .build/upstream --output .build/hotel-startup
+
+      - name: Test startup-safe Hotel sources without external network or databases
+        run: |
+          mkdir .build/hotel-startup-attestations
+          docker run --rm --network=none --read-only --cap-drop=ALL \
+            --user "$(id -u):$(id -g)" --security-opt=no-new-privileges \
+            --tmpfs /tmp:rw,exec,nosuid,nodev,size=2g \
+            -v "$PWD/.build/hotel-startup/first/app:/workspace:ro" \
+            -v "$PWD/.build/hotel-startup-attestations:/evidence:rw" -w /workspace \
+            -e TLS=false -e CGO_ENABLED=0 -e GO111MODULE=on -e GOTOOLCHAIN=local \
+            -e GOPROXY=off -e GOSUMDB=off -e GOCACHE=/tmp/go-cache -e GOPATH=/tmp/go \
+            docker.io/library/golang:1.21.13-bookworm@sha256:c6a5b9308b3f3095e8fde83c8bf4d68bd101fce606c1a0a1394522542509dda9 \
+            sh -euc '
+              test "$(go env GOARCH)" = amd64
+              go test -mod=vendor -vet=off ./initialization/... ./startup ./registry ./cmd/... ./services/geo ./services/user ./services/recommendation ./services/attractions ./services/reservation ./services/frontend
+              mkdir /tmp/hotel-bin
+              go build -mod=vendor -trimpath -o /tmp/hotel-bin/ ./cmd/...
+              cd /tmp
+              for command in attractions frontend geo profile rate recommendation reservation review search user; do
+                TLS=true /tmp/hotel-bin/$command --candidate-startup-attestation > /evidence/$command.json
+                if /tmp/hotel-bin/$command > /tmp/refused.stdout 2> /tmp/refused.stderr; then
+                  echo "Unexpected unbound startup application success" >&2
+                  exit 1
+                else
+                  code=$?
+                  test "$code" -eq 2
+                fi
+              done
+              /tmp/hotel-bin/hotel-initialize --candidate-initialization-attestation > /evidence/hotel-initialize.json
+            '
+          python scripts/validate_deathstarbench_hotel_startup.py verify --preparation .build/hotel-startup/first --upstream .build/upstream --native-evidence .build/hotel-startup-attestations --output .build/hotel-startup-native
+
       - name: Execute candidate Lua semantics against actual prepared scripts
         env:
           DSB_LUA_BIN: /usr/bin/luajit
@@ -174,6 +209,10 @@ jobs:
             .build/hotel-initialization/first/context-manifest.json
             .build/hotel-initialization-native/native-metadata-validation.json
             .build/hotel-initialization-attestations/*.json
+            .build/hotel-startup/preparation-validation.json
+            .build/hotel-startup/first/context-manifest.json
+            .build/hotel-startup-native/native-metadata-validation.json
+            .build/hotel-startup-attestations/*.json
           if-no-files-found: error
           # Only the receipt paths above, never all hidden build inputs.
           include-hidden-files: true

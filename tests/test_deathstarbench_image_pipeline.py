@@ -606,6 +606,7 @@ class DeathStarBenchImageWorkflowTests(unittest.TestCase):
         self.assertEqual(
             [line.strip().split("uses: ", 1)[1] for line in workflow.splitlines() if "uses: ./" in line],
             [
+                "./.github/workflows/deathstarbench-hotel-startup-images.yml",
                 "./.github/workflows/deathstarbench-hotel-runtime-preflight.yml",
                 "./.github/workflows/deathstarbench-hotel-initialization-images.yml",
                 "./.github/workflows/deathstarbench-candidate-runtime.yml",

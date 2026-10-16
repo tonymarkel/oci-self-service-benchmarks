@@ -1,6 +1,6 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-16: **published artifacts, support-only K3s staging, guarded Hotel image access, private Hotel baseline-initialization/recovery qualification and additive offline startup-safe sources; not public benchmarks**.
+Status, 2026-10-16: **published artifacts, support-only K3s staging, guarded Hotel image access, private Hotel baseline-initialization/recovery qualification and separate native startup-safe Hotel image publication/adoption; not public benchmarks**.
 Social Network is still the only released distributed workload. The audited
 foundations now have drift-checked application/frontend, initializer, and
 load-driver preparation tools, plus an explicit native publication pipeline.
@@ -1091,7 +1091,8 @@ using only in-process stores and loopback HTTP. No real database or cloud runs.
 This recipe intentionally cannot be adopted by the existing candidate or guarded
 image factories. The separate artifact-only publication/adoption path below
 does not change those factories. Further reviewed work must introduce a compatible
-startup stage and cleanup-owning controller, then qualify live service identity, dependency/discovery behavior,
+startup stage and cleanup-owning controller, then qualify live service identity,
+dependency/discovery behavior,
 semantic responses, authentication/reservation correctness and failure/restart
 handling. Existing support-only validators still require all ten applications
 at zero replicas. Hotel and Media remain hidden in the public form.
@@ -1137,14 +1138,38 @@ client configuration and no supplied registry credentials. As before, this is
 **Docker-client isolation only**: it does not prove independent full-layer
 download, proxy independence or absence of host/daemon credentials. The general
 anonymous-pull, initialization, application-start, runtime, measurement, cloud
-and public-release qualification gates remain false. No real database, cloud
-VM, K3s deployment, benchmark traffic or application service is started by this
-workflow. Existing controllers still require zero application replicas.
+and public-release qualification gates remain false. No real database,
+user-account cloud infrastructure, K3s deployment, benchmark traffic or
+application service is started by this workflow. Existing controllers still
+require zero application replicas.
 
 ```sh
 gh workflow run deathstarbench-social-images.yml \
   --ref YOUR_REVIEWED_BRANCH --field publication=hotel-startup-images
 ```
+
+The [retained observation](qualification/deathstarbench-hotel-startup-images-v1.json)
+records successful [workflow run 38909780616](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38909780616)
+from source commit `91fe6fc842a795fe1908bdc6fb352c4fb63af685`. Both native
+builds, assembled index validation and fresh empty-client native jobs passed.
+Every smoke inspected eleven static native binaries, ten startup policy
+attestations, one unchanged initializer attestation and eleven unbound refusals.
+Complete dataset and startup policy metadata matched across x86 and Arm;
+the baseline remains eight stores, eleven collections and 873 documents.
+Both fresh adoptions produced the same artifact fingerprint. Exact source,
+index/platform/config and receipt hashes are retained as historical evidence,
+not future execution authority.
+
+The first attempt, [run 38908290707](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38908290707),
+passed native builds and assembly but stopped in the anonymous comparison:
+the strict JSON encoder could not encode the adopter's frozen mappings.
+The correction detaches only already-verified metadata for comparison and is
+covered by a real immutable-binding integration test; it does not reopen mutable
+publication files or relax source/image/metadata checks. Its earlier unique
+candidate tags and assembled index remain separate and were not counted as
+successful anonymous qualification. The successful observation used a complete
+fresh run, not repaired historical success JSON. Documentation/observation
+follow-ups do not change the published recipe or prepared inputs.
 
 ## Next review slices and release prerequisites
 

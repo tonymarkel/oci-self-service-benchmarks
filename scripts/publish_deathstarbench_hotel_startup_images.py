@@ -21,7 +21,7 @@ from pathlib import Path
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.deathstarbench_candidate_artifacts import adopt_candidate_artifacts
+from app.deathstarbench_candidate_artifacts import adopt_candidate_artifacts, _thaw
 from app.deathstarbench_hotel_initialization import DATASET_REVISION
 from scripts.prepare_deathstarbench_hotel_startup import RECIPE_REVISION, POLICY_REVISION
 from scripts.create_deathstarbench_candidate_image_lock import _read_document
@@ -254,7 +254,7 @@ def anonymous_record(architecture: str, root: Path, upstream: Path,
     smoke = smoke_startup_hotel_image(selected['image'], architecture=machine, preparation=preparation)
     if (smoke['dataset_fingerprint'] != selected['smoke_receipt']['dataset_fingerprint']
             or shared_smoke._canonical(smoke['startup_attestations']) !=
-            shared_smoke._canonical(selected['smoke_receipt']['startup_attestations'])):
+            shared_smoke._canonical(_thaw(selected['smoke_receipt']['startup_attestations']))):
         raise PreparationError('Anonymous native smoke differs from adopted compiled dataset/startup identity.')
     return {
         'schema_version': 1, 'candidate_schema': 'hotel-guarded-startup-anonymous-native-v1',

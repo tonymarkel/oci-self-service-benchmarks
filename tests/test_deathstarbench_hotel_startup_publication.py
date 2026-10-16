@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 from app import deathstarbench_hotel_startup_artifacts as adoption
+from app.deathstarbench_candidate_artifacts import _freeze, _thaw
 from scripts import create_deathstarbench_hotel_startup_image_lock as factory
 from scripts import publish_deathstarbench_hotel_startup_images as publish
 from scripts import smoke_deathstarbench_hotel_startup_images as smoke_module
@@ -47,7 +48,10 @@ class StartupHotelPublicationTests(unittest.TestCase):
                 'build_receipt': {'published_index_image': REPOSITORY + '@sha256:'
                                   + ('c' if architecture == 'amd64' else 'd') * 64},
                 'smoke_receipt': {'dataset_fingerprint': 'sha256:' + '2' * 64,
-                                 'startup_attestations': {}},
+                                 'startup_attestations': {'frontend': {
+                                     'component': 'frontend', 'policy_revision': publish.POLICY_REVISION,
+                                     'config_sha256': 'sha256:' + '7' * 64,
+                                     'database_execution_verified': False}}},
             })
         return records
 
@@ -370,7 +374,9 @@ class StartupHotelPublicationTests(unittest.TestCase):
             config.mkdir()
             selected = copy.deepcopy(records[0])
             adopted = mock.Mock()
-            adopted.app = {'platforms': {'linux/amd64': selected}}
+            adopted.app = _freeze({'platforms': {'linux/amd64': selected}})
+            with self.assertRaises(TypeError):
+                adopted.app['platforms']['linux/amd64']['smoke_receipt']['startup_attestations']['frontend']['component'] = 'changed'
             adopted.metadata.return_value = {'runtime_qualified': False}
 
             def change_after_adoption(*_args, **_kwargs):
@@ -405,7 +411,7 @@ class StartupHotelPublicationTests(unittest.TestCase):
             config = parent / 'docker-config'
             config.mkdir()
             adopted = mock.Mock()
-            adopted.app = {'platforms': {'linux/amd64': copy.deepcopy(records[0])}}
+            adopted.app = _freeze({'platforms': {'linux/amd64': copy.deepcopy(records[0])}})
             with mock.patch.dict(os.environ, {'DOCKER_CONFIG': str(config)}, clear=True), \
                     mock.patch.object(publish, '_native', return_value=('linux/amd64', 'x86_64')), \
                     mock.patch.object(publish, 'baseline', return_value=self.baseline()), \
@@ -428,6 +434,57 @@ class StartupHotelPublicationTests(unittest.TestCase):
                                                  parent / 'baseline', parent / 'publication')
                 self.assertEqual(run.call_count, 2)
                 self.assertEqual(smoke.call_count, 2)
+
+    def test_anonymous_real_factory_binding_accepts_frozen_metadata_but_refuses_identity_or_flag_drift(self):
+        # Keep the existing real adoption fixture's exact proof/freeze behavior:
+        # only source reconstruction and ELF execution are unit substitutes.
+        # This integration caught a real failure that plain dict mocks missed.
+        from tests.test_deathstarbench_hotel_startup_artifacts import StartupHotelArtifactTests
+        helper = StartupHotelArtifactTests()
+        self.addCleanup(helper.doCleanups)
+        data = helper.fixture()
+        for platform in data['publication']['app']['platforms'].values():
+            platform['smoke_receipt']['dataset_fingerprint'] = platform['smoke_receipt']['dataset_attestation']['dataset_fingerprint']
+        binding = helper.adopt(data)
+        self.assertIs(type(binding), adoption.StartupHotelArtifactBinding)
+        original = _thaw(binding.app['platforms']['linux/amd64']['smoke_receipt'])
+        self.assertEqual(set(original['startup_attestations']), set(factory.preparation_module.APPLICATIONS))
+        with self.assertRaises(TypeError):
+            binding.app['platforms']['linux/amd64']['smoke_receipt']['startup_attestations']['frontend']['component'] = 'changed'
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = parent / 'prepared'
+            self.prepared(root)
+            config = parent / 'docker-config'
+            config.mkdir()
+            with mock.patch.dict(os.environ, {'DOCKER_CONFIG': str(config)}, clear=True), \
+                    mock.patch.object(publish, '_native', return_value=('linux/amd64', 'x86_64')), \
+                    mock.patch.object(publish, 'baseline', return_value=data['baseline']), \
+                    mock.patch.object(adoption, 'adopt_startup_hotel_artifacts', return_value=binding), \
+                    mock.patch.object(publish.subprocess, 'run') as run, \
+                    mock.patch.object(smoke_module, 'smoke_startup_hotel_image', return_value=copy.deepcopy(original)) as smoke:
+                proof = publish.anonymous_record('amd64', root, parent / 'upstream',
+                                                parent / 'baseline', parent / 'publication')
+                self.assertEqual(proof['artifact_adoption']['fingerprint'], binding.fingerprint)
+                self.assertEqual(proof['baseline_fingerprint'], data['baseline'].fingerprint)
+                self.assertEqual(proof['smoke_receipt']['startup_attestations'], original['startup_attestations'])
+                for field, value in (
+                    ('component', 'geo'), ('policy_revision', 'different-policy'),
+                    ('config_sha256', 'sha256:' + '9' * 64),
+                    ('database_execution_verified', True), ('namespace', 'different-run'),
+                    ('unit', 'different-unit'),
+                ):
+                    changed = copy.deepcopy(original)
+                    changed['startup_attestations']['frontend'][field] = value
+                    self.assertEqual(changed['dataset_attestation'], original['dataset_attestation'])
+                    smoke.return_value = changed
+                    with self.subTest(field=field), self.assertRaises(PreparationError):
+                        publish.anonymous_record('amd64', root, parent / 'upstream',
+                                                 parent / 'baseline', parent / 'publication')
+                self.assertEqual(run.call_count, 7)
+                self.assertEqual(smoke.call_count, 7)
+                # Comparison must not thaw or otherwise mutate the capability.
+                self.assertEqual(_thaw(binding.app['platforms']['linux/amd64']['smoke_receipt']), original)
 
 
 if __name__ == '__main__':

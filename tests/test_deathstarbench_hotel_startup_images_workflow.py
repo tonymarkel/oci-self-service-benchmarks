@@ -32,7 +32,8 @@ class HotelStartupImagesWorkflowTests(unittest.TestCase):
         self.assertIn('        default: load-driver\n', trigger)
         self.assertEqual(re.findall(r'^          - ([a-z-]+)$', trigger, re.MULTILINE), [
             'load-driver', 'workload-images', 'hotel-images', 'media-images', 'hotel-media-images',
-            'hotel-initialization-images', 'hotel-startup-images', 'hotel-runtime-preflight', 'candidate-runtime-preflight',
+            'hotel-initialization-images', 'hotel-startup-images', 'hotel-startup-image-access',
+            'hotel-runtime-preflight', 'candidate-runtime-preflight',
         ])
         startup = job(self.wrapper, 'publish-startup-hotel')
         self.assertIn("if: github.event.inputs.publication == 'hotel-startup-images'", startup)

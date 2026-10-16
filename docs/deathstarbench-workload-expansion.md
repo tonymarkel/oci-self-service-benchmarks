@@ -1,6 +1,6 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-16: **published artifacts, support-only K3s staging, guarded Hotel image access, private Hotel baseline-initialization/recovery qualification and separate native startup-safe Hotel image publication/adoption; not public benchmarks**.
+Status, 2026-10-16: **published artifacts, support-only K3s staging, guarded Hotel image access, private Hotel baseline-initialization/recovery qualification and separate native startup-safe Hotel image publication/adoption and full-byte access qualification; not public benchmarks**.
 Social Network is still the only released distributed workload. The audited
 foundations now have drift-checked application/frontend, initializer, and
 load-driver preparation tools, plus an explicit native publication pipeline.
@@ -1171,11 +1171,73 @@ successful anonymous qualification. The successful observation used a complete
 fresh run, not repaired historical success JSON. Documentation/observation
 follow-ups do not change the published recipe or prepared inputs.
 
+## Separate startup Hotel anonymous byte-access checkpoint
+
+The explicit manual `hotel-startup-image-access` option selects the read-only
+`deathstarbench-hotel-startup-image-access.yml` reusable workflow. It freshly
+prepares and independently reconstructs the complete startup sources before
+any registry request, then freshly adopts the exact reviewed original baseline
+and startup publication. Publication run IDs and file hashes select historical
+inputs; they are not qualification or execution authority.
+
+`StartupHotelImageAccess` is a distinct factory-only, immutable, process-local
+capability. Its separate proof registry binds the original PID, exact startup
+artifact/source/configuration/dataset identities and all startup attestations.
+The older guarded access, runtime and initialization paths do not accept this
+type or convert it into their own authority. Copying, deserializing, forking or
+editing a receipt cannot recover the original capability.
+
+The new boundary shares only the existing isolated HTTPS reader and strict OCI
+descriptor helpers. It streams and hashes the six exact indexes, seven native
+platform manifests and configurations, and every compressed layer body for
+both Hotel app architectures, four fixed-x86 support images and the x86 load
+driver. Shared layer digests are downloaded again for every bound image;
+local Docker caches are not consulted. Exact byte counts, SHA-256 identities,
+platform selection, fixed host/auth/redirect rules and per-document, layer,
+aggregate and time bounds must all pass. No registry credentials, Docker
+configuration, netrc, cookies or environment proxies are consumed. TLS trust
+and key-log environment overrides are refused. The CLI additionally refuses
+credential and proxy environment variables before each network stage.
+
+After the potentially slow transfers, the CLI independently reconstructs the
+source preparation again and rechecks held baseline/publication/source inputs.
+Changed inputs abort the attempt. Only bounded detached historical JSON or a
+sanitized failure record is retained; exception messages, tokens and signed
+redirect URLs are not written to the failure artifact.
+
+```sh
+gh workflow run deathstarbench-social-images.yml \
+  --ref YOUR_REVIEWED_BRANCH --field publication=hotel-startup-image-access
+```
+
+The narrow `anonymous_all_bound_image_bytes_verified` observation is not a
+Docker/CRI pull, binary smoke, runtime, dataset or startup qualification.
+This workflow executes no containers, initializer, database, Kubernetes,
+application service or benchmark, and provisions no user-account cloud
+infrastructure. All generic anonymous-pull, application-start, initialization,
+runtime, measurement, cloud and public-release gates remain false. A later
+startup controller still needs a compatible stage and cleanup/recovery model;
+every future attempt or resume must freshly obtain its own artifact and access
+capabilities. Hotel and Media remain hidden in the public form.
+
+The [retained observation](qualification/deathstarbench-hotel-startup-image-access-v1.json)
+records successful [run 38932381481](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38932381481)
+from commit `3351feee58c9359ea8a18ad49572d68758424b87`. All seven bound
+platform images, six indexes and 45 compressed layer bodies passed. The layers
+totaled 623,434,963 bytes; metadata and anonymous token responses brought total
+downloaded bytes to 623,520,724. Both app platforms matched the startup artifact
+fingerprint from the reviewed publication. Complete source reconstruction
+passed again after the transfers. All publication and unrelated qualification
+jobs were skipped. Documentation follow-ups do not change the qualified
+implementation, published recipe or selected image identities.
+
 ## Next review slices and release prerequisites
 
 1. **Immutable artifacts and public access.** Hotel now has native guarded
    publication and complete anonymous byte-access observations for all seven
-   bound image platforms. A later runtime attempt must freshly obtain its own
+   bound image platforms. The distinct startup-safe recipe has its own byte-access
+   boundary and cannot reuse the older guarded recipe's capability.
+   A later runtime attempt must freshly obtain its own
    artifact/access capabilities and qualify actual guest/CRI behavior; this
    historical observation cannot replace those checks. Media remains separate.
    Read-only candidate adoption alone is not the access gate.

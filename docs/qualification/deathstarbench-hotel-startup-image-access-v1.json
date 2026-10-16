@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "candidate_schema": "hotel-guarded-startup-image-access-observation-v1",
+  "observed_at": "2026-10-16T16:31:01.307106+00:00",
+  "scope": "full-compressed-startup-image-byte-access-only-no-runtime-executor",
+  "workflow_run": "https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38932381481",
+  "workflow_head_sha": "3351feee58c9359ea8a18ad49572d68758424b87",
+  "workflow_conclusion": "success",
+  "artifact": "hotel-startup-image-access-38932381481-1",
+  "receipt_file": "image-access.json",
+  "receipt_sha256": "806aed01a3581920b3e5b3286386495e54dc0a4982c3e7b91be9511f4d8403fa",
+  "access_fingerprint": "sha256:9c4336b1242b616d7e6957e5e4c7641a3a86b743756fe5d072be88ccca22d70e",
+  "startup_artifact_fingerprint": "sha256:a55b9e06a9e6f0822aece8e09d96bd1e25818848d6e171cbeb787d7df4b7a88f",
+  "startup_lock_sha256": "e22515f1c0f5c99ea08aed42e47e9c56476edcc67615555f075e19fc1066f057",
+  "startup_publication_sha256": "d3d1b192c6590123b13f2e4457b38bac8cb2c956baf2cf374efbf12fdc4d2f40",
+  "recipe_revision": "hotel-reservation-guarded-startup-native-go-scratch-candidate-v1",
+  "policy_revision": "hotel-guarded-startup-source-policy-v1",
+  "source_fingerprint": "sha256:c1748d9114e5ff567cc16939054c14ec5e2184a288c60b4cfdb7bfd733f0f176",
+  "config_sha256": "758febb12cf66301e91755fb4123c4dfca985a6f4a9a461c18b6a9a38bcfddaa",
+  "dataset_fingerprint": "sha256:7d1e07da21efdf9df9cf2062f09546b8eb153c03af69be9e2cb4a635956d6681",
+  "startup_attestations_fingerprint": "sha256:781d9b8c842063769e658eb27c880cea28e3d2f0a89e85a8281706dc8cafe5ac",
+  "source_preparations_regenerated_before_registry_access": true,
+  "original_and_startup_artifacts_freshly_adopted": true,
+  "source_preparations_independently_reconstructed_after_all_bytes": true,
+  "held_source_and_publication_inputs_rechecked_after_all_bytes": true,
+  "anonymous_all_bound_image_bytes_verified": true,
+  "platform_image_count": 7,
+  "index_count": 6,
+  "compressed_layer_body_count": 45,
+  "compressed_layer_bytes": 623434963,
+  "downloaded_bytes_including_metadata_and_anonymous_tokens": 623520724,
+  "shared_layers_downloaded_again": true,
+  "images": {
+    "consul": {
+      "image": "docker.io/hashicorp/consul@sha256:5290ee6943eeac0350f193c8dc52ff27eb1042dd6f39ee597068e779c0ce4a9f",
+      "platform": "linux/amd64", "layers": 9, "compressed_layer_bytes": 82848984
+    },
+    "hotel-reservation@linux/amd64": {
+      "image": "ghcr.io/tonymarkel/deathstarbench-hotel-app@sha256:38b6709e5ad3088c0b58dc853bcec55b5ca25d9b4325fc9eaeae54a6059a2625",
+      "platform": "linux/amd64", "layers": 6, "compressed_layer_bytes": 63567222
+    },
+    "hotel-reservation@linux/arm64": {
+      "image": "ghcr.io/tonymarkel/deathstarbench-hotel-app@sha256:bd1a08ef18652efbc62f04f4464e673adfd7a39eb081817df906ca740b33f3cb",
+      "platform": "linux/arm64", "layers": 6, "compressed_layer_bytes": 58637948
+    },
+    "jaeger": {
+      "image": "docker.io/jaegertracing/all-in-one@sha256:f1f9682412cfca7a2d4c3f612f8eb79216222ca791589b04485d71a0b6bc80b9",
+      "platform": "linux/amd64", "layers": 5, "compressed_layer_bytes": 34260354
+    },
+    "load-driver": {
+      "image": "ghcr.io/tonymarkel/deathstarbench-hotel-load-driver@sha256:911e797bffcabe968d05424d05e4bee0ced19718544e7d44e064881d0f4326b4",
+      "platform": "linux/amd64", "layers": 5, "compressed_layer_bytes": 76098461
+    },
+    "memcached": {
+      "image": "docker.io/library/memcached@sha256:405390d9c38a0e3d59f34088c2265a710da10e5e9f3cdeb4fb5264c829509aa5",
+      "platform": "linux/amd64", "layers": 6, "compressed_layer_bytes": 32894836
+    },
+    "mongodb": {
+      "image": "docker.io/library/mongo@sha256:f7a950ee4a1cc048300cd3b3da3e939974eb8278525101ac917dbed1a3ce3d51",
+      "platform": "linux/amd64", "layers": 8, "compressed_layer_bytes": 275127158
+    }
+  },
+  "client": {
+    "registry_credentials_used": false,
+    "docker_config_loaded": false,
+    "local_image_cache_used": false,
+    "environment_proxy_credentials_used": false,
+    "netrc_loaded": false,
+    "cookies_used": false,
+    "file_writes_performed": false,
+    "tokens_forwarded_to_redirect_targets": false,
+    "anonymous_repository_scoped_bearer_tokens": true
+  },
+  "limitations": [
+    "This records one complete source/registry access attempt, not signed build provenance, image execution, CRI pull qualification or future registry availability.",
+    "The distinct startup process-local access object cannot be restored from this JSON or exchanged for a guarded capability; every later attempt/resume must freshly reconstruct sources, adopt artifacts and obtain its own capability.",
+    "No startup runtime stage or controller was implemented or invoked in this slice. No user-account cloud infrastructure, images, datasets, application services or benchmark traffic were created or run by this qualification.",
+    "Compressed bytes were hashed and size-checked; layers were not unpacked or executed. Native binary smoke remains separate historical publication evidence.",
+    "All generic anonymous-pull, public/runtime/initialization/measurement gates remain closed. Historical workflow artifacts have 90-day retention and cannot replace fresh verification."
+  ],
+  "gates": {
+    "qualification_authority": false,
+    "initializer_authorized": false,
+    "runtime_authorized": false,
+    "database_executed": false,
+    "database_execution_verified": false,
+    "initialization_executed": false,
+    "global_readonly_verification_completed": false,
+    "application_start_allowed": false,
+    "application_started": false,
+    "application_ready": false,
+    "image_execution_performed": false,
+    "dataset_qualified": false,
+    "runtime_qualified": false,
+    "measurement_qualified": false,
+    "cloud_qualified": false,
+    "anonymous_pull_qualified": false,
+    "anonymous_layer_pull_qualified": false,
+    "public_release": false,
+    "released": false,
+    "current_candidate_factory_accepts_recipe": false,
+    "current_guarded_factory_accepts_recipe": false
+  }
+}

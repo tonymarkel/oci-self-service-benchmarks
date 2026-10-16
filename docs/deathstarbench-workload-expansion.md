@@ -1276,8 +1276,10 @@ There is no API client, apply/start operation, gate-release patch or serialized
 authority constructor in this slice. The tests use real factory adoption and
 synthetic OCI byte verification with explicitly stubbed source/native fixture
 edges; they do not qualify a live cluster or actual application startup. No
-new registry publication, cloud deployment, database execution, container or
-benchmark run is part of this checkpoint. All initialization, application-start,
+new registry publication, cloud deployment, database execution, application
+service or benchmark run is part of this checkpoint. The existing CI still
+uses isolated Go toolchain containers for offline source checks; these are not
+application startup or live qualification. All initialization, application-start,
 runtime, dataset, measurement, cleanup and public-release gates remain closed.
 
 The next controller slice must freshly verify initialization and support

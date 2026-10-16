@@ -1,6 +1,6 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-16: **published artifacts, support-only K3s staging, guarded Hotel image access, private Hotel baseline-initialization/recovery qualification and separate native startup-safe Hotel image publication/adoption and byte-access tooling; not public benchmarks**.
+Status, 2026-10-16: **published artifacts, support-only K3s staging, guarded Hotel image access, private Hotel baseline-initialization/recovery qualification and separate native startup-safe Hotel image publication/adoption and full-byte access qualification; not public benchmarks**.
 Social Network is still the only released distributed workload. The audited
 foundations now have drift-checked application/frontend, initializer, and
 load-driver preparation tools, plus an explicit native publication pipeline.
@@ -1219,6 +1219,17 @@ runtime, measurement, cloud and public-release gates remain false. A later
 startup controller still needs a compatible stage and cleanup/recovery model;
 every future attempt or resume must freshly obtain its own artifact and access
 capabilities. Hotel and Media remain hidden in the public form.
+
+The [retained observation](qualification/deathstarbench-hotel-startup-image-access-v1.json)
+records successful [run 38932381481](https://github.com/tonymarkel/oci-self-service-benchmarks/actions/runs/38932381481)
+from commit `3351feee58c9359ea8a18ad49572d68758424b87`. All seven bound
+platform images, six indexes and 45 compressed layer bodies passed. The layers
+totaled 623,434,963 bytes; metadata and anonymous token responses brought total
+downloaded bytes to 623,520,724. Both app platforms matched the startup artifact
+fingerprint from the reviewed publication. Complete source reconstruction
+passed again after the transfers. All publication and unrelated qualification
+jobs were skipped. Documentation follow-ups do not change the qualified
+implementation, published recipe or selected image identities.
 
 ## Next review slices and release prerequisites
 

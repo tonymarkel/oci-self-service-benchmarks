@@ -1,6 +1,6 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-15: **published artifacts, support-only K3s staging, guarded Hotel image access and private Hotel baseline-initialization/recovery qualification; not public benchmarks**.
+Status, 2026-10-16: **published artifacts, support-only K3s staging, guarded Hotel image access, private Hotel baseline-initialization/recovery qualification and additive offline startup-safe sources; not public benchmarks**.
 Social Network is still the only released distributed workload. The audited
 foundations now have drift-checked application/frontend, initializer, and
 load-driver preparation tools, plus an explicit native publication pipeline.
@@ -1031,6 +1031,70 @@ afterward; private audit/recovery evidence and the public key were retained.
 All infrastructure created for these attempts and their separate relay is
 confirmed absent. No TLS roots or global proxy settings were changed, and no
 cloud credentials or private SSH keys were copied to the relay.
+
+## Additive Hotel startup-safe source checkpoint
+
+The guarded initialization images above do not yet authorize application
+startup. A separate recipe,
+`hotel-reservation-guarded-startup-native-go-scratch-candidate-v1`, prepares
+startup-safe application sources without changing any existing recipe,
+published image, support manifest, controller or public workload gate.
+`scripts/prepare_deathstarbench_hotel_startup.py` first reconstructs the pinned
+guarded preparation, retains both base receipts and the unchanged initializer,
+then records exact source patches and fourteen additional/replacement assets.
+It does not build, publish, adopt, scale or execute applications.
+
+The new sources address concrete pre-start hazards:
+
+- All ten commands reject runtime argument overrides, require run/dataset,
+  startup-attempt, component and Pod identity before configuration or network
+  access, and use the explicitly supplied private Pod IP. Configuration is a
+  bounded, regular, non-symlink file with an exact baked hash. Unsupported TLS,
+  proxy, registry, database and tracing environment overrides fail closed.
+  Runtime TLS must be exactly `false`; the only allowed tracing override is
+  the pinned `JAEGER_SAMPLE_RATIO=0.01` default.
+- Geo, user, recommendation and attractions load rows from the same bounded,
+  detached snapshot that passed the existing global baseline verifier. Read
+  and decode errors fail before listener/registration. The baseline deliberately
+  has no cinemas: attractions gets a verified empty collection, not invented
+  seed data. Neither the initializer nor the dataset revision changes.
+- Consul registrations use run/start-attempt/component/Pod-bound IDs and the
+  validated private IP. One bounded catalog GET and at most one registration
+  PUT share a deadline; malformed/ambiguous responses, duplicates and uncertain
+  dispatch consume the local attempt. There is no retry, automatic
+  reregistration or deregistration. This read-before-write check is **not an
+  atomic distributed claim**, health check, restart policy or readiness proof.
+
+`scripts/validate_deathstarbench_hotel_startup.py` prepares twice and compares
+the complete deterministic tree. Its separate verification mode reconstructs
+the supplied tree from the pinned upstream and compares file bytes and modes;
+rehashing a modified receipt cannot establish source provenance. It then checks
+exactly ten compiled startup metadata records plus the unchanged initializer's
+baseline metadata. Those JSON records establish metadata consistency only,
+not execution, image provenance, database state or live application readiness.
+Every qualification/authority flag remains false.
+
+CI runs vendored Go fixtures with the existing digest-pinned native Go 1.21.13
+builder, no external network, a read-only source mount and private temporary
+caches. It compiles all eleven commands, requests pure metadata from a directory
+without configuration, and requires ordinary unbound applications to exit 2.
+The fixtures cover identity/configuration rejection, exact-snapshot loading,
+read/decode failures, duplicate catalog JSON and single-attempt registration,
+using only in-process stores and loopback HTTP. No real database or cloud runs.
+
+```sh
+.venv/bin/python scripts/validate_deathstarbench_hotel_startup.py prepare \
+  --upstream /absolute/path/to/pinned/DeathStarBench \
+  --output /absolute/path/to/new-hotel-startup-output
+```
+
+This recipe intentionally cannot be adopted by the current candidate or guarded
+image factories. Separate reviewed work must publish and freshly adopt the new
+immutable image, introduce a compatible startup stage and cleanup-owning
+controller, then qualify live service identity, dependency/discovery behavior,
+semantic responses, authentication/reservation correctness and failure/restart
+handling. Existing support-only validators still require all ten applications
+at zero replicas. Hotel and Media remain hidden in the public form.
 
 ## Next review slices and release prerequisites
 

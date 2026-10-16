@@ -1,0 +1,294 @@
+name: Native startup-safe Hotel app images (unreleased)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  actions: read
+  packages: read
+
+jobs:
+  native-build:
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Check out exact audited upstream and submodules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: delimitrou/DeathStarBench
+          ref: 6ecb09706140f8730b5385c08f1386c654c3c526
+          path: .build/upstream
+          submodules: recursive
+          persist-credentials: false
+      - name: Verify matching native host and daemon without QEMU
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          case "$ARCHITECTURE" in amd64) expected=x86_64 ;; arm64) expected=aarch64 ;; *) exit 1 ;; esac
+          test "$(uname -m)" = "$expected"
+          test "$(docker info --format '{{.OSType}}')" = linux
+          observed=$(docker info --format '{{.Architecture}}')
+          test "$observed" = "$expected" || test "$observed" = "$ARCHITECTURE"
+      - name: Fetch checksum-pinned source and prepare old and startup contexts
+        run: |
+          set -euo pipefail
+          mkdir -p .build/sources .build/evidence
+          curl --proto '=https' --tlsv1.2 --fail --show-error --location --retry 5 --retry-delay 5 \
+            https://luarocks.org/manifests/lunarmodules/luasocket-3.1.0-1.src.rock \
+            --output .build/sources/luasocket-3.1.0-1.src.rock
+          echo 'f4a207f50a3f99ad65def8e29c54ac9aac668b216476f7fae3fae92413398ed2  .build/sources/luasocket-3.1.0-1.src.rock' | sha256sum --check --strict -
+          python3 scripts/publish_deathstarbench_hotel_startup_images.py prepare \
+            --upstream .build/upstream --luasocket-rock .build/sources/luasocket-3.1.0-1.src.rock --root .build/prepared
+      - name: Download exact reviewed v1 Hotel publication inputs (not authority)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 38414696606
+          name: candidate-lock-hotel_reservation-38414696606-1
+          path: .build/baseline
+      - name: Freshly adopt the complete reviewed Hotel baseline before publishing
+        env:
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/publish_deathstarbench_hotel_startup_images.py baseline \
+            --root .build/prepared --upstream .build/upstream --baseline .build/baseline --output .build/evidence/baseline-adoption.json
+      - name: Derive a unique startup tag in the existing Hotel app repository
+        env:
+          OWNER: ${{ github.repository_owner }}
+          RUN_ID: ${{ github.run_id }}
+          ATTEMPT: ${{ github.run_attempt }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from scripts.publish_deathstarbench_hotel_startup_images import candidate_name
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write('APP_TAG=' + candidate_name(os.environ['OWNER'], os.environ['RUN_ID'], os.environ['ATTEMPT']) + '-' + os.environ['ARCHITECTURE'] + '\n')
+          PY
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish only the native startup app and initializer candidate
+        id: app
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .build/prepared/startup/app
+          file: .build/prepared/startup/app/Dockerfile.candidate
+          platforms: linux/${{ matrix.architecture }}
+          pull: true
+          push: true
+          tags: ${{ env.APP_TAG }}
+          cache-from: type=gha,scope=dsb-hotel-guard-startup-app-${{ matrix.architecture }}
+          cache-to: type=gha,mode=max,scope=dsb-hotel-guard-startup-app-${{ matrix.architecture }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            OCI_SOURCE_REPOSITORY=${{ github.server_url }}/${{ github.repository }}
+            OCI_SOURCE_REVISION=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+      - name: Pull the exact native manifest and perform hardened no-database smoke
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+          APP_DIGEST: ${{ steps.app.outputs.digest }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 scripts/publish_deathstarbench_hotel_startup_images.py record-native \
+            --root .build/prepared --upstream .build/upstream --architecture "$ARCHITECTURE" \
+            --app-index "${APP_TAG%:*}@${APP_DIGEST}" --output .build/evidence/native.json
+      - name: Preserve available source and original native build identities on failure
+        if: always()
+        env:
+          APP_METADATA: ${{ steps.app.outputs.metadata }}
+        run: |
+          set -euo pipefail
+          mkdir -p .build/evidence
+          for part in startup baseline-workload baseline-driver; do
+            if [ -f ".build/prepared/${part}/context-manifest.json" ]; then
+              cp ".build/prepared/${part}/context-manifest.json" ".build/evidence/${part}-preparation.json"
+            fi
+          done
+          python3 - <<'PY'
+          import json, os
+          with open('.build/evidence/build-metadata.json', 'x') as out:
+              json.dump({'candidate_only': True, 'database_executed': False, 'runtime_qualified': False,
+                         'measurement_qualified': False, 'public_release': False,
+                         'build_metadata': json.loads(os.environ['APP_METADATA']) if os.environ.get('APP_METADATA') else None},
+                        out, indent=2, sort_keys=True)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: hotel-startup-native-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/evidence/*.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+
+  assemble:
+    needs: native-build
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: delimitrou/DeathStarBench
+          ref: 6ecb09706140f8730b5385c08f1386c654c3c526
+          path: .build/upstream
+          submodules: recursive
+          persist-credentials: false
+      - name: Independently regenerate exact old and startup preparations
+        run: |
+          set -euo pipefail
+          mkdir -p .build/sources
+          curl --proto '=https' --tlsv1.2 --fail --show-error --location --retry 5 --retry-delay 5 \
+            https://luarocks.org/manifests/lunarmodules/luasocket-3.1.0-1.src.rock \
+            --output .build/sources/luasocket-3.1.0-1.src.rock
+          echo 'f4a207f50a3f99ad65def8e29c54ac9aac668b216476f7fae3fae92413398ed2  .build/sources/luasocket-3.1.0-1.src.rock' | sha256sum --check --strict -
+          python3 scripts/publish_deathstarbench_hotel_startup_images.py prepare \
+            --upstream .build/upstream --luasocket-rock .build/sources/luasocket-3.1.0-1.src.rock --root .build/prepared
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: hotel-startup-native-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/native
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 38414696606
+          name: candidate-lock-hotel_reservation-38414696606-1
+          path: .build/baseline
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Preflight all sources, baseline and native bytes before index publication
+        env:
+          OWNER: ${{ github.repository_owner }}
+          RUN_ID: ${{ github.run_id }}
+          ATTEMPT: ${{ github.run_attempt }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 scripts/publish_deathstarbench_hotel_startup_images.py assemble \
+            --root .build/prepared --upstream .build/upstream --baseline .build/baseline \
+            --records ".build/native/hotel-startup-native-amd64-${RUN_ID}-${ATTEMPT}/native.json" \
+              ".build/native/hotel-startup-native-arm64-${RUN_ID}-${ATTEMPT}/native.json" \
+            --owner "$OWNER" --run-id "$RUN_ID" --attempt "$ATTEMPT" --output .build/publication
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: hotel-startup-lock-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/publication/*.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 90
+
+  anonymous-native:
+    needs: assemble
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: delimitrou/DeathStarBench
+          ref: 6ecb09706140f8730b5385c08f1386c654c3c526
+          path: .build/upstream
+          submodules: recursive
+          persist-credentials: false
+      - name: Regenerate complete preparations for independent read-only adoption
+        run: |
+          set -euo pipefail
+          mkdir -p .build/sources .build/evidence
+          curl --proto '=https' --tlsv1.2 --fail --show-error --location --retry 5 --retry-delay 5 \
+            https://luarocks.org/manifests/lunarmodules/luasocket-3.1.0-1.src.rock \
+            --output .build/sources/luasocket-3.1.0-1.src.rock
+          echo 'f4a207f50a3f99ad65def8e29c54ac9aac668b216476f7fae3fae92413398ed2  .build/sources/luasocket-3.1.0-1.src.rock' | sha256sum --check --strict -
+          python3 scripts/publish_deathstarbench_hotel_startup_images.py prepare \
+            --upstream .build/upstream --luasocket-rock .build/sources/luasocket-3.1.0-1.src.rock --root .build/prepared
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hotel-startup-lock-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/publication
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 38414696606
+          name: candidate-lock-hotel_reservation-38414696606-1
+          path: .build/baseline
+      - name: Anonymous exact native pull and no-database smoke with fresh empty Docker config
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          unset REGISTRY_TOKEN REGISTRY_USERNAME DOCKER_AUTH_CONFIG
+          export DOCKER_CONFIG
+          DOCKER_CONFIG=$(mktemp -d)
+          python3 scripts/publish_deathstarbench_hotel_startup_images.py anonymous-native \
+            --root .build/prepared --upstream .build/upstream --baseline .build/baseline \
+            --publication .build/publication --architecture "$ARCHITECTURE" --output .build/evidence/anonymous-native.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: hotel-startup-anonymous-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/evidence/*.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Record the narrow evidence scope and closed release gates
+        run: |
+          printf '%s\n' 'Startup-safe Hotel app: exact native anonymous pull and offline no-database smoke only.' \
+            'Docker-client isolation only: not independent every-layer download, proxy independence, or absence of host-level credentials.' \
+            'No database initialization, MongoDB execution, application startup, guest runtime, Kubernetes, semantic transaction, measurement, or public release was performed.' \
+            'Original Hotel app, fixed x86 driver, support indexes, Social Network, and Media publications are unchanged.' \
+            'Hotel and Media remain unreleased; startup runtime integration and release review remain mandatory.' >> "$GITHUB_STEP_SUMMARY"

@@ -1088,13 +1088,63 @@ using only in-process stores and loopback HTTP. No real database or cloud runs.
   --output /absolute/path/to/new-hotel-startup-output
 ```
 
-This recipe intentionally cannot be adopted by the current candidate or guarded
-image factories. Separate reviewed work must publish and freshly adopt the new
-immutable image, introduce a compatible startup stage and cleanup-owning
-controller, then qualify live service identity, dependency/discovery behavior,
+This recipe intentionally cannot be adopted by the existing candidate or guarded
+image factories. The separate artifact-only publication/adoption path below
+does not change those factories. Further reviewed work must introduce a compatible
+startup stage and cleanup-owning controller, then qualify live service identity, dependency/discovery behavior,
 semantic responses, authentication/reservation correctness and failure/restart
 handling. Existing support-only validators still require all ten applications
 at zero replicas. Hotel and Media remain hidden in the public form.
+
+## Separate startup-safe Hotel image publication and adoption
+
+The explicit manual `hotel-startup-images` option adds a separate reusable
+workflow, `deathstarbench-hotel-startup-images.yml`. The original default,
+publication routes and guarded initialization workflow remain unchanged. The
+new workflow publishes only the startup-safe Hotel app/initializer recipe,
+natively on x86 and Arm without QEMU, under unique
+`guard-startup-6ecb097-<run>-<attempt>` tags in the existing Hotel repository.
+It does not rewrite older tags, rebuild support/driver images or change Media
+and Social Network.
+
+Before registry observation, the new source boundary independently reconstructs
+the entire startup preparation, including file modes, retained guarded/legacy
+receipts, configuration, initializer, assets and licenses. The exact reviewed
+original Hotel baseline is freshly adopted for its unchanged fixed-x86 support
+and driver images. A historical guarded initialization success is not input
+authority for startup.
+
+Each native image is pulled by its immutable platform manifest and checked
+against raw registry/local configuration bytes. A stopped container export
+must contain exactly eleven static native ELF binaries and the baked
+configuration/license inventory. Hardened no-network containers run ten pure
+startup metadata commands, the unchanged initializer metadata command, and
+eleven ordinary unbound refusal checks. Runtime configuration, output,
+deadlines, resource limits and exact owned-container cleanup are checked.
+Metadata commands must emit no unexpected stderr; the old smoke validator is
+not relaxed to accept the new recipe.
+
+Assembly checks both original native indexes, source-bound receipts and fresh
+registry bytes before writing the multi-platform index. New locks also bind
+the startup policy and config identity. `StartupHotelArtifactBinding` is a
+distinct frozen factory-only artifact identity, with no runtime manifest,
+serialized authority constructor or conversion to current candidate/guarded
+bindings. Source receipts and CI observations are not signed binary-build
+provenance or permission to initialize, start or qualify an application.
+
+Fresh native jobs repeat adoption, pull and offline smoke with an empty Docker
+client configuration and no supplied registry credentials. As before, this is
+**Docker-client isolation only**: it does not prove independent full-layer
+download, proxy independence or absence of host/daemon credentials. The general
+anonymous-pull, initialization, application-start, runtime, measurement, cloud
+and public-release qualification gates remain false. No real database, cloud
+VM, K3s deployment, benchmark traffic or application service is started by this
+workflow. Existing controllers still require zero application replicas.
+
+```sh
+gh workflow run deathstarbench-social-images.yml \
+  --ref YOUR_REVIEWED_BRANCH --field publication=hotel-startup-images
+```
 
 ## Next review slices and release prerequisites
 

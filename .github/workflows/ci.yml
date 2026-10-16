@@ -159,6 +159,14 @@ jobs:
         run: |
           python scripts/validate_deathstarbench_hotel_startup.py prepare --upstream .build/upstream --output .build/hotel-startup
 
+      - name: Reconstruct startup Hotel artifact inputs independently (no registry or release)
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from scripts.deathstarbench_hotel_startup_artifact_common import validate_startup_preparation
+          validate_startup_preparation(Path('.build/hotel-startup/first'), Path('.build/upstream'))
+          PY
+
       - name: Test startup-safe Hotel sources without external network or databases
         run: |
           mkdir .build/hotel-startup-attestations

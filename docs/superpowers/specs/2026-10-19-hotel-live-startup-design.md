@@ -2,7 +2,7 @@
 
 Date: 2026-10-19
 
-Status: revised after scope review; performance-only direction approved, revised written-spec review pending.
+Status: revised written specification approved by the user on 2026-10-19; implementation-plan review is next.
 
 Foundation: merged PR #42, commit `444f42641ebac9b7314484ec50aca54e24e18512`.
 

@@ -36,6 +36,17 @@ Consul node UUID is unrelated to Kubernetes Pod UID and is never equated to it.
 The pinned Consul dev default advertises Node Address=127.0.0.1, not the HTTP
 Pod IP. Trusted observer routing and exact Pod hostname bind this local agent:
 https://github.com/hashicorp/consul/blob/v1.20.5/agent/config/default.go
+
+Endpoint/Consul validators default to strict complete joins. Explicit
+allow_pending=True permits only validated asynchronous publication lag, never
+execution/readiness authority. Endpoint rows then add publication_pending;
+Consul adds a sorted publication_pending backend component list and excludes
+partial joins or Pending-Pod publications from backend_registrations. Missing
+Pod IP/node permits only absent publication, never adopting a presented row.
+Callers must separately reject regression after previously confirmed joins.
+Pinned-version endpoint conditions/placeholder source:
+https://github.com/kubernetes/kubernetes/blob/v1.36.4/staging/src/k8s.io/endpointslice/utils.go
+https://github.com/kubernetes/kubernetes/blob/v1.36.4/staging/src/k8s.io/endpointslice/reconciler.go
 """
 
 from __future__ import annotations
@@ -107,6 +118,16 @@ def _ip(value):
     _require(type(value) is str and str(address) == value
              and address in ipaddress.ip_network('10.42.0.0/16'), 'The exact private K3s Pod IP is required.')
     return value
+
+
+def _publication_binding_known(pod):
+    """Validate every currently known binding; missing facts prove no publication."""
+    address, node = pod.get('pod_ip'), pod.get('node_name')
+    if address not in (None, ''):
+        _ip(address)
+    if node not in (None, ''):
+        _require(type(node) is str and bool(node), 'Publication Pod node binding is malformed.')
+    return address not in (None, '') and node not in (None, '')
 
 
 def _defaults(actual, desired, defaults):
@@ -263,12 +284,14 @@ def validate_startup_hotel_admitted_pod(pod: dict, approved: dict, role_nodes: d
 
 @_boundary
 def validate_startup_hotel_endpoints(slices: list[dict], services: list[dict],
-                                   support_pods: list[dict], startup_pods: dict[str, dict]) -> dict:
+                                   support_pods: list[dict], startup_pods: dict[str, dict], *,
+                                   allow_pending: bool = False) -> dict:
     """Join each complete Service inventory to one exact live Pod or an empty placeholder."""
+    _require(type(allow_pending) is bool, 'Publication pending mode must be explicit boolean.')
     slices, services, support_pods, startup_pods = _copy([slices, services, support_pods, startup_pods])
     components, _ = validate_candidate_assets('hotel_reservation')
     support_names = {item['name'] for item in components if item['role'] != 'application'}
-    targets, target_labels = {}, {}
+    targets, target_labels, pending_eligible, bound = {}, {}, set(), {}
     for pod in _list(support_pods):
         metadata = _map(pod['metadata'])
         component = metadata['labels']['app.kubernetes.io/component']
@@ -284,7 +307,12 @@ def validate_startup_hotel_endpoints(slices: list[dict], services: list[dict],
     _same(set(targets), support_names, 'Complete support endpoint Pod inventory')
     for component, pod in _map(startup_pods).items():
         _require(component in APPLICATIONS and pod['component'] == component, 'Startup endpoint component drifted.')
-        if pod.get('state') == 'running':
+        if allow_pending and pod.get('released') is True and pod.get('state') in ('pending', 'running'):
+            pending_eligible.add(component)
+            bound[component] = _publication_binding_known(pod)
+            _require(pod['state'] != 'running' or bound[component],
+                     'Running endpoint Pod lacks a proven IP/node binding.')
+        if pod.get('state') == 'running' or component in pending_eligible:
             targets[component] = _map(pod)
             target_labels[component] = pod['pod']['metadata']['labels']
     service_map = {}
@@ -297,8 +325,13 @@ def validate_startup_hotel_endpoints(slices: list[dict], services: list[dict],
                  'Startup Service inventory drifted.')
         service_map[name] = service
     _same(set(service_map), set(targets) | set(APPLICATIONS), 'Complete startup Service inventory')
+    for component, target in targets.items():
+        support._uid(target['pod_uid'], 'Endpoint Pod')
+        _require(target.get('pod_ip') not in (None, '') or component in pending_eligible
+                 and target.get('state') == 'pending', 'Endpoint Pod IP is missing.')
+    known_ips = [_ip(p['pod_ip']) for p in targets.values() if p.get('pod_ip') not in (None, '')]
     _require(len({p['pod_uid'] for p in targets.values()}) == len(targets)
-             and len({_ip(p['pod_ip']) for p in targets.values()}) == len(targets), 'Pod UID/IP inventory is not unique.')
+             and len(set(known_ips)) == len(known_ips), 'Pod UID/IP inventory is not unique.')
     result, slice_uids = {}, set()
     for item in _list(slices):
         metadata = _map(item['metadata'])
@@ -318,6 +351,8 @@ def validate_startup_hotel_endpoints(slices: list[dict], services: list[dict],
               'EndpointSlice exact Service owner')
         row = {'service_uid': service['metadata']['uid'], 'endpoint_slice_uid': metadata['uid'],
                'pod_uid': None, 'pod_ip': None, 'pod_name': None, 'node_name': None}
+        if allow_pending:
+            row['publication_pending'] = False
         if name not in targets:
             _require(item.get('endpoints') in (None, []) and item.get('ports') in (None, []),
                      'A not-running startup component has an endpoint.')
@@ -329,24 +364,38 @@ def validate_startup_hotel_endpoints(slices: list[dict], services: list[dict],
             support._uid(target['pod_uid'], 'Endpoint Pod')
             expected_ports = [{'name': p.get('name', ''), 'port': p['targetPort'], 'protocol': p.get('protocol', 'TCP')}
                               for p in service['spec']['ports']]
-            ports = _list(item.get('ports'))
-            _require(all(type(p) is dict and set(p) == {'name', 'port', 'protocol'}
-                         and type(p['port']) is int for p in ports), 'EndpointSlice ports are malformed.')
-            _same(sorted(ports, key=lambda p: p['name']), sorted(expected_ports, key=lambda p: p['name']),
-                  'EndpointSlice complete port inventory')
-            endpoints = _list(item.get('endpoints'))
-            _require(len(endpoints) == 1, 'Exactly one live endpoint per Service is required.')
-            endpoint = _map(endpoints[0])
-            _same(endpoint.get('addresses'), [target['pod_ip']], 'Endpoint exact Pod IP')
-            _same(endpoint.get('nodeName'), target['node_name'], 'Endpoint exact Pod node')
-            conditions = _map(endpoint.get('conditions'))
-            _require(conditions.get('ready') is True and conditions.get('serving', True) is True
-                     and conditions.get('terminating', False) is False, 'Endpoint is not ready and serving.')
-            reference = _copy(_map(endpoint.get('targetRef')))
-            reference.setdefault('apiVersion', 'v1')
-            _same(reference, {'apiVersion': 'v1', 'kind': 'Pod', 'namespace': NAMESPACE,
-                             'name': target['pod_name'], 'uid': target['pod_uid']}, 'Endpoint exact Pod target')
-            row.update({key: target[key] for key in ('pod_uid', 'pod_ip', 'pod_name', 'node_name')})
+            empty_pending = name in pending_eligible and item.get('endpoints') in (None, [])
+            if not empty_pending or item.get('ports') not in (None, []):
+                ports = _list(item.get('ports'))
+                _require(all(type(p) is dict and set(p) == {'name', 'port', 'protocol'}
+                             and type(p['port']) is int for p in ports), 'EndpointSlice ports are malformed.')
+                _same(sorted(ports, key=lambda p: p['name']), sorted(expected_ports, key=lambda p: p['name']),
+                      'EndpointSlice complete port inventory')
+            if empty_pending:
+                row['publication_pending'] = True
+            else:
+                endpoints = _list(item.get('endpoints'))
+                _require(len(endpoints) == 1, 'Exactly one live endpoint per Service is required.')
+                if name in pending_eligible:
+                    _require(bound[name], 'Presented endpoint lacks a proven Pod IP/node binding.')
+                endpoint = _map(endpoints[0])
+                _same(endpoint.get('addresses'), [target['pod_ip']], 'Endpoint exact Pod IP')
+                _same(endpoint.get('nodeName'), target['node_name'], 'Endpoint exact Pod node')
+                conditions = _map(endpoint.get('conditions'))
+                if name in pending_eligible and conditions.get('ready') is False:
+                    _same(conditions, {'ready': False, 'serving': False, 'terminating': False},
+                          'Exact nonterminating pending endpoint conditions')
+                    row['publication_pending'] = True
+                else:
+                    _require(conditions.get('ready') is True and conditions.get('serving', True) is True
+                             and conditions.get('terminating', False) is False, 'Endpoint is not ready and serving.')
+                reference = _copy(_map(endpoint.get('targetRef')))
+                reference.setdefault('apiVersion', 'v1')
+                _same(reference, {'apiVersion': 'v1', 'kind': 'Pod', 'namespace': NAMESPACE,
+                                 'name': target['pod_name'], 'uid': target['pod_uid']}, 'Endpoint exact Pod target')
+                row.update({key: target[key] for key in ('pod_uid', 'pod_ip', 'pod_name', 'node_name')})
+                if name in pending_eligible and target['state'] != 'running':
+                    row['publication_pending'] = True
         result[name] = row
     _same(set(result), set(service_map), 'Complete EndpointSlice inventory')
     return result
@@ -425,13 +474,17 @@ def validate_startup_hotel_cri_evidence(evidence: dict, plan: StartupHotelRuntim
 @_boundary
 def validate_startup_hotel_consul_identity(evidence: dict, plan: StartupHotelRuntimePlan,
                                          pods: dict[str, dict], started_components: tuple[str, ...],
-                                         consul_execution: dict) -> dict:
+                                         consul_execution: dict, *, allow_pending: bool = False) -> dict:
     """Require exact backend IDs and one separately bound intrinsic Consul server."""
+    _require(type(allow_pending) is bool, 'Publication pending mode must be explicit boolean.')
     evidence, snapshot = _observation(evidence, plan, CONSUL_SCHEMA,
                                       {'agent_services', 'catalog_services', 'catalog_entries'})
     pods = _pods(pods, plan)
     _require(type(started_components) is tuple and len(set(started_components)) == len(started_components)
-             and all(name in APPLICATIONS and name in pods and pods[name]['state'] == 'running'
+             and all(name in APPLICATIONS and name in pods
+                     and (not allow_pending or pods[name].get('released') is True)
+                     and (pods[name]['state'] == 'running' or allow_pending and pods[name]['state'] == 'pending'
+                          and pods[name].get('released') is True)
                      for name in started_components), 'Started component execution inventory drifted.')
     execution = _map(consul_execution)
     support._uid(execution['pod_uid'], 'Consul execution Pod')
@@ -447,8 +500,12 @@ def validate_startup_hotel_consul_identity(evidence: dict, plan: StartupHotelRun
     backends = set(started_components) - {'frontend'}
     catalog_names = {'consul'} | {'srv-' + component for component in backends}
     catalog, entries = _map(evidence['catalog_services']), _map(evidence['catalog_entries'])
-    _same(set(catalog), catalog_names, 'Complete Consul catalog service inventory')
-    _same(set(entries), catalog_names, 'Complete Consul catalog entries')
+    if allow_pending:
+        _require('consul' in catalog and 'consul' in entries and set(catalog) <= catalog_names
+                 and set(entries) <= catalog_names, 'Unexpected or missing intrinsic Consul catalog inventory.')
+    else:
+        _same(set(catalog), catalog_names, 'Complete Consul catalog service inventory')
+        _same(set(entries), catalog_names, 'Complete Consul catalog entries')
     for tags in catalog.values():
         _same(tags, [], 'Consul catalog service tags')
     intrinsic = _list(entries['consul'])
@@ -460,7 +517,7 @@ def validate_startup_hotel_consul_identity(evidence: dict, plan: StartupHotelRun
         _same(intrinsic.get(key), wanted, 'Intrinsic Consul server binding')
     _require(type(intrinsic.get('ServicePort')) is int and intrinsic.get('ServiceKind', '') == ''
              and intrinsic.get('ServiceTags') in (None, []), 'Intrinsic Consul port, kind or tags drifted.')
-    registrations = {}
+    registrations, pending = {}, []
     ports = {'profile': 8081, 'search': 8082, 'geo': 8083, 'rate': 8084, 'recommendation': 8085,
              'user': 8086, 'reservation': 8087, 'review': 8088, 'attractions': 8089}
     agent = _map(evidence['agent_services'])
@@ -471,25 +528,43 @@ def validate_startup_hotel_consul_identity(evidence: dict, plan: StartupHotelRun
         expected_ids.add(service_id)
         meta = {'run_id': plan.run_id, 'startup_attempt_id': plan.startup_attempt_id,
                 'component': component, 'pod_uid': pod['pod_uid'], 'contract_sha256': snapshot['dataset_fingerprint']}
-        service = _map(agent.get(service_id))
-        for key, wanted in {'ID': service_id, 'Service': 'srv-' + component, 'Address': pod['pod_ip'],
-                            'Port': ports[component], 'Meta': meta}.items():
-            _same(service.get(key), wanted, 'Consul exact agent registration')
-        _require(type(service.get('Port')) is int, 'Consul backend port is malformed.')
-        _require(service.get('Tags') in (None, []) and service.get('Kind', '') == '', 'Unexpected Consul service tags/kind.')
-        rows = _list(entries['srv-' + component])
-        _require(len(rows) == 1, 'Exactly one catalog registration per backend is required.')
-        row = _map(rows[0])
-        for key, wanted in {**node, 'ServiceID': service_id, 'ServiceName': 'srv-' + component,
-                            'ServiceAddress': pod['pod_ip'], 'ServicePort': ports[component], 'ServiceMeta': meta}.items():
-            _same(row.get(key), wanted, 'Consul exact backend catalog binding')
-        _require(type(row.get('ServicePort')) is int and row.get('ServiceTags') in (None, [])
-                 and row.get('ServiceKind', '') == '', 'Unexpected backend catalog port/tags/kind.')
-        registrations[component] = {'service_id': service_id, 'pod_uid': pod['pod_uid'],
-                                     'pod_ip': pod['pod_ip'], 'port': ports[component]}
-    _same(set(agent), expected_ids, 'Complete Consul agent registration inventory')
-    return {'backend_registrations': registrations, 'frontend_registrations': 0,
+        agent_present = service_id in agent
+        rows = _list(entries.get('srv-' + component, []) if allow_pending else entries['srv-' + component])
+        _require(len(rows) <= 1 if allow_pending else len(rows) == 1,
+                 'Exactly one catalog registration per backend is required.')
+        if allow_pending:
+            binding_known = _publication_binding_known(pod)
+            _require(not (agent_present or rows) or binding_known,
+                     'Presented registration lacks a proven Pod IP/node binding.')
+        if agent_present or not allow_pending:
+            service = _map(agent.get(service_id))
+            for key, wanted in {'ID': service_id, 'Service': 'srv-' + component, 'Address': pod['pod_ip'],
+                                'Port': ports[component], 'Meta': meta}.items():
+                _same(service.get(key), wanted, 'Consul exact agent registration')
+            _require(type(service.get('Port')) is int, 'Consul backend port is malformed.')
+            _require(service.get('Tags') in (None, []) and service.get('Kind', '') == '', 'Unexpected Consul service tags/kind.')
+        if rows:
+            row = _map(rows[0])
+            for key, wanted in {**node, 'ServiceID': service_id, 'ServiceName': 'srv-' + component,
+                                'ServiceAddress': pod['pod_ip'], 'ServicePort': ports[component], 'ServiceMeta': meta}.items():
+                _same(row.get(key), wanted, 'Consul exact backend catalog binding')
+            _require(type(row.get('ServicePort')) is int and row.get('ServiceTags') in (None, [])
+                     and row.get('ServiceKind', '') == '', 'Unexpected backend catalog port/tags/kind.')
+        if allow_pending and (not agent_present or not rows or 'srv-' + component not in catalog
+                              or pod['state'] != 'running'):
+            pending.append(component)
+        else:
+            registrations[component] = {'service_id': service_id, 'pod_uid': pod['pod_uid'],
+                                         'pod_ip': pod['pod_ip'], 'port': ports[component]}
+    if allow_pending:
+        _require(set(agent) <= expected_ids, 'Unexpected Consul agent registration inventory.')
+    else:
+        _same(set(agent), expected_ids, 'Complete Consul agent registration inventory')
+    result = {'backend_registrations': registrations, 'frontend_registrations': 0,
             'intrinsic_consul': {**{key: execution[key] for key in
                                    ('pod_name', 'pod_uid', 'pod_ip', 'node_name', 'container_id')},
                                 'service_id': 'consul', 'port': 8300, 'datacenter': 'dc1',
                                 'catalog_node_address': '127.0.0.1'}}
+    if allow_pending:
+        result['publication_pending'] = pending
+    return result

@@ -63,6 +63,18 @@ class StartupIdentityTests(StartupRuntimeFixtureMixin, unittest.TestCase):
         return {name: self.execution(name, number)[1]
                 for number, name in enumerate(staging.APPLICATIONS, 20)}
 
+    def pending(self, *, address='10.42.1.22', node=ROLES['application']):
+        pod = self.admitted('geo')
+        pinned = identity.validate_startup_hotel_admitted_pod(pod, self.stage.pod('geo'), ROLES)
+        pod['metadata'].update(resourceVersion='124', generation=2)
+        pod['spec'].pop('schedulingGates')
+        if node is not None:
+            pod['spec']['nodeName'] = node
+        if address is not None:
+            pod['status'].update(podIP=address, podIPs=[{'ip': address}])
+        return identity.validate_startup_hotel_admitted_pod(
+            pod, self.stage.pod('geo'), ROLES, pinned=pinned, released=True)
+
     def cri(self, pods, architecture='arm64'):
         config = self.runtime.snapshot()['application_config_digest']
         entries = []
@@ -396,6 +408,212 @@ class StartupIdentityTests(StartupRuntimeFixtureMixin, unittest.TestCase):
         for pod in (None, {}, {'metadata': []}, {'spec': {'containers': [None]}}):
             with self.subTest(pod=pod), self.assertRaises(identity.StartupHotelIdentityError):
                 identity.validate_startup_hotel_admitted_pod(pod, self.stage.pod('geo'), ROLES)
+
+    def test_endpoint_publication_lag_requires_explicit_opt_in(self):
+        # Catches failing healthy controller lag or silently weakening strict default success/output.
+        pods = self.executions()
+        slices, services, support, _ = self.network(pods)
+        strict = identity.validate_startup_hotel_endpoints(slices, services, support, pods)
+        observed = identity.validate_startup_hotel_endpoints(slices, services, support, pods, allow_pending=True)
+        self.assertTrue(all(row['publication_pending'] is False for row in observed.values()))
+        self.assertEqual({name: {k: v for k, v in row.items() if k != 'publication_pending'}
+                          for name, row in observed.items()}, strict)
+        for form in ('null', 'empty', 'full-ports', 'not-ready'):
+            changed = copy.deepcopy(slices)
+            geo = next(s for s in changed if s['metadata']['labels']['kubernetes.io/service-name'] == 'geo')
+            if form == 'not-ready':
+                geo['endpoints'][0]['conditions'] = {'ready': False, 'serving': False, 'terminating': False}
+            else:
+                geo['endpoints'] = None if form == 'null' else []
+                if form != 'full-ports':
+                    geo['ports'] = None if form == 'null' else []
+            with self.subTest(form=form):
+                with self.assertRaises(identity.StartupHotelIdentityError):
+                    identity.validate_startup_hotel_endpoints(changed, services, support, pods)
+                observed = identity.validate_startup_hotel_endpoints(
+                    changed, services, support, pods, allow_pending=True)
+                self.assertIs(observed['geo']['publication_pending'], True)
+                self.assertIs(observed['user']['publication_pending'], False)
+                self.assertEqual(observed['geo']['pod_uid'], pods['geo']['pod_uid'] if form == 'not-ready' else None)
+
+    def test_pending_endpoint_does_not_hide_present_drift_or_support_failure(self):
+        # Catches returning on the first pending component before validating hostile evidence elsewhere.
+        pods = self.executions()
+        slices, services, support, _ = self.network(pods)
+        mutations = (
+            ('geo', lambda s: s['metadata']['ownerReferences'][0].update(uid=uid(99))),
+            ('geo', lambda s: s.update(ports=[{'name': 'grpc', 'port': 9999, 'protocol': 'TCP'}])),
+            ('user', lambda s: s['endpoints'][0]['targetRef'].update(uid=uid(99))),
+            ('mongodb-user', lambda s: s['endpoints'][0]['conditions'].update(ready=False, serving=False)),
+            ('mongodb-user', lambda s: s.update(endpoints=[], ports=[])),
+        )
+        for name, mutate in mutations:
+            changed = copy.deepcopy(slices)
+            geo = next(s for s in changed if s['metadata']['labels']['kubernetes.io/service-name'] == 'geo')
+            geo.update(ports=[], endpoints=[])
+            mutate(next(s for s in changed if s['metadata']['labels']['kubernetes.io/service-name'] == name))
+            with self.subTest(component=name), self.assertRaises(identity.StartupHotelIdentityError):
+                identity.validate_startup_hotel_endpoints(changed, services, support, pods, allow_pending=True)
+        for mutate in (
+            lambda s: s['endpoints'][0].update(addresses=['10.42.1.99']),
+            lambda s: s['endpoints'][0]['targetRef'].update(uid=uid(99)),
+            lambda s: s['endpoints'][0]['conditions'].update(terminating=True),
+            lambda s: s['endpoints'][0]['conditions'].update(serving=True),
+            lambda s: s['endpoints'][0]['conditions'].pop('serving'),
+        ):
+            changed = copy.deepcopy(slices)
+            geo = next(s for s in changed if s['metadata']['labels']['kubernetes.io/service-name'] == 'geo')
+            geo['endpoints'][0]['conditions'] = {'ready': False, 'serving': False, 'terminating': False}
+            mutate(geo)
+            with self.subTest(mutation=mutate), self.assertRaises(identity.StartupHotelIdentityError):
+                identity.validate_startup_hotel_endpoints(changed, services, support, pods, allow_pending=True)
+        changed = copy.deepcopy(slices)
+        changed[0].update(ports=[], endpoints=[])
+        with self.assertRaises(identity.StartupHotelIdentityError):
+            identity.validate_startup_hotel_endpoints(changed + [copy.deepcopy(changed[-1])], services, support, pods,
+                                                      allow_pending=True)
+
+    def test_pending_assigned_pod_publication_never_proves_running(self):
+        # Catches treating an API Pending Pod with assigned IP and publication as proven execution/readiness.
+        pods = self.executions()
+        pods['geo'] = self.pending()
+        slices, services, support, execution = self.network(pods)
+        geo = next(s for s in slices if s['metadata']['labels']['kubernetes.io/service-name'] == 'geo')
+        for ready in (False, True):
+            geo['endpoints'][0]['conditions'] = {'ready': ready, 'serving': ready, 'terminating': False}
+            with self.subTest(ready=ready):
+                result = identity.validate_startup_hotel_endpoints(slices, services, support, pods, allow_pending=True)
+                self.assertIs(result['geo']['publication_pending'], True)
+                self.assertEqual(result['geo']['pod_uid'], pods['geo']['pod_uid'])
+        evidence = self.consul(pods, execution)
+        with self.assertRaises(identity.StartupHotelIdentityError):
+            identity.validate_startup_hotel_consul_identity(evidence, self.runtime, pods, tuple(pods), execution)
+        result = identity.validate_startup_hotel_consul_identity(
+            evidence, self.runtime, pods, tuple(pods), execution, allow_pending=True)
+        self.assertEqual(result['publication_pending'], ['geo'])
+        self.assertNotIn('geo', result['backend_registrations'])
+        self.assertEqual(len(result['backend_registrations']), 8)
+
+    def test_unknown_pending_pod_identity_allows_only_absent_publication(self):
+        # Catches adopting an endpoint/registration address before this Pod's IP/node can be proven.
+        pods = self.executions()
+        slices, services, support, execution = self.network(pods)
+        complete = self.consul(pods, execution)
+        for address, node in ((None, None), ('10.42.1.22', None), (None, ROLES['application'])):
+            pods['geo'] = self.pending(address=address, node=node)
+            changed = copy.deepcopy(slices)
+            geo = next(s for s in changed if s['metadata']['labels']['kubernetes.io/service-name'] == 'geo')
+            geo.update(endpoints=[], ports=[])
+            with self.subTest(address=address, node=node):
+                result = identity.validate_startup_hotel_endpoints(changed, services, support, pods, allow_pending=True)
+                self.assertIs(result['geo']['publication_pending'], True)
+                absent = copy.deepcopy(complete)
+                service_id = next(key for key, value in absent['agent_services'].items() if value['Service'] == 'srv-geo')
+                absent['agent_services'].pop(service_id)
+                absent['catalog_services'].pop('srv-geo')
+                absent['catalog_entries'].pop('srv-geo')
+                result = identity.validate_startup_hotel_consul_identity(
+                    absent, self.runtime, pods, tuple(pods), execution, allow_pending=True)
+                self.assertEqual(result['publication_pending'], ['geo'])
+                with self.assertRaises(identity.StartupHotelIdentityError):
+                    identity.validate_startup_hotel_endpoints(slices, services, support, pods, allow_pending=True)
+                with self.assertRaises(identity.StartupHotelIdentityError):
+                    identity.validate_startup_hotel_consul_identity(
+                        complete, self.runtime, pods, tuple(pods), execution, allow_pending=True)
+
+    def test_consul_publication_channels_can_lag_independently_without_promotion(self):
+        # Catches requiring agent and catalog snapshots to update atomically, or promoting a partial join.
+        pods = self.executions()
+        _, _, _, execution = self.network(pods)
+        evidence = self.consul(pods, execution)
+        strict = identity.validate_startup_hotel_consul_identity(evidence, self.runtime, pods, tuple(pods), execution)
+        observed = identity.validate_startup_hotel_consul_identity(
+            evidence, self.runtime, pods, tuple(pods), execution, allow_pending=True)
+        self.assertEqual(observed.pop('publication_pending'), [])
+        self.assertEqual(observed, strict)
+        service_id = next(key for key, value in evidence['agent_services'].items() if value['Service'] == 'srv-geo')
+        for form in ('missing-agent', 'missing-catalog', 'empty-catalog', 'missing-catalog-name', 'all-missing'):
+            changed = copy.deepcopy(evidence)
+            if form in ('missing-agent', 'all-missing'):
+                changed['agent_services'].pop(service_id)
+            if form in ('missing-catalog', 'all-missing'):
+                changed['catalog_entries'].pop('srv-geo')
+            if form in ('missing-catalog-name', 'all-missing'):
+                changed['catalog_services'].pop('srv-geo')
+            if form == 'empty-catalog':
+                changed['catalog_entries']['srv-geo'] = []
+            with self.subTest(form=form):
+                with self.assertRaises(identity.StartupHotelIdentityError):
+                    identity.validate_startup_hotel_consul_identity(changed, self.runtime, pods, tuple(pods), execution)
+                result = identity.validate_startup_hotel_consul_identity(
+                    changed, self.runtime, pods, tuple(pods), execution, allow_pending=True)
+                self.assertEqual(result['publication_pending'], ['geo'])
+                self.assertNotIn('geo', result['backend_registrations'])
+                self.assertEqual(len(result['backend_registrations']), 8)
+        absent = copy.deepcopy(evidence)
+        absent['agent_services'] = {}
+        absent['catalog_services'] = {'consul': []}
+        absent['catalog_entries'] = {'consul': evidence['catalog_entries']['consul']}
+        result = identity.validate_startup_hotel_consul_identity(
+            absent, self.runtime, pods, tuple(pods), execution, allow_pending=True)
+        self.assertEqual(result['publication_pending'], [
+            'attractions', 'geo', 'profile', 'rate', 'recommendation', 'reservation', 'review', 'search', 'user'])
+        self.assertEqual(result['backend_registrations'], {})
+
+    def test_consul_lag_does_not_hide_any_present_hostile_identity(self):
+        # Catches missing-publication shortcuts that ignore stale, foreign, malformed or intrinsic entries.
+        pods = self.executions()
+        _, _, _, execution = self.network(pods)
+        evidence = self.consul(pods, execution)
+        geo_id = next(key for key, value in evidence['agent_services'].items() if value['Service'] == 'srv-geo')
+        user_id = next(key for key, value in evidence['agent_services'].items() if value['Service'] == 'srv-user')
+        for mutate in (
+            lambda e: e['agent_services'][user_id]['Meta'].update(pod_uid=uid(99)),
+            lambda e: e['catalog_entries']['srv-user'][0].update(ServiceAddress='10.42.1.99'),
+            lambda e: e['catalog_entries']['srv-user'].append(copy.deepcopy(e['catalog_entries']['srv-user'][0])),
+            lambda e: e['catalog_entries']['srv-geo'][0].update(ServicePort=9999),
+            lambda e: e['catalog_services'].update(foreign=[]),
+            lambda e: e['agent_services'].update(foreign={'ID': 'foreign', 'Service': 'foreign'}),
+            lambda e: e['catalog_entries'].update(foreign=[]),
+            lambda e: e['catalog_entries']['consul'].clear(),
+            lambda e: e['catalog_services'].pop('consul'),
+            lambda e: e['catalog_entries']['consul'][0].update(ServicePort=8500),
+        ):
+            changed = copy.deepcopy(evidence)
+            changed['agent_services'].pop(geo_id)
+            mutate(changed)
+            with self.subTest(mutation=mutate), self.assertRaises(identity.StartupHotelIdentityError):
+                identity.validate_startup_hotel_consul_identity(
+                    changed, self.runtime, pods, tuple(pods), execution, allow_pending=True)
+        agent_only = copy.deepcopy(evidence)
+        agent_only['catalog_entries'].pop('srv-geo')
+        agent_only['agent_services'][geo_id]['Meta']['startup_attempt_id'] = uid(99)
+        with self.assertRaises(identity.StartupHotelIdentityError):
+            identity.validate_startup_hotel_consul_identity(
+                agent_only, self.runtime, pods, tuple(pods), execution, allow_pending=True)
+
+    def test_pending_mode_preserves_running_identity_and_release_requirements(self):
+        # Catches treating missing IP on purported Running execution or an unreleased registration as healthy lag.
+        pods = self.executions()
+        slices, services, support, execution = self.network(pods)
+        bad_pods = copy.deepcopy(pods)
+        bad_pods['geo']['pod_ip'] = None
+        changed = copy.deepcopy(slices)
+        geo = next(s for s in changed if s['metadata']['labels']['kubernetes.io/service-name'] == 'geo')
+        geo['endpoints'][0]['addresses'] = [None]
+        with self.subTest(strict=True), self.assertRaises(identity.StartupHotelIdentityError):
+            identity.validate_startup_hotel_endpoints(changed, services, support, bad_pods)
+        geo.update(ports=[], endpoints=[])
+        with self.subTest(running=True), self.assertRaises(identity.StartupHotelIdentityError):
+            identity.validate_startup_hotel_endpoints(changed, services, support, bad_pods, allow_pending=True)
+        evidence = self.consul(pods, execution)
+        geo_id = next(key for key, value in evidence['agent_services'].items() if value['Service'] == 'srv-geo')
+        evidence['agent_services'].pop(geo_id)
+        bad_pods = copy.deepcopy(pods)
+        bad_pods['geo']['released'] = False
+        with self.subTest(unreleased=True), self.assertRaises(identity.StartupHotelIdentityError):
+            identity.validate_startup_hotel_consul_identity(
+                evidence, self.runtime, bad_pods, tuple(pods), execution, allow_pending=True)
 
 
 if __name__ == '__main__':

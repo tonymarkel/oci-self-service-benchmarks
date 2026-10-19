@@ -521,6 +521,39 @@ class StartupIdentityTests(StartupRuntimeFixtureMixin, unittest.TestCase):
                     identity.validate_startup_hotel_consul_identity(
                         complete, self.runtime, pods, tuple(pods), execution, allow_pending=True)
 
+    def test_consul_catalog_name_is_publication_even_without_catalog_rows(self):
+        # Catches accepting a published catalog name without the Pod IP/node needed to bind it.
+        pods = self.executions()
+        _, _, _, execution = self.network(pods)
+        absent = self.consul(pods, execution)
+        service_id = next(key for key, value in absent['agent_services'].items() if value['Service'] == 'srv-geo')
+        absent['agent_services'].pop(service_id)
+        absent['catalog_services'].pop('srv-geo')
+        absent['catalog_entries'].pop('srv-geo')
+        for address, node in ((None, None), ('10.42.1.22', None), (None, ROLES['application'])):
+            pods['geo'] = self.pending(address=address, node=node)
+            with self.subTest(address=address, node=node):
+                result = identity.validate_startup_hotel_consul_identity(
+                    absent, self.runtime, pods, tuple(pods), execution, allow_pending=True)
+                self.assertEqual(result['publication_pending'], ['geo'])
+                self.assertEqual(len(result['backend_registrations']), 8)
+                for entry_present in (False, True):
+                    name_only = copy.deepcopy(absent)
+                    name_only['catalog_services']['srv-geo'] = []
+                    if entry_present:
+                        name_only['catalog_entries']['srv-geo'] = []
+                    with self.subTest(entry_present=entry_present), self.assertRaises(identity.StartupHotelIdentityError):
+                        identity.validate_startup_hotel_consul_identity(
+                            name_only, self.runtime, pods, tuple(pods), execution, allow_pending=True)
+        pods['geo'] = self.pending()
+        result = identity.validate_startup_hotel_consul_identity(
+            name_only, self.runtime, pods, tuple(pods), execution, allow_pending=True)
+        self.assertEqual(result['publication_pending'], ['geo'])
+        self.assertNotIn('geo', result['backend_registrations'])
+        with self.assertRaises(identity.StartupHotelIdentityError):
+            identity.validate_startup_hotel_consul_identity(
+                name_only, self.runtime, pods, tuple(pods), execution)
+
     def test_consul_publication_channels_can_lag_independently_without_promotion(self):
         # Catches requiring agent and catalog snapshots to update atomically, or promoting a partial join.
         pods = self.executions()

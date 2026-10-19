@@ -534,7 +534,7 @@ def validate_startup_hotel_consul_identity(evidence: dict, plan: StartupHotelRun
                  'Exactly one catalog registration per backend is required.')
         if allow_pending:
             binding_known = _publication_binding_known(pod)
-            _require(not (agent_present or rows) or binding_known,
+            _require(not (agent_present or 'srv-' + component in catalog or rows) or binding_known,
                      'Presented registration lacks a proven Pod IP/node binding.')
         if agent_present or not allow_pending:
             service = _map(agent.get(service_id))

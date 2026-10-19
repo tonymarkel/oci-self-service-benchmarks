@@ -1292,6 +1292,18 @@ separate live gates. Hotel and Media are still unavailable in the public form.
 
 ## Next review slices and release prerequisites
 
+Hotel scope update, 2026-10-19: the current
+[Hotel performance-only design](superpowers/specs/2026-10-19-hotel-live-startup-design.md)
+supersedes recovery/resume and deliberate-failure qualification requirements
+for remaining Hotel work below. Runner or application failure fails the whole
+Hotel run; it cannot resume or supply comparison chart metrics. Keep exact
+owned-resource destruction as housekeeping, not workload recovery or a timed
+benchmark phase. Complete functional correctness, uninterrupted warmup and
+measurement, results/comparisons, normal cloud/network validation and public
+UI integration. Do not add a resilience benchmark or a dedicated live
+recovery/fault-injection matrix. Earlier checkpoints remain historical evidence;
+existing Social Network and Media contracts are unchanged by this scope update.
+
 1. **Immutable artifacts and public access.** Hotel now has native guarded
    publication and complete anonymous byte-access observations for all seven
    bound image platforms. The distinct startup-safe recipe has its own byte-access

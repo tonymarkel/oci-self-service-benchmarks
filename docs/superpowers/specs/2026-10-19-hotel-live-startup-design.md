@@ -1,33 +1,70 @@
-# Hotel live startup controller and cleanup/recovery
+# Hotel performance benchmark: live startup and completion scope
 
 Date: 2026-10-19
 
-Status: proposed written specification; conversational design approved, written-spec review pending.
+Status: revised after scope review; performance-only direction approved, revised written-spec review pending.
 
 Foundation: merged PR #42, commit `444f42641ebac9b7314484ec50aca54e24e18512`.
 
 ## Intent and success criteria
 
-Provide a private, cleanup-owning qualification path that initializes a fresh
+Complete Hotel as a performance benchmark for the underlying infrastructure,
+not as a resilience or recovery benchmark. The detailed startup milestone below
+provides a private, cleanup-owning qualification path that initializes a fresh
 Hotel dataset, starts the ten startup-safe application processes under exact
 identity and dispatch controls, records their execution and service identities,
 and independently proves destruction of its owned cloud infrastructure.
 
-A successful invocation means all ten exact processes were observed running
-without restart, the nine backend Consul registrations and all application
+A successful startup invocation means all ten exact processes were observed
+running without restart, the nine backend Consul registrations and all application
 Service endpoints matched those processes, and cleanup completed. It does not
 mean that the application is semantically ready or a benchmark is released.
 The frontend is the tenth application and does not register in Consul.
 
-The user approved a separate private operator, one retained lease across the
-whole lifecycle, durable intent before mutations, no uncertain replay, exact
-owned-resource cleanup, failure-path validation, and closed public gates.
+The user approved a performance-only scope: a runner or application failure
+fails the entire run. There is no execution recovery or resume, deliberate
+application failure, resilience score, or time-to-recovery measurement. Keep
+one retained lease across the lifecycle, durable intent before mutations, no
+uncertain replay, exact owned-resource cleanup, and closed public gates until
+the remaining completion milestones pass.
 
-Non-goals are public UI/dispatch, benchmark traffic or measurement, functional
-query/authentication/reservation qualification, database reset/repair/upsert,
-application restart/replacement, Kubernetes version upgrades, new image recipes,
-and changing the existing support-only or initialization operators' contracts.
+Public UI/dispatch, benchmark traffic and measurement, and functional
+query/authentication/reservation correctness follow the startup milestone;
+they remain in the full Hotel completion scope below. Non-goals are execution
+resume/recovery, fault-injection benchmark modes, database reset/repair/upsert
+on a failed run, application restart/replacement, Kubernetes version upgrades,
+and changes to existing support-only, initialization or released Social
+Network operator contracts. Reuse the pinned startup-safe images for the
+startup milestone; any correctness-driven source change in a later milestone
+must receive a new immutable recipe/revision rather than rewrite old images.
 No implementation or live qualification is authorized by this document alone.
+
+## Performance-only failure policy
+
+A runner failure, interruption, runner-to-workload transport failure, lost execution
+acknowledgement, unexpected application exit/restart/replacement, or failed
+correctness check invalidates the entire Hotel run. Stop further dispatch and
+attempt exact owned-resource teardown. Do not continue traffic, restart an
+application, reconnect and resume execution, replay initialization, retry the
+measurement, merge intervals, or substitute a successful later observation.
+Bounded read-only readiness polling inside an uninterrupted healthy invocation
+is not execution recovery; a failed control operation remains terminal.
+Closing or reloading the UI does not itself fail an otherwise healthy runner.
+
+Retain partial output only as clearly failed diagnostic evidence. A failed,
+interrupted, cancelled or resumed attempt must not produce a completed Hotel
+benchmark result or contribute performance metrics to valid summaries, charts
+or comparisons. Validity is run-level and sticky: completed sub-results,
+reopened state or regenerated reports cannot override a terminal run failure.
+Existing per-result status checks alone are insufficient to enforce this.
+Cleanup success never changes execution failure into benchmark success. A new
+benchmark requires a new run identity, fresh infrastructure and fresh dataset.
+
+Resource destruction is operational housekeeping, not workload recovery or a
+measured benchmark phase. Preserve existing stop/destroy and exact-ownership
+safeguards so terminal runs do not leave billable resources behind. Do not add
+a Hotel execution-recovery command, a resume path, or a dedicated live
+recovery/fault-injection release matrix.
 
 ## Architecture and alternatives
 
@@ -53,8 +90,8 @@ fresh inputs and immutable intent -> provision -> support readiness
   -> final execution/identity observation -> destroy -> independent absence
 ```
 
-Any failure after cleanup ownership is accepted enters cleanup. There is no
-execution-resume path. Cleanup-only recovery is a separate invocation.
+Any failure after cleanup ownership is accepted fails the run and enters
+cleanup. There is no execution-resume path or separate recovery lifecycle.
 
 ## Boundaries and retained identities
 
@@ -211,7 +248,7 @@ observations over 4 MiB and startup journal records over 1 MiB. Keep these
 qualification bounds as versioned constants, not caller-supplied overrides;
 they are not benchmark durations or performance claims.
 
-## Cleanup, interruption and recovery
+## Terminal failure and resource cleanup
 
 The new operator always attempts whole-run destruction after provisioning,
 including after successful startup. Preserve initialization and startup
@@ -220,7 +257,7 @@ failure prevents overall success but must not suppress otherwise safe cleanup
 when exact deletion and absence-check targets were already durably published,
 or can still be durably published. Failure of that mandatory pre-delete
 cleanup-source publication must prevent deletion and retain a cleanup-failed
-outcome; do not destroy targets that cannot be recovered for absence checks.
+outcome; do not destroy targets that cannot be independently checked afterward.
 
 Add an explicit startup lifecycle selector to provider cleanup. Validate its
 support/initialization/startup pins and independently retained cleanup ownership
@@ -240,22 +277,66 @@ Only delete the exact owned provider graph. Unknown Kubernetes objects block
 startup; they are not deleted through labels, prefixes or namespace sweeps.
 Whole-run provider teardown may still proceed when that ephemeral infrastructure
 is independently proven owned. Unknown or conflicting cloud deletion targets
-require refusal and retained recovery evidence, not broadened deletion scope.
+require refusal and retained cleanup-failure evidence, not broadened deletion
+scope.
 
-Any reopened run is cleanup-only, even if it has no dispatch latch. Recovery
-must not adopt sources, access registries, establish an SSH relay, contact
-Kubernetes, initialize, release gates or restart applications. It loads only
-the original immutable provider/ownership inputs, acquires a fresh lease and
-performs strict provider cleanup and independent absence checks. Corrupt startup
-history never grants execution rights; cleanup requires independently intact
-ownership pins and provider evidence, otherwise it refuses without repair.
+On a later process start, an unfinished Hotel invocation is terminal, not
+resumable, even if it has no dispatch latch. Preserve its original failure or
+mark an unresolved execution failed; never restart it. An explicit existing
+stop/destroy operation may remove its resources using independently intact
+provider/ownership inputs and a fresh cleanup lease. That deletion cannot
+adopt sources, access registries, establish an SSH relay, contact Kubernetes,
+initialize, release gates, restart applications, or run traffic. Corrupt
+startup history never grants execution rights; cleanup requires independently
+intact ownership pins and provider evidence, otherwise it refuses without
+repair. No new Hotel recovery subsystem is required.
 
 Defer repeated interrupt signals during cleanup using the established operator
-pattern. SIGINT/SIGTERM, hard-exit restart, lost responses, or callback mutation
+pattern. SIGINT/SIGTERM, process termination, lost responses, or callback mutation
 cannot clear dispatch latches or create another attempt on the same resources.
 An execution failure remains a nonzero outcome even if teardown succeeds.
-Cleanup-only may return zero only when strict destruction and independent
-absence are proven; it never rewrites the original execution outcome.
+A standalone destroy operation may return zero only when strict destruction
+and independent absence are proven; it never rewrites the original execution
+outcome or makes its measurements eligible for comparison.
+
+## Remaining Hotel completion milestones
+
+These are required for a usable Hotel performance benchmark, not additional
+resilience features. Keep implementation milestones reviewable without treating
+startup alone as completion of Hotel.
+
+1. **Functional correctness.** Exercise the selected workload's hotel
+   searches, rates/profiles, recommendations, authentication and reservations.
+   Verify meaningful responses and persistent reservation effects against the
+   deterministic dataset; a running process or HTTP 200 is insufficient. Keep
+   these checks outside the timed measurement and make failure terminal.
+2. **One uninterrupted performance execution.** Integrate the immutable
+   Hotel-specific load driver with versioned workload mix, target request rate,
+   concurrency, warmup and measurement durations. Declare the dataset effects
+   of correctness checks and warmup and verify the expected dataset epoch
+   before measurement without reset/repair. Measure one contiguous interval
+   and retain throughput, p50/p95/p99 latency, request-completion counts and
+   HTTP/transport errors. Normal request errors are reported, not deliberately
+   injected; do not hide them through retries or discard slow intervals.
+3. **Results and comparisons.** Persist the exact Hotel workload, dataset,
+   driver, image, topology and runtime identities alongside settings and
+   results. Keep Hotel cohorts distinct from Social Network and incompatible
+   Hotel revisions/settings. Reports may show failed-run diagnostics, but
+   only a fully valid completed Hotel run supplies comparison chart metrics.
+4. **Normal live cloud validation.** Demonstrate correct uninterrupted
+   execution, real permitted/denied network policy behavior, measurement and
+   exact owned-resource teardown on AWS, OCI, GCP and Azure for the supported
+   application architectures. Network isolation checks stay outside the timed
+   workload and do not become application-failure scenarios. Failed attempts
+   stay failed; rerun qualification only as a fresh run. No deliberate node,
+   service or runner interruption, restart/recovery qualification, or
+   time-to-recovery claim is required for Hotel release.
+5. **Public integration.** Expose Hotel in the existing benchmark selector,
+   planning/provisioning flow, progress view, reports, history and comparison
+   pages only after the functional/runtime/measurement gates above pass.
+   Preserve Social Network behavior and existing stop/destroy ownership
+   safeguards. Clearly report failure without offering resume; do not enable
+   Media or a new resilience benchmark as part of Hotel completion.
 
 ## Outcomes and release boundary
 
@@ -266,38 +347,45 @@ all evidence; never retain credentials, kubeconfigs, private SSH keys, tokens
 or signed registry URLs in public or historical output.
 
 `startup_execution_observed` and `service_identity_observed` may become true
-only for the exact complete live observation. `semantic_readiness_verified`,
-runtime/cloud/measurement/public-release qualification and public dispatch stay
-false. HTTP 200, static frontend content, TCP success, catalog membership and
-Kubernetes conditions cannot promote those gates. Functional query,
-authentication/reservation correctness and measurement are subsequent work.
+only for the exact complete live observation. Startup alone leaves
+`semantic_readiness_verified`, runtime/cloud/measurement/public-release
+qualification and public dispatch false. HTTP 200, static frontend content,
+TCP success, catalog membership and Kubernetes conditions cannot promote those
+gates. The corresponding remaining Hotel completion milestones must supply
+their own evidence before public release.
 
 ## Validation and delivery
 
-Automated tests must cover successful sequencing plus failure injection at
-create intent, partial writes/fsync, persistence, create responses, and each of
-the ten component intents/releases/responses. Include conditional-patch
-failure, response applied but lost, stale/crossed catalog and endpoint entries,
+Automated controller tests must cover successful sequencing plus simulated
+failures at create intent, partial writes/fsync, persistence, create responses,
+and each of the ten component intents/releases/responses. Include conditional
+patch failure, response applied but lost, stale/crossed catalog and endpoint entries,
 admission mutation/discovery denial, CRI/image drift, restart/replacement,
 cluster/storage/support/verifier drift, copied/forked/lost leases, callback
-mutation, signal/hard-exit recovery, malformed history and cleanup-source or
-absence-proof failures. Assert create at most once, each release at most once,
-no later release after failure, and zero registry/SSH/startup calls in recovery.
+mutation, terminal interruption handling, malformed history, cleanup-source
+and absence-proof failures. Assert create at most once, each release at most
+once, no later release after failure, no execution resume, no comparison-eligible
+Hotel metrics after a terminal failure, and no registry/SSH/startup calls from
+standalone destruction. These tests verify error handling and cleanup; they
+do not inject faults into a measured live benchmark or score resilience.
 
 Preserve all existing guarded/support/Social Network behavior. Run focused
 security tests, the full repository checks, source/Go/Lua CI gates and
 independent code review before a review-only PR. Do not auto-merge.
 
-After implementation tests and independent code review pass, live qualification
-starts with one fresh GCP Arm success attempt and a separate injected
-gate-release acknowledgement-loss attempt. Require exact retained evidence,
-non-replay and independent cloud absence after each. Any registry-egress helper
-is separately owned and cleaned up without changing TLS/proxy trust or copying
-cloud credentials. No all-cloud claim follows from these attempts; AWS, OCI
-and Azure require their own later live observations before such claims.
+After implementation tests and independent code review pass, normal live
+validation starts with one fresh uninterrupted GCP Arm startup attempt. Require
+exact retained evidence and independent cloud absence afterward; remove the
+previously proposed injected gate-release acknowledgement-loss attempt.
+Any registry-egress helper is separately owned and cleaned up without changing
+TLS/proxy trust or copying cloud credentials. No all-cloud claim follows from
+this initial attempt; AWS, OCI and Azure require their own later live
+observations before such claims.
 
 The implementation plan must keep observer, journal, controller, operator/state
-and provider cleanup integration as explicit testable units. This is one
-private lifecycle feature, not a public release. Written-spec approval is
-required before writing the implementation plan; plan review and execution
-method selection precede product-code changes or deployment.
+and provider cleanup integration as explicit testable units, followed by the
+functional, measurement/results, normal multi-cloud validation and public
+integration milestones. The startup milestone alone is not a public release
+or completion of Hotel. Written-spec approval is required before writing the
+implementation plan; plan review and execution method selection precede
+product-code changes or deployment.

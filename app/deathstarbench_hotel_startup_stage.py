@@ -277,11 +277,11 @@ def build_startup_hotel_startup_stage(plan) -> StartupHotelStartupStage:
 
 
 def validate_startup_hotel_startup_stage(plan, stage) -> StartupHotelStartupStage:
-    """Reconstruct the entire closed-world Pod List, not merely its hashes."""
+    """Fully revalidate and return the original stage, including its entire List."""
     if type(stage) is not StartupHotelStartupStage:
         raise StartupHotelStartupStageError('An exact separate startup Hotel stage is required.')
     stage.__post_init__()
-    expected = build_startup_hotel_startup_stage(plan)
-    if stage != expected:
+    checked_plan = _checked_plan(plan)
+    if stage.plan != checked_plan:
         raise StartupHotelStartupStageError('Startup Hotel stage is crossed or stale.')
-    return expected
+    return stage

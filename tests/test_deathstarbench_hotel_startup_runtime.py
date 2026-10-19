@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -20,6 +21,7 @@ from app import deathstarbench_hotel_startup_image_access as access_boundary
 from app import deathstarbench_hotel_startup_runtime as runtime
 from app.deathstarbench_candidate_runtime import create_candidate_runtime_plan
 from app.deathstarbench_candidate_stage import build_candidate_support_stage
+from app.deathstarbench_workload_contract import distributed_workload_profile
 from tests import test_deathstarbench_candidate_artifacts as candidate_fixtures
 from tests import test_deathstarbench_hotel_image_access as old_access_fixtures
 from tests import test_deathstarbench_hotel_startup_image_access as access_fixtures
@@ -34,6 +36,22 @@ TOPOLOGY = 'sha256:' + '1' * 64
 
 def uid(number):
     return '00000000-0000-4000-8000-' + str(number).zfill(12)
+
+
+def traced_validation(operation, **derivations):
+    """Count full real derivations without replacing any validation output."""
+    codes = {function.__code__: name for name, function in derivations.items()}
+    counts = dict.fromkeys(derivations, 0)
+    def profile(frame, event, _arg):
+        if event == 'call' and frame.f_code in codes:
+            counts[codes[frame.f_code]] += 1
+    previous = sys.getprofile()
+    try:
+        sys.setprofile(profile)
+        result = operation()
+    finally:
+        sys.setprofile(previous)
+    return result, counts
 
 
 class StartupRuntimeFixtureMixin:
@@ -73,6 +91,87 @@ class StartupRuntimeFixtureMixin:
 
 
 class StartupHotelRuntimeTests(StartupRuntimeFixtureMixin, unittest.TestCase):
+    def test_public_validation_bounds_complete_derivation_without_rebuilding_factory_value(self):
+        # Catches multiplicative full source/support reconstruction at each public
+        # boundary: one complete derivation is required, repeated factory builds
+        # spend the fixed startup window without adding a distinct stable check.
+        plan = self.plan()
+        for _ in range(2):
+            checked, counts = traced_validation(
+                lambda: runtime.validate_startup_hotel_runtime_plan(plan),
+                snapshot=runtime._snapshot_identity,
+                access=runtime.require_startup_hotel_image_access)
+            self.assertEqual(counts, {'snapshot': 1, 'access': 2})
+            self.assertIs(checked, plan)
+            self.assertIs(checked.access, self.image_access)
+            self.assertIs(checked.artifacts, self.artifacts)
+
+    def test_repeat_public_validation_rechecks_changed_source_assets(self):
+        # Catches cross-call caching of a once-valid checksum-audited source.
+        plan = self.plan()
+        runtime.validate_startup_hotel_runtime_plan(plan)
+        asset_root = distributed_workload_profile('hotel_reservation').asset_directory
+        read_bytes = Path.read_bytes
+        for name in ('components.json', 'network-policies.json'):
+            target = asset_root / name
+            self.assertTrue(target.is_file())
+            def changed(path):
+                payload = read_bytes(path)
+                return payload + b'\n' if path == target else payload
+            with self.subTest(asset=name), mock.patch.object(Path, 'read_bytes', new=changed), \
+                    self.assertRaises(runtime.StartupHotelRuntimeError):
+                runtime.validate_startup_hotel_runtime_plan(plan)
+            self.assertIs(runtime.validate_startup_hotel_runtime_plan(plan), plan)
+
+    def test_repeat_public_validation_rejects_changed_proofs_fields_and_every_closed_gate(self):
+        # Catches trusting retained hashes/objects after the public caller bypasses
+        # frozen state, including a byte-identical but unissued capability copy.
+        plan = self.plan()
+        runtime.validate_startup_hotel_runtime_plan(plan)
+        clone = object.__new__(access_boundary.StartupHotelImageAccess)
+        for field in ('_metadata_json', '_fingerprint'):
+            object.__setattr__(clone, field, getattr(self.image_access, field))
+        mutations = [(plan, 'access', clone), (self.image_access, '_metadata_json', '{}'),
+                     (self.artifacts, '_metadata_json', '{}'),
+                     (self.support_plan, 'snapshot_json', '{}'),
+                     (self.support_stage, 'canonical_json', '{}'),
+                     (plan, 'snapshot_json', '{}'), (plan, 'fingerprint', 'sha256:' + 'f' * 64),
+                     (plan, 'startup_attempt_id', uid(99)), (plan, 'candidate_only', False)]
+        mutations += [(plan, field, value) for field in runtime._CLOSED_FLAGS for value in (True, 0)]
+        for target, field, value in mutations:
+            original = getattr(target, field)
+            try:
+                object.__setattr__(target, field, value)
+                with self.subTest(target=type(target).__name__, field=field, value=value), \
+                        self.assertRaises(runtime.StartupHotelRuntimeError):
+                    runtime.validate_startup_hotel_runtime_plan(plan)
+            finally:
+                object.__setattr__(target, field, original)
+        self.assertIs(runtime.validate_startup_hotel_runtime_plan(plan), plan)
+
+    def test_capability_change_during_real_asset_derivation_is_rechecked(self):
+        # Catches dropping the original after-source capability guard while
+        # retaining only a successful capability check at validation entry.
+        plan = self.plan()
+        target = distributed_workload_profile('hotel_reservation').asset_directory / 'components.json'
+        read_bytes = Path.read_bytes
+        original = self.image_access._metadata_json
+        changed = []
+        def read_and_revoke(path):
+            payload = read_bytes(path)
+            if path == target:
+                object.__setattr__(self.image_access, '_metadata_json', '{}')
+                changed.append(path)
+            return payload
+        try:
+            with mock.patch.object(Path, 'read_bytes', new=read_and_revoke), \
+                    self.assertRaises(runtime.StartupHotelRuntimeError):
+                runtime.validate_startup_hotel_runtime_plan(plan)
+            self.assertTrue(changed)
+        finally:
+            object.__setattr__(self.image_access, '_metadata_json', original)
+        self.assertIs(runtime.validate_startup_hotel_runtime_plan(plan), plan)
+
     def test_distinct_plan_binds_real_startup_original_support_and_access_proofs(self):
         plan = self.plan()
         saved = plan.snapshot()

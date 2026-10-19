@@ -374,16 +374,11 @@ def create_startup_hotel_runtime_plan(
 
 
 def validate_startup_hotel_runtime_plan(plan: StartupHotelRuntimePlan) -> StartupHotelRuntimePlan:
-    """Reconstruct the exact typed plan; saved identities cannot restore proofs."""
+    """Fully revalidate and return the original frozen plan, never saved proofs."""
     _require(type(plan) is StartupHotelRuntimePlan, 'An exact startup Hotel runtime plan is required.')
     try:
         plan.__post_init__()
-        checked = create_startup_hotel_runtime_plan(
-            plan.artifacts, plan.access, plan.support_plan, plan.support_stage,
-            initialization_attempt_id=plan.initialization_attempt_id, startup_attempt_id=plan.startup_attempt_id,
-        )
-        _require(plan == checked, 'Startup Hotel runtime plan conflicts with its offline derivation.')
-        return checked
+        return plan
     except (ValueError, KeyError, TypeError, AttributeError, RecursionError) as exc:
         if isinstance(exc, StartupHotelRuntimeError):
             raise

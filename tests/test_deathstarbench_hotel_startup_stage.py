@@ -15,8 +15,10 @@ from app import deathstarbench_hotel_startup_image_access as access_boundary
 from app import deathstarbench_hotel_startup_runtime as runtime
 from app import deathstarbench_hotel_startup_stage as stage
 from app.deathstarbench_candidate_workload import validate_candidate_assets
+from app.deathstarbench_workload_contract import distributed_workload_profile
 from tests.test_deathstarbench_hotel_startup_runtime import (
     INITIALIZATION_ATTEMPT, RUN, STARTUP_ATTEMPT, StartupRuntimeFixtureMixin, uid,
+    traced_validation,
 )
 
 
@@ -27,6 +29,90 @@ def documents(bundle):
 class StartupHotelStartupStageTests(StartupRuntimeFixtureMixin, unittest.TestCase):
     def bundle(self, plan=None):
         return stage.build_startup_hotel_startup_stage(plan or self.plan())
+
+    def test_public_validation_bounds_full_derivation_and_validates_both_plan_arguments(self):
+        # One full stage derivation plus independent embedded/supplied runtime
+        # validations bounds CPU work without caching across public operations.
+        plan = self.plan()
+        equal_plan = replace(plan)
+        bundle = self.bundle(plan)
+        for _ in range(2):
+            checked, counts = traced_validation(
+                lambda: stage.validate_startup_hotel_startup_stage(equal_plan, bundle),
+                snapshot=runtime._snapshot_identity, stage=stage._derive,
+                access=runtime.require_startup_hotel_image_access)
+            self.assertEqual(counts, {'snapshot': 2, 'stage': 1, 'access': 4})
+            self.assertIs(checked, bundle)
+            self.assertIs(checked.plan, plan)
+            self.assertIs(checked.plan.access, self.image_access)
+        for operation in (bundle.metadata, lambda: bundle.pod('frontend')):
+            _, counts = traced_validation(operation, snapshot=runtime._snapshot_identity, stage=stage._derive)
+            self.assertEqual(counts, {'snapshot': 1, 'stage': 1})
+
+    def test_repeat_public_validation_rechecks_supplied_and_embedded_plan_independently(self):
+        # Catches using the embedded valid plan to skip validation of an equal
+        # supplied object, or accepting a genuinely valid but crossed plan.
+        plan = self.plan()
+        supplied = replace(plan)
+        bundle = self.bundle(plan)
+        stage.validate_startup_hotel_startup_stage(supplied, bundle)
+        for target in (supplied, plan):
+            object.__setattr__(target, 'candidate_only', False)
+            try:
+                with self.subTest(target='supplied' if target is supplied else 'embedded'), \
+                        self.assertRaisesRegex(stage.StartupHotelStartupStageError, 'crossed or stale'):
+                    stage.validate_startup_hotel_startup_stage(supplied, bundle)
+            finally:
+                object.__setattr__(target, 'candidate_only', True)
+        crossed = self.plan(startup_attempt_id=uid(98))
+        with self.assertRaisesRegex(stage.StartupHotelStartupStageError, 'crossed or stale'):
+            stage.validate_startup_hotel_startup_stage(crossed, bundle)
+
+    def test_repeat_public_validation_and_accessors_recheck_changed_stage_and_capability(self):
+        # Catches retaining a public-boundary validation across later mutations;
+        # metadata and Pod access must keep full validation, not trust JSON hashes.
+        plan = self.plan()
+        bundle = self.bundle(plan)
+        stage.validate_startup_hotel_startup_stage(plan, bundle)
+        mutations = [(bundle, 'canonical_json', '{}'), (bundle, '_metadata_json', '{}'),
+                     (bundle, 'candidate_only', False), (bundle, 'revision', 'changed'),
+                     (self.image_access, '_metadata_json', '{}')]
+        mutations += [(bundle, flag, value) for flag in stage._GATES for value in (True, 0)]
+        for target, field, value in mutations:
+            original = getattr(target, field)
+            try:
+                object.__setattr__(target, field, value)
+                for operation in (lambda: stage.validate_startup_hotel_startup_stage(plan, bundle),
+                                  bundle.metadata, lambda: bundle.pod('frontend')):
+                    with self.subTest(field=field, value=value, operation=operation), \
+                            self.assertRaises(stage.StartupHotelStartupStageError):
+                        operation()
+            finally:
+                object.__setattr__(target, field, original)
+        # Detached output remains harmless even when validators return originals.
+        bundle.metadata()['pod_names'].clear()
+        bundle.pod('frontend')['spec']['schedulingGates'].clear()
+        self.assertIs(stage.validate_startup_hotel_startup_stage(plan, bundle), bundle)
+        self.assertEqual(len(bundle.metadata()['pod_names']), 10)
+        self.assertEqual(bundle.pod('frontend')['spec']['schedulingGates'], [{'name': stage.SCHEDULING_GATE}])
+
+    def test_repeat_public_validation_and_accessors_recheck_source_asset_bytes(self):
+        # Catches caching either a public stage validation or an accessor result
+        # after the checksum-audited application inventory changes on disk.
+        plan = self.plan()
+        bundle = self.bundle(plan)
+        stage.validate_startup_hotel_startup_stage(plan, bundle)
+        target = distributed_workload_profile('hotel_reservation').asset_directory / 'components.json'
+        read_bytes = Path.read_bytes
+        def changed(path):
+            payload = read_bytes(path)
+            return payload + b'\n' if path == target else payload
+        with mock.patch.object(Path, 'read_bytes', new=changed):
+            for operation in (lambda: stage.validate_startup_hotel_startup_stage(plan, bundle),
+                              bundle.metadata, lambda: bundle.pod('frontend')):
+                with self.subTest(operation=operation), self.assertRaises(stage.StartupHotelStartupStageError):
+                    operation()
+        self.assertIs(stage.validate_startup_hotel_startup_stage(plan, bundle), bundle)
 
     def test_exact_ten_standalone_pods_use_native_new_images_and_audited_commands_ports(self):
         plan = self.plan()

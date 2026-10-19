@@ -4,6 +4,10 @@ The original controller retains live initializer/support proof, admission pins,
 clock, hosts, access capability and acquired lease. These records cannot restore
 any of them. Even a created-only invocation cannot be reopened. Failed writes
 leave their evidence in place: there is no resume, repair, unlink or executor.
+
+Normalized publication/source rows only reconcile historical assertions. Task4
+must independently verify actual raw producers, Service-to-EndpointSlice owners
+and ports, and live execution/custody. Slice UID membership is not owner proof.
 """
 from __future__ import annotations
 
@@ -14,6 +18,7 @@ import re
 import stat
 
 from .deathstarbench_hotel_startup_identity import validate_startup_hotel_admitted_pod
+from .deathstarbench_candidate_k3s import _uid as _checked_uid
 from .deathstarbench_hotel_startup_image_access import require_startup_hotel_image_access
 from .deathstarbench_hotel_startup_runtime import validate_startup_hotel_runtime_plan
 from .deathstarbench_hotel_startup_stage import validate_startup_hotel_startup_stage
@@ -302,24 +307,97 @@ class StartupHotelStartupJournal:
             raise StartupHotelJournalError('Startup normalized observation is malformed or incomplete.') from None
 
     def _ready(self, observation, summary, components):
+        # These are normalized-producer consistency checks, not a substitute
+        # for Task4's actual raw Service/Slice owner/ports and live custody proof.
         _require(set(components) <= set(summary['observed_running_components'])
                  and not set(components) & set(summary['execution_pending_components']),
                  'Each observed component requires its actual CRI-proven Running execution.')
         try:
-            for c in components:
+            current = set(components)
+            backends = current - {'frontend'}
+            _require(current == set(summary['released_components'])
+                     and summary['publication_confirmed'] == {'endpoints': sorted(current), 'consul': sorted(backends)}
+                     and summary['publication_pending'] == {'endpoints': [], 'consul': []},
+                     'Ready history requires exact confirmed publications without pending components.')
+            source = observation['identity']
+            _require(type(source['objects']) is list, 'Publication source objects are required.')
+            objects, uids = {}, set()
+            for item in source['objects']:
+                _require(type(item) is dict and set(item) == {'kind', 'name', 'namespace', 'uid'}
+                         and type(item['kind']) is str and type(item['name']) is str
+                         and (item['namespace'] is None or type(item['namespace']) is str),
+                         'Publication source object identity is incomplete.')
+                _checked_uid(item['uid'], 'Publication source object')
+                key = (item['kind'], item['namespace'], item['name'])
+                _require(key not in objects and item['uid'] not in uids, 'Publication source identities alias each other.')
+                objects[key] = item['uid']
+                uids.add(item['uid'])
+            slices = {value for (kind, namespace, _), value in objects.items()
+                      if kind == 'EndpointSlice' and namespace == self.plan.namespace}
+            services = {item['metadata']['name']: item for item in
+                        json.loads(self.plan.support_stage.canonical_json)['items'] if item['kind'] == 'Service'}
+            endpoints = observation['endpoints']
+            support_endpoints = source['support_endpoints']
+            _require(type(endpoints) is dict and set(endpoints) == set(services)
+                     and type(support_endpoints) is dict and set(support_endpoints) == set(services) - set(RELEASE_ORDER),
+                     'Complete normalized endpoint and support source inventories are required.')
+            seen_slices = set()
+            pod_fields = ('pod_name', 'pod_uid', 'pod_ip', 'node_name')
+            for name, endpoint in endpoints.items():
+                _require(type(endpoint) is dict and set(endpoint) == {
+                    'service_uid', 'endpoint_slice_uid', 'publication_pending', *pod_fields},
+                    'Normalized endpoint row is incomplete or contains unexpected fields.')
+                service = services[name]['metadata']
+                _require(endpoint['service_uid'] == objects[('Service', service['namespace'], service['name'])]
+                         and endpoint['endpoint_slice_uid'] in slices
+                         and endpoint['endpoint_slice_uid'] not in seen_slices
+                         and endpoint['publication_pending'] is False,
+                         'Endpoint Service/Slice source identity or pending state differs.')
+                seen_slices.add(endpoint['endpoint_slice_uid'])
+                if name in RELEASE_ORDER:
+                    _require(all(endpoint[k] == (summary['pods'][name][k] if name in current else None)
+                                 for k in pod_fields), 'Application endpoint differs from its exact current Pod.')
+                else:
+                    _require(_canonical(endpoint) == _canonical(support_endpoints[name]),
+                             'Support endpoint differs from its retained normalized source.')
+            _require(seen_slices == slices,
+                     'Complete normalized endpoint rows differ from the EndpointSlice source inventory.')
+            consul = observation['consul']
+            _require(type(consul) is dict and set(consul) == {
+                'backend_registrations', 'frontend_registrations', 'intrinsic_consul', 'publication_pending'},
+                'Complete normalized Consul result is required.')
+            _require(_components(consul['publication_pending'], RELEASE_ORDER[:-1])
+                     == set(summary['publication_pending']['consul']) == set(),
+                     'Consul producer pending state contradicts confirmed history.')
+            registrations = consul['backend_registrations']
+            _require(type(registrations) is dict and set(registrations) == backends,
+                     'Consul complete registrations must equal the exact confirmed backend set.')
+            for c, registration in registrations.items():
                 p = summary['pods'][c]
-                endpoint = observation['endpoints'][c]
-                _require(c in summary['publication_confirmed']['endpoints']
-                         and endpoint['publication_pending'] is False
-                         and all(endpoint[k] == p[k] for k in ('pod_name', 'pod_uid', 'pod_ip', 'node_name')),
-                         'Each component requires complete exact ready endpoint publication.')
-                if c != 'frontend':
-                    registration = observation['consul']['backend_registrations'][c]
-                    _require(c in summary['publication_confirmed']['consul']
-                             and all(registration[k] == p[k] for k in ('pod_uid', 'pod_ip')),
-                             'Each backend requires complete exact Consul publication.')
-            _require(type(observation['consul']['frontend_registrations']) is int
-                     and observation['consul']['frontend_registrations'] == 0, 'Frontend must not register with Consul.')
+                port = self.stage.pod(c)['spec']['containers'][0]['ports'][0]['containerPort']
+                expected = {'service_id': 'hotel-' + self.plan.run_id + '-' + self.plan.startup_attempt_id
+                            + '-' + c + '-' + p['pod_uid'], 'pod_uid': p['pod_uid'], 'pod_ip': p['pod_ip'], 'port': port}
+                _require(type(registration) is dict and type(registration.get('port')) is int
+                         and _canonical(registration) == _canonical(expected),
+                         'Complete Consul registration differs from original run/Pod/port identity.')
+            containers = source['support_containers']
+            _require(type(containers) is list and all(type(p) is dict for p in containers),
+                     'Normalized support execution sources are required.')
+            executions = [p for p in containers if p.get('component') == 'consul']
+            _require(len(executions) == 1 and executions[0]['role'] == 'control',
+                     'One exact normalized Consul execution source is required.')
+            execution, endpoint = executions[0], support_endpoints['consul']
+            _require(execution['pod_uid'] == objects[('Pod', self.plan.namespace, execution['pod_name'])]
+                     and all(execution[k] == endpoint[k] for k in ('pod_name', 'pod_uid', 'node_name')),
+                     'Consul execution and support endpoint sources disagree.')
+            intrinsic = {**{k: execution[k] for k in ('pod_name', 'pod_uid', 'node_name', 'container_id')},
+                         'pod_ip': endpoint['pod_ip'], 'service_id': 'consul', 'port': 8300,
+                         'datacenter': 'dc1', 'catalog_node_address': '127.0.0.1'}
+            _require(type(consul['intrinsic_consul']) is dict
+                     and _canonical(consul['intrinsic_consul']) == _canonical(intrinsic),
+                     'Complete intrinsic Consul row differs from its exact support sources.')
+            _require(type(consul['frontend_registrations']) is int and consul['frontend_registrations'] == 0,
+                     'Frontend must not register with Consul.')
         except (KeyError, TypeError, AttributeError):
             raise StartupHotelJournalError('Exact component publication is incomplete.') from None
 

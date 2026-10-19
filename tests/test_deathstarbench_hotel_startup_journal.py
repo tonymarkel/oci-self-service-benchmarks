@@ -37,6 +37,10 @@ class StartupJournalTests(unittest.TestCase):
         self.pods = {c: identity.validate_startup_hotel_admitted_pod(
             self.fixture.admitted(c), self.stage.pod(c), ROLES) for c in ORDER}
         self.running = self.fixture.executions()
+        boundary = fixtures.support_fixtures.k3s
+        self._support_inventory = fixtures.support_fixtures.live_inventory(self.plan.support_stage)
+        self._support_identity = boundary._checked_inventory(self._support_inventory,
+            boundary._validated_context(self.plan.support_plan, self.plan.support_stage, ROLES), complete=True)
         self._observations = {}
 
     def open(self, **changes):
@@ -64,9 +68,15 @@ class StartupJournalTests(unittest.TestCase):
         registrations = identity.validate_startup_hotel_consul_identity(
             self.fixture.consul(pods, consul, tuple(released)), self.plan, pods,
             tuple(released), consul, allow_pending=True)
+        objects = {(item['kind'], item['metadata'].get('namespace'), item['metadata']['name']): item
+                   for item in self._support_inventory['items'] + slices + [p['pod'] for p in pods.values()]}
         value = {'plan_fingerprint': self.plan.fingerprint, 'startup_pods': pods,
-            'identity': {'nodes': [{'role': role, 'name': name, 'uid': uid(n), 'architecture': 'amd64'}
-                                   for n, (role, name) in enumerate(ROLES.items(), 1)]},
+            'identity': {'nodes': copy.deepcopy(self._support_identity['nodes']),
+                'objects': sorted([{'kind': item['kind'], 'name': item['metadata']['name'],
+                    'namespace': item['metadata'].get('namespace'), 'uid': item['metadata']['uid']}
+                    for item in objects.values()], key=lambda item: (item['kind'], item['namespace'] or '', item['name'])),
+                'support_containers': copy.deepcopy(self._support_identity['support_pods']),
+                'support_endpoints': {name: copy.deepcopy(row) for name, row in endpoints.items() if name not in ORDER}},
             'startup_execution_observed': bool(released), 'observed_running_components': sorted(released),
             'observed_running_count': len(released), 'execution_pending_components': [],
             'released_components': sorted(released), 'running_components': sorted(released),
@@ -115,6 +125,11 @@ class StartupJournalTests(unittest.TestCase):
             bad = copy.deepcopy(all_ten); bad[field] = value
             with self.subTest(final_field=field), self.assertRaises(ValueError):
                 store.record_final_observation(bad)
+        for label, bad in self.incomplete_publications(all_ten):
+            before = self.files()
+            with self.subTest(final_publication=label), self.assertRaises(ValueError):
+                store.record_final_observation(bad)
+            self.assertEqual(self.files(), before)
         final = store.record_final_observation(all_ten)
         self.assertEqual(final['event_count'], 24)
         self.assertEqual(final['state'], 'final-observation-recorded')
@@ -301,6 +316,76 @@ class StartupJournalTests(unittest.TestCase):
                 store.record_component_observation('attractions', bad)
         store.record_component_observation('attractions', self.observation(['attractions']))
         with self.assertRaises(ValueError): store.record_final_observation(self.observation(['attractions']))
+
+    @staticmethod
+    def incomplete_publications(observation):
+        # Mutations of real normalized rows, not an invented wire schema.
+        mutations = {
+            'endpoint-missing-service': lambda o: o['endpoints']['attractions'].pop('service_uid'),
+            'endpoint-missing-slice': lambda o: o['endpoints']['attractions'].pop('endpoint_slice_uid'),
+            'endpoint-forged-service': lambda o: o['endpoints']['attractions'].update(service_uid=uid(701)),
+            'endpoint-crossed-service': lambda o: o['endpoints']['attractions'].update(service_uid=o['endpoints']['geo']['service_uid']),
+            'endpoint-forged-slice': lambda o: o['endpoints']['attractions'].update(endpoint_slice_uid=uid(702)),
+            'endpoint-wrong-kind': lambda o: o['endpoints']['attractions'].update(endpoint_slice_uid=o['startup_pods']['attractions']['pod_uid']),
+            'endpoint-slice-alias': lambda o: o['endpoints']['geo'].update(endpoint_slice_uid=o['endpoints']['attractions']['endpoint_slice_uid']),
+            'endpoint-slice-wrong-namespace': lambda o: next(item for item in o['identity']['objects']
+                if item['uid'] == o['endpoints']['attractions']['endpoint_slice_uid']).update(namespace='wrong-namespace'),
+            'endpoint-extra-field': lambda o: o['endpoints']['attractions'].update(ready=True),
+            'source-objects-missing': lambda o: o['identity'].pop('objects'),
+            'source-extra-slice': lambda o: o['identity']['objects'].append({'kind': 'EndpointSlice',
+                'namespace': 'deathstarbench-hotel', 'name': 'unexpected-slice', 'uid': uid(703)}),
+            'source-support-execution-missing': lambda o: o['identity'].pop('support_containers'),
+            'source-support-endpoints-missing': lambda o: o['identity'].pop('support_endpoints'),
+            'consul-missing-id': lambda o: o['consul']['backend_registrations']['attractions'].pop('service_id'),
+            'consul-forged-id': lambda o: o['consul']['backend_registrations']['attractions'].update(service_id='forged-id'),
+            'consul-missing-port': lambda o: o['consul']['backend_registrations']['attractions'].pop('port'),
+            'consul-wrong-port': lambda o: o['consul']['backend_registrations']['attractions'].update(port=8083),
+            'consul-float-port': lambda o: o['consul']['backend_registrations']['attractions'].update(port=8089.0),
+            'consul-pending-row': lambda o: o['consul']['backend_registrations']['attractions'].update(publication_pending=True),
+            'consul-pending-contradiction': lambda o: o['consul'].update(publication_pending=['attractions']),
+            'consul-pending-missing': lambda o: o['consul'].pop('publication_pending'),
+            'consul-extra-registration': lambda o: o['consul']['backend_registrations'].update(
+                frontend=copy.deepcopy(o['consul']['backend_registrations']['attractions'])),
+            'intrinsic-missing-container': lambda o: o['consul']['intrinsic_consul'].pop('container_id'),
+            'intrinsic-forged-container': lambda o: o['consul']['intrinsic_consul'].update(container_id='containerd://' + 'e' * 64),
+            'intrinsic-forged-address': lambda o: o['consul']['intrinsic_consul'].update(pod_ip='10.42.2.250'),
+        }
+        for label, mutate in mutations.items():
+            changed = copy.deepcopy(observation)
+            mutate(changed)
+            yield label, changed
+
+    def test_component_rejects_incomplete_or_contradictory_normalized_publication(self):
+        # Catches confirmed lists promoting truncated/forged/pending rows to history.
+        store = self.admit()
+        self.dispatch(store, 'attractions')
+        good = self.observation(['attractions'])
+        for label, bad in self.incomplete_publications(good):
+            before = self.files()
+            with self.subTest(component_publication=label), self.assertRaises(ValueError):
+                store.record_component_observation('attractions', bad)
+            self.assertEqual(self.files(), before)
+        store.record_component_observation('attractions', good)
+
+    def test_component_rejects_forged_consul_service_identity(self):
+        # Catches accepting UID/IP-only registration rows with the wrong run ID.
+        store = self.admit()
+        self.dispatch(store, 'attractions')
+        bad = self.observation(['attractions'])
+        bad['consul']['backend_registrations']['attractions']['service_id'] = 'forged-id'
+        before = self.files()
+        with self.assertRaises(ValueError): store.record_component_observation('attractions', bad)
+        self.assertEqual(self.files(), before)
+
+    def test_component_rejects_contradictory_consul_pending(self):
+        # Catches confirmed summaries hiding the producer's explicit pending set.
+        store = self.admit()
+        self.dispatch(store, 'attractions')
+        bad = self.observation(['attractions'])
+        bad['consul']['publication_pending'] = ['attractions']
+        before = self.files()
+        with self.assertRaises(ValueError): store.record_component_observation('attractions', bad)
+        self.assertEqual(self.files(), before)
 
     def test_crossed_identity_and_access_never_consume_intent(self):
         # Catches caller hash substitution, UID/spec drift and summary access adoption.

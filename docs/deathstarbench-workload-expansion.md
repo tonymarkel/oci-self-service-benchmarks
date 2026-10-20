@@ -955,6 +955,43 @@ startup/restart, login/reservation semantics, or benchmark measurement. Public
 dispatch, application-start permission, broad runtime qualification and public
 release remain closed. Historical evidence cannot authorize another attempt.
 
+## Guarded Hotel application staging
+
+`app/deathstarbench_hotel_application_stage.py` adds an offline startup contract
+for the ten Hotel applications. `build_guarded_hotel_application_stage(plan)`
+accepts only the freshly constructed `GuardedHotelRuntimePlan` used by guarded
+initialization. It derives immutable, scheduling-gated standalone Pods from the
+audited support templates, substituting the exact guarded platform image and
+explicit run/dataset environment. Serialized plans or altered/rehashed manifests
+cannot be adopted. The original support bundle and its zero-replica application
+Deployments are unchanged.
+
+The intended release order is eight database-backed services, then search,
+then frontend. Each Pod has `restartPolicy: Never`, a 900-second active deadline,
+rootless execution, a read-only filesystem, no service-account token or mounts,
+and bounded resources. Existing component labels preserve Service selection and
+the audited network policies; the stage adds no Service, Deployment, storage,
+network policy, or external access. Pods deliberately omit `pod-template-hash`
+and controller ownership so existing Deployment-generated ReplicaSets do not
+select them. A live controller must also reject any unexpected/adopting
+controller in the observed inventory.
+
+The bundle records the expected nine Consul service names and ports. Its TCP
+readiness probes establish listeners only; Consul registrations must later be
+matched to the exact observed application Pod addresses, and login/reservation
+responses need separate semantic checks. Application crashes, changed container
+identities, or uncertain dispatch require cleanup rather than restart/replay.
+In particular, reservations mutate the baseline, so the existing database
+verifier is not a healthy-restart protocol after transactions.
+
+This slice is a renderer with offline tests for both application architectures.
+It does not create Pods or remove scheduling gates, and the existing live CLI
+still stops after initialization/global verification and cleans up. Wiring a
+leased startup controller with same-attempt initialization proof, current
+cloud/cluster/storage ownership, per-Pod durable dispatch latches, exact live
+inventory validation, and cleanup remains the next implementation slice. No
+live startup or semantic transaction qualification is claimed by this bundle.
+
 ## Next review slices and release prerequisites
 
 1. **Immutable artifacts and public access.** Hotel now has native guarded

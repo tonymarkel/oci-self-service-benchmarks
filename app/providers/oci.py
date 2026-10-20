@@ -386,7 +386,239 @@ def _check_rules(client, nsg_id, expected, *, allow_empty=False):
     return True
 
 
-def _preflight(inputs, clients):
+def _startup_policy(mode, inputs):
+    if mode not in ('legacy', 'startup-v1'):
+        raise LifecycleError('Unsupported OCI ownership snapshot policy.')
+    if mode == 'startup-v1':
+        parts = inputs['public_key'].split(' ')
+        if inputs['defined_tags'] != {} or len(parts) not in (2, 3) or (len(parts) == 3 and parts[2] != 'benchmark'):
+            raise LifecycleError('Strict OCI startup requires approved nonsecret configured inputs.')
+
+
+def _startup_shape(raw, fields, required=(), *, diagnostic=()):
+    if type(raw) is not dict or not set(required) <= set(raw):
+        raise LifecycleError('Strict OCI snapshot is missing required fields.')
+    if any(key not in fields and key not in diagnostic and value not in (None, '', [], {})
+           or key not in fields and key not in diagnostic and type(value) in (bool, int, float)
+           for key, value in raw.items()):
+        raise LifecycleError('Strict OCI snapshot has unsupported nonempty configuration.')
+    return {key: copy.deepcopy(value) for key, value in raw.items() if key in fields}
+
+
+def _startup_list(value, *, maximum=256):
+    if type(value) is not list or len(value) > maximum:
+        raise LifecycleError('Strict OCI configuration requires a bounded list.')
+    return value
+
+
+def _startup_int(value, minimum=0, maximum=2**63-1):
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise LifecycleError('Strict OCI configuration has an invalid integer.')
+
+
+def _startup_ocid(value, kind=None):
+    if type(value) is not str or not re.fullmatch(r'ocid1\.[A-Za-z0-9._-]{1,500}', value):
+        raise LifecycleError('Strict OCI snapshot has an invalid OCID.')
+    if kind is not None and not value.startswith('ocid1.' + kind.replace('_', '') + '.'):
+        raise LifecycleError('Strict OCI allocation OCID has the wrong resource kind.')
+
+
+def _startup_endpoint(value, domain):
+    if type(value) is not str:
+        raise LifecycleError('Strict OCI endpoint is invalid.')
+    if domain == 'CIDR_BLOCK':
+        try:
+            network = ip_network(value, strict=True)
+        except ValueError:
+            raise LifecycleError('Strict OCI CIDR is invalid.') from None
+        if str(network) != value:
+            raise LifecycleError('Strict OCI CIDR is not canonical.')
+    elif domain == 'SERVICE_CIDR_BLOCK':
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,254}', value):
+            raise LifecycleError('Strict OCI service endpoint is invalid.')
+    else:
+        raise LifecycleError('Strict OCI endpoint type is unsupported.')
+
+
+def _startup_rule(raw, kind):
+    if kind == 'route':
+        row = _startup_shape(raw, {'cidr_block', 'destination', 'destination_type', 'network_entity_id', 'route_type'},
+                             {'network_entity_id'}, diagnostic={'description'})
+        _startup_ocid(row['network_entity_id'])
+        if row.get('cidr_block') is not None:
+            _startup_endpoint(row['cidr_block'], 'CIDR_BLOCK')
+            if ip_network(row['cidr_block']).version != 4:
+                raise LifecycleError('Deprecated OCI route CIDR must be IPv4.')
+        if row.get('destination') is not None:
+            _startup_endpoint(row['destination'], row.get('destination_type'))
+        elif not row.get('cidr_block'):
+            raise LifecycleError('Strict OCI route destination is missing.')
+        if row.get('route_type') not in (None, 'STATIC', 'LOCAL'):
+            raise LifecycleError('Strict OCI route type is unsupported.')
+        return row
+    endpoint = 'source' if kind == 'ingress' else 'destination'
+    row = _startup_shape(raw, {'icmp_options', 'is_stateless', 'protocol', endpoint, endpoint + '_type',
+                               'tcp_options', 'udp_options'}, {'protocol', endpoint}, diagnostic={'description'})
+    protocol = row['protocol']
+    if type(protocol) is not str or (protocol != 'all' and not re.fullmatch(r'0|[1-9][0-9]{0,2}', protocol)):
+        raise LifecycleError('Strict OCI protocol is invalid.')
+    if protocol != 'all' and int(protocol) > 255:
+        raise LifecycleError('Strict OCI protocol is invalid.')
+    _startup_endpoint(row[endpoint], row.get(endpoint + '_type') or 'CIDR_BLOCK')
+    if row.get('is_stateless') is not None and type(row['is_stateless']) is not bool:
+        raise LifecycleError('Strict OCI security flag is invalid.')
+    for field, allowed_protocol in (('tcp_options', '6'), ('udp_options', '17'), ('icmp_options', '1')):
+        if row.get(field) is None:
+            continue
+        if protocol != allowed_protocol:
+            raise LifecycleError('Strict OCI protocol/options combination is unsupported.')
+        if field == 'icmp_options':
+            options = _startup_shape(row[field], {'type', 'code'}, {'type'})
+            _startup_int(options['type'], maximum=255)
+            if options.get('code') is not None:
+                _startup_int(options['code'], maximum=255)
+        else:
+            options = _startup_shape(row[field], {'destination_port_range', 'source_port_range'})
+            for port_key, ports in options.items():
+                if ports is not None:
+                    checked = _startup_shape(ports, {'min', 'max'}, {'min', 'max'})
+                    _startup_int(checked['min'], maximum=65535)
+                    _startup_int(checked['max'], minimum=checked['min'], maximum=65535)
+                    options[port_key] = checked
+        row[field] = options
+    return row
+
+
+def _startup_dns_name(value, *, label=False):
+    if type(value) is not str or len(value) > (63 if label else 253) or not value:
+        raise LifecycleError('Strict OCI DNS name is invalid.')
+    labels = value.split('.')
+    if (label and len(labels) != 1) or any(not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?', part) for part in labels):
+        raise LifecycleError('Strict OCI DNS name is invalid.')
+
+
+def _startup_dhcp(raw):
+    if type(raw) is not dict:
+        raise LifecycleError('Strict OCI DHCP option is invalid.')
+    if raw.get('type') == 'DomainNameServer':
+        row = _startup_shape(raw, {'type', 'server_type', 'custom_dns_servers'}, {'type', 'server_type'})
+        if row['server_type'] not in {'VcnLocal', 'VcnLocalPlusInternet', 'CustomDnsServer'}:
+            raise LifecycleError('Strict OCI DNS server type is unsupported.')
+        if row['server_type'] == 'CustomDnsServer':
+            servers = _startup_list(row.get('custom_dns_servers'), maximum=3)
+            if not servers:
+                raise LifecycleError('Strict OCI custom DNS servers are missing.')
+            for server in servers:
+                if type(server) is not str or str(ip_address(server)) != server:
+                    raise LifecycleError('Strict OCI DNS address is invalid.')
+        elif row.get('custom_dns_servers') not in (None, []):
+            raise LifecycleError('Strict OCI local DNS cannot have custom servers.')
+    elif raw.get('type') == 'SearchDomain':
+        row = _startup_shape(raw, {'type', 'search_domain_names'}, {'type', 'search_domain_names'})
+        domains = _startup_list(row['search_domain_names'], maximum=1)
+        if len(domains) != 1:
+            raise LifecycleError('Strict OCI DHCP requires one search domain.')
+        _startup_dns_name(domains[0])
+    else:
+        raise LifecycleError('Strict OCI DHCP option is unsupported.')
+    return row
+
+
+def _startup_implicit_snapshot(kind, raw, *, contract, entry):
+    """Approved finite subset; diagnostic-only omissions are intentional."""
+    common = {'id', 'compartment_id', 'time_created', 'lifecycle_state', 'display_name'}
+    fields = {
+        'route_table': {'vcn_id', 'freeform_tags', 'defined_tags', 'route_rules'},
+        'security_list': {'vcn_id', 'freeform_tags', 'defined_tags', 'ingress_security_rules', 'egress_security_rules'},
+        'dhcp_options': {'vcn_id', 'freeform_tags', 'defined_tags', 'options', 'domain_name_type'},
+        'vnic': {'availability_domain', 'freeform_tags', 'defined_tags', 'hostname_label', 'is_primary', 'mac_address',
+                 'nsg_ids', 'private_ip', 'public_ip', 'skip_source_dest_check', 'subnet_id'},
+        'boot_volume': {'availability_domain', 'freeform_tags', 'defined_tags', 'image_id', 'size_in_gbs', 'size_in_mbs',
+                        'vpus_per_gb', 'is_auto_tune_enabled', 'auto_tuned_vpus_per_gb', 'autotune_policies', 'kms_key_id'},
+        'vnic_attachment': {'availability_domain', 'instance_id', 'nic_index', 'subnet_id', 'vlan_id', 'vlan_tag', 'vnic_id'},
+        'boot_volume_attachment': {'availability_domain', 'instance_id', 'boot_volume_id',
+                                  'is_pv_encryption_in_transit_enabled', 'encryption_in_transit_type'},
+    }
+    required = {'id', 'compartment_id', 'time_created', 'lifecycle_state'}
+    required |= {'route_table': {'vcn_id', 'route_rules'}, 'security_list': {'vcn_id', 'ingress_security_rules', 'egress_security_rules'},
+        'dhcp_options': {'vcn_id', 'options'}, 'vnic': {'availability_domain', 'subnet_id', 'is_primary', 'private_ip', 'nsg_ids', 'skip_source_dest_check'},
+        'boot_volume': {'availability_domain', 'image_id', 'size_in_gbs'},
+        'vnic_attachment': {'availability_domain', 'instance_id', 'vnic_id', 'subnet_id'},
+        'boot_volume_attachment': {'availability_domain', 'instance_id', 'boot_volume_id'}}[kind]
+    row = _startup_shape(raw, common | fields[kind], required,
+        diagnostic={'lifecycle_details', 'status_message', 'time_updated', 'is_hydrated'})
+    _startup_ocid(row['id'], 'instance' if kind == 'boot_volume_attachment' and row['id'] == entry['id'] else kind)
+    if not _valid_timestamp(row['time_created']) or ('time_updated' in raw and raw['time_updated'] is not None and not _valid_timestamp(raw['time_updated'])):
+        raise LifecycleError('Strict OCI creation/update timestamp is invalid.')
+    if raw.get('is_hydrated') is not None and type(raw['is_hydrated']) is not bool:
+        raise LifecycleError('Strict OCI hydration field is invalid.')
+    if row['lifecycle_state'] not in {'AVAILABLE', 'PROVISIONING', 'ATTACHED', 'ATTACHING', 'DETACHING', 'DETACHED', 'TERMINATING', 'TERMINATED', 'FAULTY'}:
+        raise LifecycleError('Strict OCI lifecycle state is unsupported.')
+    for key, value in row.items():
+        if key == 'id' or key.endswith('_id'):
+            if value is not None:
+                _startup_ocid(value)
+        elif key == 'display_name' and value is not None:
+            if type(value) is not str or not re.fullmatch(r'[A-Za-z0-9 ._:()\-]{1,255}', value):
+                raise LifecycleError('Strict OCI deployment name is unsupported.')
+        elif key in {'is_primary', 'skip_source_dest_check', 'is_auto_tune_enabled', 'is_pv_encryption_in_transit_enabled'} and value is not None:
+            if type(value) is not bool:
+                raise LifecycleError('Strict OCI boolean configuration is invalid.')
+        elif key in {'size_in_gbs', 'size_in_mbs', 'vpus_per_gb', 'auto_tuned_vpus_per_gb', 'nic_index', 'vlan_tag'} and value is not None:
+            _startup_int(value, minimum=1 if key.startswith('size_') else 0, maximum=4095 if key == 'vlan_tag' else 2**63-1)
+        elif key in {'private_ip', 'public_ip'} and value is not None:
+            try:
+                valid_ip = type(value) is str and str(ip_address(value)) == value
+            except ValueError:
+                valid_ip = False
+            if not valid_ip:
+                raise LifecycleError('Strict OCI IP configuration is invalid.')
+    if row['compartment_id'] != contract['inputs']['compartment_id'] or (row.get('availability_domain') is not None and row['availability_domain'] != contract['inputs']['availability_domain']):
+        raise LifecycleError('Strict OCI snapshot scope differs.')
+    if 'vcn_id' in row and row['vcn_id'] != entry['id']:
+        raise LifecycleError('Strict OCI default-child parent differs.')
+    for tags in ('freeform_tags', 'defined_tags'):
+        if tags in row and row[tags] not in (None, {}):
+            expected = entry['spec']['body'].get(tags, {})
+            if type(row[tags]) is not dict or row[tags] != expected:
+                raise LifecycleError('Strict OCI native tags are not approved original values.')
+    if row.get('vlan_id') is not None:
+        raise LifecycleError('Strict OCI VLAN configuration is unsupported.')
+    if row.get('hostname_label') is not None:
+        _startup_dns_name(row['hostname_label'], label=True)
+    if row.get('mac_address') is not None and not re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}', row['mac_address']):
+        raise LifecycleError('Strict OCI MAC address is invalid.')
+    if 'nsg_ids' in row:
+        for resource_id in _startup_list(row['nsg_ids'], maximum=5):
+            _startup_ocid(resource_id)
+    if row.get('size_in_mbs') is not None and row['size_in_mbs'] != row['size_in_gbs'] * 1024:
+        raise LifecycleError('Strict OCI boot capacity fields disagree.')
+    if row.get('encryption_in_transit_type') not in (None, 'NONE', 'BM_ENCRYPTION_IN_TRANSIT'):
+        raise LifecycleError('Strict OCI encryption mode is unsupported.')
+    if row.get('domain_name_type') not in (None, 'SUBNET_DOMAIN', 'VCN_DOMAIN', 'CUSTOM_DOMAIN'):
+        raise LifecycleError('Strict OCI DHCP domain mode is unsupported.')
+    for field, rule_kind in (('route_rules', 'route'), ('ingress_security_rules', 'ingress'), ('egress_security_rules', 'egress')):
+        if field in row:
+            row[field] = [_startup_rule(rule, rule_kind) for rule in _startup_list(row[field])]
+    if 'options' in row:
+        row['options'] = [_startup_dhcp(option) for option in _startup_list(row['options'], maximum=16)]
+    if row.get('autotune_policies') is not None:
+        policies = []
+        for policy in _startup_list(row['autotune_policies'], maximum=16):
+            if policy.get('autotune_type') == 'DETACHED_VOLUME':
+                policies.append(_startup_shape(policy, {'autotune_type'}, {'autotune_type'}))
+            elif policy.get('autotune_type') == 'PERFORMANCE_BASED':
+                checked = _startup_shape(policy, {'autotune_type', 'max_vpus_per_gb'}, {'autotune_type', 'max_vpus_per_gb'})
+                _startup_int(checked['max_vpus_per_gb'], minimum=1)
+                policies.append(checked)
+            else:
+                raise LifecycleError('Strict OCI autotune policy is unsupported.')
+        row['autotune_policies'] = policies
+    return row
+
+
+def _preflight(inputs, clients, *, ownership_snapshot='legacy'):
+    _startup_policy(ownership_snapshot, inputs)
     images = {}
     for role, image_id, arch, shape in (
         ('application', inputs['application_image_id'], inputs['architecture'], inputs['shape']),
@@ -408,7 +640,8 @@ def _preflight(inputs, clients):
         compatible = _list(clients['compute'], 'list_image_shape_compatibility_entries', image_id=image_id)
         if shape not in {item.get('shape') for item in compatible}:
             raise LifecycleError(f'{role} image does not support {shape}.')
-        images[role] = image
+        images[role] = ({key: image[key] for key in ('id', 'display_name', 'compartment_id',
+            'operating_system', 'operating_system_version', 'lifecycle_state')} if ownership_snapshot == 'startup-v1' else image)
     shapes = _list(clients['compute'], 'list_shapes', compartment_id=inputs['compartment_id'], availability_domain=inputs['availability_domain'])
     for role in PRIVATE_ADDRESSES:
         shape_name = inputs['shape'] if role == 'application' else SUPPORT_SHAPE
@@ -603,7 +836,7 @@ def _check_runtime_aliases(resources, contract):
             raise LifecycleError(f'OCI runtime alias {key} conflicts with the authoritative candidate contract.')
 
 
-def validate_distributed_deathstarbench_candidate(job, *, clients=None, require_ready=False):
+def validate_distributed_deathstarbench_candidate(job, *, clients=None, require_ready=False, ownership_snapshot='legacy'):
     """Return a detached exact contract; optional cloud checks are read-only.
 
     No missing identity is recovered, no alias is trusted or published, and no
@@ -614,6 +847,7 @@ def validate_distributed_deathstarbench_candidate(job, *, clients=None, require_
         if not isinstance(job, dict) or not re.fullmatch(r'[0-9a-f]{12}', str(job.get('id', ''))):
             raise LifecycleError('An exact OCI candidate job ID is required.')
         contract = copy.deepcopy(_load(job))
+        _startup_policy(ownership_snapshot, contract['inputs'])
         for entry in contract['entries'].values():
             if entry.get('id') and (not isinstance(entry['id'], str) or not re.fullmatch(r'ocid1\.[a-zA-Z0-9._-]+', entry['id'])):
                 raise LifecycleError('OCI candidate has an invalid provider OCID.')
@@ -626,7 +860,7 @@ def validate_distributed_deathstarbench_candidate(job, *, clients=None, require_
             for name in ('compute', 'network', 'block'):
                 if getattr(clients[name], '_config', {}).get('region') != contract['inputs']['region']:
                     raise LifecycleError('OCI validation client region conflicts with the candidate contract.')
-            _verify_graph(contract, clients)
+            _verify_graph(contract, clients, ownership_snapshot=ownership_snapshot)
             if require_ready:
                 for entry in contract['entries'].values():
                     expected_state = {'instance': 'RUNNING', 'volume_attachment': 'ATTACHED'}.get(entry['spec']['kind'], 'AVAILABLE')
@@ -638,9 +872,9 @@ def validate_distributed_deathstarbench_candidate(job, *, clients=None, require_
         raise LifecycleError(f'Malformed OCI candidate validation contract: {exc}') from exc
 
 
-def distributed_runtime_projection(job, *, clients=None):
+def distributed_runtime_projection(job, *, clients=None, ownership_snapshot='legacy'):
     """Derive exact SSH/topology/storage aliases without editing persisted state."""
-    contract = validate_distributed_deathstarbench_candidate(job, clients=clients, require_ready=True)
+    contract = validate_distributed_deathstarbench_candidate(job, clients=clients, require_ready=True, ownership_snapshot=ownership_snapshot)
     return _runtime_projection(contract)
 
 
@@ -686,11 +920,11 @@ def distributed_deathstarbench_candidate_projection(resources):
     }
 
 
-def publish_distributed_runtime_projection(job, *, clients, persist):
+def publish_distributed_runtime_projection(job, *, clients, persist, ownership_snapshot='legacy'):
     """Live-validate and durably publish derived aliases; never overwrite drift."""
     if clients is None or not callable(persist):
         raise LifecycleError('Live OCI clients and durable persistence are required to publish runtime aliases.')
-    aliases = distributed_runtime_projection(job, clients=clients)
+    aliases = distributed_runtime_projection(job, clients=clients, ownership_snapshot=ownership_snapshot)
     job['resources'].update(copy.deepcopy(aliases))
     persist(job)
     return aliases
@@ -822,7 +1056,7 @@ def _wait(entry, contract, clients, *, deleted=False, timeout=WAIT_SECONDS):
         time.sleep(2)
 
 
-def _implicit(entry, contract, clients):
+def _implicit(entry, contract, clients, *, ownership_snapshot='legacy'):
     """Discover implicit children by exact immutable parent, not name guessing."""
     spec = entry['spec']
     compartment = contract['inputs']['compartment_id']
@@ -859,6 +1093,8 @@ def _implicit(entry, contract, clients):
             _assert_subset(expected_attachment, actual_attachment, 'Implicit attachment readback')
             if not attachment_etag:
                 raise LifecycleError('Implicit attachment readback ETag is missing.')
+            if ownership_snapshot == 'startup-v1':
+                _startup_implicit_snapshot(kind, actual_attachment, contract=contract, entry=entry)
         vnic, etag = _get(clients['network'], 'get_vnic', vnics[0]['vnic_id']) or ({}, None)
         expected = _resolve(spec['body']['create_vnic_details'], contract['entries'])
         public = expected.pop('assign_public_ip')
@@ -877,6 +1113,26 @@ def _implicit(entry, contract, clients):
         found['boot_volume'] = {'id': boot['id'], 'kind': 'boot_volume', 'client': 'block', 'snapshot': boot, 'etag': etag}
         found['attachments'] = {'vnic': vnics[0], 'boot': boots[0]}
     previous = entry.get('implicit')
+    if ownership_snapshot == 'startup-v1':
+        def project(implicit):
+            result = copy.deepcopy(implicit)
+            for kind, child in result.items():
+                if kind == 'attachments':
+                    if set(child) != {'vnic', 'boot'}:
+                        raise LifecycleError('Strict OCI attachment wrapper differs.')
+                    for name, attachment_kind in (('vnic', 'vnic_attachment'), ('boot', 'boot_volume_attachment')):
+                        child[name] = _startup_implicit_snapshot(attachment_kind, child[name], contract=contract, entry=entry)
+                else:
+                    if set(child) - {'id', 'kind', 'client', 'snapshot', 'etag', 'delete_attempted_at', 'deletion_confirmed_at'}:
+                        raise LifecycleError('Strict OCI implicit wrapper differs.')
+                    if (type(child.get('etag')) is not str or not re.fullmatch(r'[\x20-\x7e]{1,512}', child['etag'])
+                            or child['kind'] != kind or child['snapshot']['id'] != child['id']):
+                        raise LifecycleError('Strict OCI implicit wrapper identity differs.')
+                    child['snapshot'] = _startup_implicit_snapshot(kind, child['snapshot'], contract=contract, entry=entry)
+            return result
+        found = project(found)
+        if previous:
+            previous = project(previous)
     if previous:
         for key in found:
             if key == 'attachments':
@@ -1132,7 +1388,7 @@ def attest_distributed_candidate_terminal_deletion(job, *, clients):
     return True
 
 
-def provision_distributed_deathstarbench_candidate(job, *, inputs, clients, persist, emit=None):
+def provision_distributed_deathstarbench_candidate(job, *, inputs, clients, persist, emit=None, ownership_snapshot='legacy'):
     """Create only candidate infrastructure. Requires an exclusive caller lease.
 
     ``inputs`` contains explicit compartment/AD/region, shape/capacity/arch,
@@ -1143,15 +1399,18 @@ def provision_distributed_deathstarbench_candidate(job, *, inputs, clients, pers
     if not callable(persist) or not re.fullmatch(r'[0-9a-f]{12}', str(job.get('id', ''))):
         raise LifecycleError('Durable persistence and a canonical job ID are required.')
     _validate_inputs(inputs)
+    _startup_policy(ownership_snapshot, inputs)
     for client in clients.values():
         region = getattr(client, '_config', {}).get('region')
         if region != inputs['region']:
             raise LifecycleError('OCI SDK client region does not match the pinned region.')
     resources = job.setdefault('resources', {})
+    if ownership_snapshot == 'startup-v1' and resources:
+        raise LifecycleError('Strict OCI startup cannot resume a create invocation.')
     if CONTRACT_KEY not in resources:
         if resources:
             raise LifecycleError('Cannot mix candidate infrastructure with another resource inventory.')
-        images = _preflight(inputs, clients)
+        images = _preflight(inputs, clients, ownership_snapshot=ownership_snapshot)
         resources[CONTRACT_KEY] = {'schema_version': SCHEMA_VERSION, 'job_id': job['id'], 'inputs': copy.deepcopy(inputs),
             'manifest': _manifest(inputs).as_dict(), 'images': images, 'created_at': _now(), 'status': 'planned',
             'entries': {key: {'spec': spec, 'retry_token': str(uuid.uuid4()), 'status': 'planned'} for key, spec in _specs(job['id'], inputs).items()}}
@@ -1181,10 +1440,12 @@ def provision_distributed_deathstarbench_candidate(job, *, inputs, clients, pers
                 entry['id'] = _dict(response.data)['id']
                 _save(job, persist)
             else:
+                if ownership_snapshot == 'startup-v1':
+                    raise LifecycleError('Strict OCI original create identity remains unresolved.')
                 entry['id'] = _recover(entry, contract, clients)
                 _save(job, persist)
         _wait(entry, contract, clients)
-        _implicit(entry, contract, clients)
+        _implicit(entry, contract, clients, ownership_snapshot=ownership_snapshot)
         entry['status'] = 'ready'
         _save(job, persist)
         if spec['kind'] == 'network_security_group':
@@ -1217,7 +1478,7 @@ def _owned_delete_intent(entry):
     return attempted.tzinfo is not None and attempted.utcoffset() is not None
 
 
-def _verify_graph(contract, clients):
+def _verify_graph(contract, clients, *, ownership_snapshot='legacy'):
     """Read-only full graph gate, run before every destructive operation."""
     entries = contract['entries']
     for entry in entries.values():
@@ -1245,7 +1506,7 @@ def _verify_graph(contract, clients):
         # checked before a retry can terminate it (including foreign VNICs).
         deleting_in_cloud = cloud_state in {'TERMINATING', 'TERMINATED'}
         if not deleting_in_cloud:
-            _implicit(entry, contract, clients)
+            _implicit(entry, contract, clients, ownership_snapshot=ownership_snapshot)
     vcn = entries['vcn'].get('id')
     if not vcn or entries['vcn']['status'] == 'deleted':
         return
@@ -1300,7 +1561,7 @@ def _verify_graph(contract, clients):
             raise LifecycleError('Subnet contains an untracked private IP or VNIC.')
 
 
-def quiesce_distributed_deathstarbench_load_generator(job, *, clients):
+def quiesce_distributed_deathstarbench_load_generator(job, *, clients, ownership_snapshot='legacy'):
     """Stop only the exact owned load generator before whole-graph cleanup.
 
     The execution journal is durable evidence that the remote load unit may
@@ -1311,7 +1572,7 @@ def quiesce_distributed_deathstarbench_load_generator(job, *, clients):
     resources = job.get('resources', {})
     if DEATHSTARBENCH_EXECUTION_JOURNAL_KEY not in resources:
         return False
-    contract = validate_distributed_deathstarbench_candidate(job)
+    contract = validate_distributed_deathstarbench_candidate(job, ownership_snapshot=ownership_snapshot)
     for name in ('compute', 'network', 'block'):
         client = clients.get(name) if isinstance(clients, dict) else None
         if client is None or getattr(client, '_config', {}).get('region') != (
@@ -1330,7 +1591,7 @@ def quiesce_distributed_deathstarbench_load_generator(job, *, clients):
     # This reuses the existing instance child validator, including exact VNIC,
     # boot-volume, and attachment identities.  It mutates only this detached
     # contract copy and never discards persisted recovery evidence.
-    _implicit(entry, contract, clients)
+    _implicit(entry, contract, clients, ownership_snapshot=ownership_snapshot)
     state, etag = observed[0].get('lifecycle_state'), observed[1]
     quiet_states = {'STOPPING', 'STOPPED', 'TERMINATING', 'TERMINATED'}
     if state in quiet_states:
@@ -1358,11 +1619,33 @@ def quiesce_distributed_deathstarbench_load_generator(job, *, clients):
     return True
 
 
-def destroy_distributed_deathstarbench_candidate(job, *, clients, persist, emit=None):
+def prepare_distributed_candidate_cleanup(job, *, clients):
+    contract = _load(job)
+    _startup_policy('startup-v1', contract['inputs'])
+    if any(not entry.get('id') and entry['status'] not in ('planned', 'deleted') for entry in contract['entries'].values()):
+        raise LifecycleError('Strict OCI original allocation identity remains unresolved.')
+    return validate_distributed_deathstarbench_candidate(job, clients=clients, ownership_snapshot='startup-v1')
+
+
+def destroy_distributed_deathstarbench_candidate(job, *, clients, persist, emit=None,
+                                               strict_cleanup=False, ownership_snapshot='legacy'):
     """Delete only the fully verified candidate graph, retaining recovery state."""
     if not callable(persist):
         raise LifecycleError('Durable persistence is required for cleanup.')
     contract = _load(job)
+    _startup_policy(ownership_snapshot, contract['inputs'])
+    if strict_cleanup:
+        if ownership_snapshot != 'startup-v1':
+            raise LifecycleError('Strict OCI cleanup requires its finite snapshot policy.')
+        # Canonical private JSON sorts object keys. Dependency order is the
+        # original finite create recipe, never a deserialized mapping order.
+        contract['entries'] = {key: contract['entries'][key] for key in _specs(contract['job_id'], contract['inputs'])}
+        if any(not entry.get('id') and entry['status'] not in ('planned', 'deleted') for entry in contract['entries'].values()):
+            raise LifecycleError('Strict OCI original allocation identity remains unresolved.')
+        for entry in contract['entries'].values():
+            if entry.get('id') and entry['status'] != 'deleted' and entry['spec']['kind'] in ('vcn', 'instance') and not entry.get('implicit'):
+                raise LifecycleError('Strict OCI cleanup requires captured implicit boundaries before mutation.')
+        _verify_graph(copy.deepcopy(contract), clients, ownership_snapshot=ownership_snapshot)
     for client in clients.values():
         if getattr(client, '_config', {}).get('region') != contract['inputs']['region']:
             raise LifecycleError('OCI cleanup client region differs from the saved contract.')
@@ -1370,12 +1653,12 @@ def destroy_distributed_deathstarbench_candidate(job, *, clients, persist, emit=
         if not distributed_candidate_is_deleted(job):
             raise LifecycleError('OCI deleted marker lacks complete, consistent cleanup evidence.')
         return
-    quiesce_distributed_deathstarbench_load_generator(job, clients=clients)
+    quiesce_distributed_deathstarbench_load_generator(job, clients=clients, ownership_snapshot=ownership_snapshot)
     for entry in contract['entries'].values():
-        if not entry.get('id') and entry['status'] != 'planned':
+        if not strict_cleanup and not entry.get('id') and entry['status'] != 'planned':
             entry['id'] = _recover(entry, contract, clients)
             _save(job, persist)
-    _verify_graph(contract, clients)
+    _verify_graph(contract, clients, ownership_snapshot=ownership_snapshot)
     contract['status'] = 'deleting'
     _save(job, persist)
     # Reverse insertion order gives attachment -> nodes -> data disk -> NSGs
@@ -1383,7 +1666,7 @@ def destroy_distributed_deathstarbench_candidate(job, *, clients, persist, emit=
     for key, entry in reversed(list(contract['entries'].items())):
         if entry['status'] in {'planned', 'deleted'}:
             continue
-        _verify_graph(contract, clients)
+        _verify_graph(contract, clients, ownership_snapshot=ownership_snapshot)
         spec = entry['spec']
         observed = _verify(entry, contract, clients)
         if observed is not None and observed[0].get('lifecycle_state') not in {'TERMINATED', 'DETACHED'}:
@@ -1420,10 +1703,10 @@ def destroy_distributed_deathstarbench_candidate(job, *, clients, persist, emit=
                             # Only bypass the optional optimistic header for
                             # that exact resource after two identical,
                             # full-graph-validated payload snapshots.
-                            _verify_graph(contract, clients)
+                            _verify_graph(contract, clients, ownership_snapshot=ownership_snapshot)
                             first = _verify(entry, contract, clients)
                             time.sleep(2)
-                            _verify_graph(contract, clients)
+                            _verify_graph(contract, clients, ownership_snapshot=ownership_snapshot)
                             second = _verify(entry, contract, clients)
                             if (first is None or second is None or not first[1]
                                     or not second[1]
@@ -1447,7 +1730,7 @@ def destroy_distributed_deathstarbench_candidate(job, *, clients, persist, emit=
                         # parent gateway/VCN ETag. Re-audit the entire remaining
                         # graph and exact target before retrying; configuration
                         # or ownership drift still fails closed in verification.
-                        _verify_graph(contract, clients)
+                        _verify_graph(contract, clients, ownership_snapshot=ownership_snapshot)
                         refreshed = _verify(entry, contract, clients)
                         if refreshed is None:
                             break
@@ -1463,6 +1746,11 @@ def destroy_distributed_deathstarbench_candidate(job, *, clients, persist, emit=
             observed_boot = _get(clients['block'], 'get_boot_volume', boot['id'])
             if observed_boot and observed_boot[0].get('lifecycle_state') != 'TERMINATED':
                 data, etag = observed_boot
+                if ownership_snapshot == 'startup-v1':
+                    data = _startup_implicit_snapshot('boot_volume', data, contract=contract, entry=entry)
+                    saved = _startup_implicit_snapshot('boot_volume', boot['snapshot'], contract=contract, entry=entry)
+                    if _stable_implicit(saved) != _stable_implicit(data):
+                        raise LifecycleError('Strict OCI boot configuration changed before deletion.')
                 _assert_subset(_stable_implicit(boot['snapshot']), data, 'boot-volume')
                 attachments = _list(clients['compute'], 'list_boot_volume_attachments', availability_domain=contract['inputs']['availability_domain'], compartment_id=contract['inputs']['compartment_id'], boot_volume_id=boot['id'])
                 if any(item.get('lifecycle_state') != 'DETACHED' for item in attachments):

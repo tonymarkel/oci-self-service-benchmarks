@@ -3772,9 +3772,9 @@ def distributed_deathstarbench_candidate_projection(resources):
     return _dsb_candidate_projection(resources, require_aliases=True)
 
 
-def validate_distributed_deathstarbench_candidate(job, *, persist=None, aws_session=None):
+def validate_distributed_deathstarbench_candidate(job, *, persist=None, aws_session=None, strict_cleanup=False):
     """Reconcile/audit AWS read-only, then publish exact nonsecret SSH aliases."""
-    objects = recover_distributed_deathstarbench_candidate(job, persist=persist, aws_session=aws_session)
+    objects = recover_distributed_deathstarbench_candidate(job, persist=persist, aws_session=aws_session, strict_cleanup=strict_cleanup)
     state = _dsb_load(job)
     contract, graph = state['contract'], state['graph']
     if set(objects) != set(graph):
@@ -4012,6 +4012,7 @@ def _dsb_discover(
     *,
     allow_attaching=False,
     allow_quiesced_load_generator=False,
+    strict_cleanup=False,
 ):
     kind, _ = _dsb_specs(contract, graph)[key]
     if graph[key].get('id'):
@@ -4020,6 +4021,10 @@ def _dsb_discover(
             'key': 'key-pair-id'}.get(kind, kind + '-id')
         filters = [{'Name': id_filter, 'Values': [graph[key]['id']]}]
     else:
+        if strict_cleanup:
+            if graph[key].get('status') not in ('planned', 'deleted'):
+                _dsb_fail('strict original allocation identity is unresolved.')
+            return None
         filters = _dsb_filters(contract['job_id'], key)
     found = _dsb_list(ec2, kind, filters)
     if len(found) > 1:
@@ -4074,7 +4079,7 @@ def _dsb_accept_igw_create_response(contract, graph, response):
     return gateway
 
 
-def _dsb_wait_for_primary_attachment(ec2, job, key, found, persist):
+def _dsb_wait_for_primary_attachment(ec2, job, key, found, persist, *, strict_cleanup=False):
     """Re-observe an accepted instance; never re-dispatch RunInstances."""
     state = job['resources'][AWS_DSB_GRAPH_KEY]
     contract, graph = state['contract'], state['graph']
@@ -4099,7 +4104,7 @@ def _dsb_wait_for_primary_attachment(ec2, job, key, found, persist):
         _dsb_save(job, persist)
         ec2.get_waiter('instance_running').wait(InstanceIds=[entry['id']])
         for _ in range(AMBIGUOUS_TAG_LOOKUP_ATTEMPTS):
-            observed = _dsb_discover(ec2, contract, graph, key, allow_attaching=True)
+            observed = _dsb_discover(ec2, contract, graph, key, allow_attaching=True, strict_cleanup=strict_cleanup)
             if (observed is not None and observed.get('State', {}).get('Name') == 'running'
                     and observed['NetworkInterfaces'][0]['Attachment']['Status'] == 'attached'
                     and _dsb_public_address_ready(key, observed)
@@ -4121,14 +4126,43 @@ def _dsb_public_address_ready(key, item):
     return bool(public_ip) and association.get('PublicIp') == public_ip
 
 
-def _dsb_ensure(ec2, job, key, persist):
+def _dsb_created_identity(contract, graph, key, response):
+    """Original positive create response only; never a lookup/adoption input."""
+    kind, request = _dsb_specs(contract, graph)[key]
+    if kind == 'igw':
+        item = _dsb_accept_igw_create_response(contract, graph, response)
+    else:
+        container = _DSB_KINDS[kind][4]
+        item = response.get(container) if isinstance(response, Mapping) and container else response
+        if kind == 'instance':
+            item = item[0] if isinstance(item, list) and len(item) == 1 else None
+    prefix = {'instance': 'i', 'route': 'rtb', 'eip': 'eipalloc', 'volume': 'vol'}.get(kind, kind)
+    resource_id = item.get(_DSB_KINDS[kind][2]) if isinstance(item, Mapping) else None
+    if not isinstance(resource_id, str) or not re.fullmatch(re.escape(prefix) + r'-[0-9a-f]+', resource_id):
+        _dsb_fail('strict create response has no unique original allocation identity.')
+    vpc_id = request.get('VpcId') or (graph['vpc'].get('id') if kind in ('instance', 'nat') else None)
+    subnet_id = request.get('SubnetId') or (request['NetworkInterfaces'][0]['SubnetId'] if kind == 'instance' else None)
+    for field, expected in (('OwnerId', contract['account_id']), ('VpcId', vpc_id),
+                            ('SubnetId', subnet_id), ('AvailabilityZone', request.get('AvailabilityZone'))):
+        if expected is not None and field in item and item[field] != expected:
+            _dsb_fail('strict create response contradicts the original create scope.')
+    if isinstance(response, Mapping) and 'OwnerId' in response and response['OwnerId'] != contract['account_id']:
+        _dsb_fail('strict create response contradicts the original account.')
+    if kind == 'instance' and 'Placement' in item:
+        if not isinstance(item['Placement'], Mapping) or ('AvailabilityZone' in item['Placement']
+                and item['Placement']['AvailabilityZone'] != contract['zone']):
+            _dsb_fail('strict create response contradicts the original placement.')
+    return resource_id
+
+
+def _dsb_ensure(ec2, job, key, persist, *, strict_create_identity=False, persist_create_resolution=None):
     state = job['resources'][AWS_DSB_GRAPH_KEY]
     contract, graph = state['contract'], state['graph']
     entry = graph[key]
     kind, request = _dsb_specs(contract, graph)[key]
     if entry['status'] == 'deleted':
         _dsb_fail('a cleanup-started graph cannot be provisioned again.')
-    found = _dsb_discover(ec2, contract, graph, key, allow_attaching=True)
+    found = _dsb_discover(ec2, contract, graph, key, allow_attaching=True, strict_cleanup=strict_create_identity)
     if found is None:
         if entry.get('id') or entry['status'] != 'planned':
             # Even tokenized creates are not blindly replayed: operators can
@@ -4138,7 +4172,9 @@ def _dsb_ensure(ec2, job, key, persist):
         _dsb_save(job, persist)
         try:
             response = getattr(ec2, _DSB_KINDS[kind][3])(**request)
-            if kind == 'igw':
+            if strict_create_identity:
+                entry['id'] = _dsb_created_identity(contract, graph, key, response)
+            elif kind == 'igw':
                 found = _dsb_accept_igw_create_response(contract, graph, response)
                 if found is not None:
                     # The service response is the first authoritative identity.
@@ -4161,16 +4197,26 @@ def _dsb_ensure(ec2, job, key, persist):
                 # instance is accepted. This applies only to the fresh service
                 # response, never a saved error string or unresolved intent.
                 entry['status'] = 'planned'
-                _dsb_save(job, persist)
+                if strict_create_identity and persist_create_resolution is not None:
+                    _dsb_save(job, lambda value: persist_create_resolution(value,
+                        resource_key=key, request_identity=request.get('ClientToken'),
+                        result='rejected-before-allocation', classification=error_code))
+                else:
+                    _dsb_save(job, persist)
                 raise
             entry['status'] = 'create_ambiguous'
             _dsb_save(job, persist)
+            if strict_create_identity:
+                raise
             # An accepted request can lose its response; never create twice.
-            found = _dsb_discover(ec2, contract, graph, key, allow_attaching=True)
+            found = _dsb_discover(ec2, contract, graph, key, allow_attaching=True, strict_cleanup=strict_create_identity)
             if found is None:
                 raise
+        if strict_create_identity:
+            # A failed durable return must escape without another SDK action.
+            _dsb_save(job, persist)
         for _ in range(AMBIGUOUS_TAG_LOOKUP_ATTEMPTS):
-            found = _dsb_discover(ec2, contract, graph, key, allow_attaching=True)
+            found = _dsb_discover(ec2, contract, graph, key, allow_attaching=True, strict_cleanup=strict_create_identity)
             if found:
                 break
             time.sleep(AMBIGUOUS_TAG_LOOKUP_DELAY_SECONDS)
@@ -4179,7 +4225,7 @@ def _dsb_ensure(ec2, job, key, persist):
             _dsb_save(job, persist)
             _dsb_fail(f'{key} create cannot yet be reconciled.')
     if kind == 'instance':
-        found = _dsb_wait_for_primary_attachment(ec2, job, key, found, persist)
+        found = _dsb_wait_for_primary_attachment(ec2, job, key, found, persist, strict_cleanup=strict_create_identity)
     entry['id'] = found[_DSB_KINDS[kind][2]]
     entry['status'] = (
         'creating' if kind == 'instance' and found.get('State', {}).get('Name') == 'pending'
@@ -4232,16 +4278,16 @@ def _dsb_rule_set(permissions):
     return values
 
 
-def _dsb_connect(ec2, job, persist):
+def _dsb_connect(ec2, job, persist, *, strict_create_identity=False):
     """Reconcile child edges from observed state, allowing only exact subsets."""
     state = job['resources'][AWS_DSB_GRAPH_KEY]
     c, g = state['contract'], state['graph']
-    igw = _dsb_discover(ec2, c, g, 'igw')
+    igw = _dsb_discover(ec2, c, g, 'igw', strict_cleanup=strict_create_identity)
     if not igw.get('Attachments'):
         ec2.attach_internet_gateway(InternetGatewayId=g['igw']['id'], VpcId=g['vpc']['id'])
     for key, target, target_key in (
         ('public-route', 'GatewayId', 'igw'), ('private-route', 'NatGatewayId', 'nat')):
-        table = _dsb_discover(ec2, c, g, key)
+        table = _dsb_discover(ec2, c, g, key, strict_cleanup=strict_create_identity)
         default = [r for r in table.get('Routes', []) if r.get('DestinationCidrBlock') == '0.0.0.0/0']
         if not default:
             ec2.create_route(RouteTableId=g[key]['id'], DestinationCidrBlock='0.0.0.0/0',
@@ -4255,7 +4301,7 @@ def _dsb_connect(ec2, job, persist):
             if not attached:
                 ec2.associate_route_table(RouteTableId=g[key]['id'], SubnetId=subnet_id)
     for role in AWS_DSB_ADDRESSES:
-        group = _dsb_discover(ec2, c, g, 'sg-' + role)
+        group = _dsb_discover(ec2, c, g, 'sg-' + role, strict_cleanup=strict_create_identity)
         expected = _dsb_permissions(c, g, role)
         observed = _dsb_rule_set(group.get('IpPermissions', []))
         if not observed <= _dsb_rule_set(expected):
@@ -4270,6 +4316,7 @@ def _dsb_connect(ec2, job, persist):
 def provision_distributed_deathstarbench_candidate(
     job, plan, *, support_image, application_image, public_key=None,
     emit=None, persist=None, aws_session=None,
+    strict_create_identity=False, persist_create_resolution=None,
 ):
     """Explicit operator entrypoint, not reachable through normal released plans.
 
@@ -4292,6 +4339,8 @@ def provision_distributed_deathstarbench_candidate(
         raise ValueError('An OpenSSH RSA or Ed25519 public key is required.')
     _dsb_public_key_identity(public_key)
     resources = job.setdefault('resources', {})
+    if strict_create_identity and resources:
+        _dsb_fail('strict startup cannot resume an existing create invocation.')
     if resources and AWS_DSB_GRAPH_KEY not in resources:
         _dsb_fail('refusing pre-existing compact or unrelated resource state.')
     session = _session(_profile(plan), _region(plan), aws_session)
@@ -4348,16 +4397,17 @@ def provision_distributed_deathstarbench_candidate(
             continue
         if key == 'nat':
             # Public NAT requires its public subnet's IGW and route first.
-            igw = _dsb_discover(ec2, contract, g, 'igw')
+            igw = _dsb_discover(ec2, contract, g, 'igw', strict_cleanup=strict_create_identity)
             if not igw.get('Attachments'):
                 ec2.attach_internet_gateway(InternetGatewayId=g['igw']['id'], VpcId=g['vpc']['id'])
-            table = _dsb_discover(ec2, contract, g, 'public-route')
+            table = _dsb_discover(ec2, contract, g, 'public-route', strict_cleanup=strict_create_identity)
             if not any(r.get('DestinationCidrBlock') == '0.0.0.0/0' for r in table.get('Routes', [])):
                 ec2.create_route(RouteTableId=g['public-route']['id'],
                     DestinationCidrBlock='0.0.0.0/0', GatewayId=g['igw']['id'])
             if not any(a.get('SubnetId') == g['subnet-management']['id'] for a in table.get('Associations', [])):
                 ec2.associate_route_table(RouteTableId=g['public-route']['id'], SubnetId=g['subnet-management']['id'])
-        _dsb_ensure(ec2, job, key, persist)
+        _dsb_ensure(ec2, job, key, persist, strict_create_identity=strict_create_identity,
+                    persist_create_resolution=persist_create_resolution)
         if key == 'vpc':
             ec2.get_waiter('vpc_available').wait(VpcIds=[g[key]['id']])
         if key.startswith('subnet-'):
@@ -4365,15 +4415,17 @@ def provision_distributed_deathstarbench_candidate(
         if key == 'nat':
             ec2.get_waiter('nat_gateway_available').wait(NatGatewayIds=[g[key]['id']])
     # Audit all existing children before adding role rules or associations.
-    recover_distributed_deathstarbench_candidate(job, persist=persist, aws_session=session)
-    _dsb_connect(ec2, job, persist)
+    recover_distributed_deathstarbench_candidate(job, persist=persist, aws_session=session, strict_cleanup=strict_create_identity)
+    _dsb_connect(ec2, job, persist, strict_create_identity=strict_create_identity)
     for role in manifest.creation_order:
         key = 'instance-' + role
-        _dsb_ensure(ec2, job, key, persist)
+        _dsb_ensure(ec2, job, key, persist, strict_create_identity=strict_create_identity,
+                    persist_create_resolution=persist_create_resolution)
         ec2.get_waiter('instance_running').wait(InstanceIds=[g[key]['id']])
-        _dsb_ensure(ec2, job, key, persist)
+        _dsb_ensure(ec2, job, key, persist, strict_create_identity=strict_create_identity,
+                    persist_create_resolution=persist_create_resolution)
         _emit(job, emit, 'Provision', f'AWS distributed {role} instance is running.')
-    volume = _dsb_discover(ec2, contract, g, 'database-data')
+    volume = _dsb_discover(ec2, contract, g, 'database-data', strict_cleanup=strict_create_identity)
     expected_attachment = {'InstanceId': g['instance-database']['id'], 'Device': DATA_VOLUME_DEVICE}
     attachments = volume.get('Attachments', [])
     if not attachments:
@@ -4383,12 +4435,12 @@ def provision_distributed_deathstarbench_candidate(
         _dsb_fail('database volume attachment differs.')
     ec2.get_waiter('volume_in_use').wait(VolumeIds=[g['database-data']['id']])
     # AttachVolume defaults to false; verify rather than silently changing a disk contract.
-    recover_distributed_deathstarbench_candidate(job, persist=persist, aws_session=session)
+    recover_distributed_deathstarbench_candidate(job, persist=persist, aws_session=session, strict_cleanup=strict_create_identity)
     _emit(job, emit, 'Provision', 'AWS five-node infrastructure candidate is ready; runtime remains unreleased.')
     return resources
 
 
-def _dsb_verify_graph(ec2, contract, graph, objects):
+def _dsb_verify_graph(ec2, contract, graph, objects, *, expected_cleanup_identity=None, capture_ownership=False):
     """Read the whole child graph before permitting the first delete.
 
     Fresh VPC default route/security/ACL objects are provider-owned defaults;
@@ -4396,6 +4448,9 @@ def _dsb_verify_graph(ec2, contract, graph, objects):
     stop cleanup, even when the top-level VPC still carries our tags.
     """
     vpc_id = graph['vpc'].get('id')
+    implicit = {}
+    def capture(key, kind, resource_id, parent_id):
+        implicit[key] = {'kind': kind, 'id': resource_id, 'parent_id': parent_id}
     for kind in _DSB_KINDS:
         known = {item[_DSB_KINDS[kind][2]] for key, item in objects.items()
                  if _dsb_specs(contract, graph)[key][0] == kind}
@@ -4426,11 +4481,15 @@ def _dsb_verify_graph(ec2, contract, graph, objects):
                                for rule in child.get('IpPermissions', [])
                                for p in rule.get('UserIdGroupPairs', []))):
                     _dsb_fail('default VPC security group has foreign configuration.')
+                capture('vpc-default-sg', 'sg', child['GroupId'], vpc_id)
                 continue
             if kind == 'route' and any(a.get('Main') for a in child.get('Associations', [])):
                 if (any(not a.get('Main') for a in child.get('Associations', []))
                         or any(r.get('GatewayId') != 'local' for r in child.get('Routes', []))):
                     _dsb_fail('default VPC route table has foreign configuration.')
+                if (capture_ownership or expected_cleanup_identity is not None) and 'vpc-default-route' in implicit:
+                    _dsb_fail('default VPC route table is ambiguous.')
+                capture('vpc-default-route', 'route', child['RouteTableId'], vpc_id)
                 continue
             _dsb_fail(f'foreign {kind} child in the candidate VPC.')
     allowed_nics = set()
@@ -4441,6 +4500,9 @@ def _dsb_verify_graph(ec2, contract, graph, objects):
             allowed_nics.update(n['NetworkInterfaceId'] for n in item.get('NetworkInterfaces', []))
             instance_nics[item['NetworkInterfaces'][0]['NetworkInterfaceId']] = item
             role = key.removeprefix('instance-')
+            primary = item['NetworkInterfaces'][0]
+            capture(role + '-primary-eni', 'network_interface', primary['NetworkInterfaceId'], item['InstanceId'])
+            capture(role + '-eni-attachment', 'eni_attachment', primary['Attachment']['AttachmentId'], item['InstanceId'])
             for device in item.get('BlockDeviceMappings', []):
                 if not device.get('Ebs', {}).get('DeleteOnTermination'):
                     continue
@@ -4457,9 +4519,14 @@ def _dsb_verify_graph(ec2, contract, graph, objects):
                         or len(attachments) != 1
                         or attachments[0].get('InstanceId') != item['InstanceId']):
                     _dsb_fail(f'{key} boot volume configuration/attachment differs.')
+                capture(role + '-boot-volume', 'volume', volume_id, item['InstanceId'])
         elif kind == 'nat':
             allowed_nics.update(a['NetworkInterfaceId'] for a in item.get('NatGatewayAddresses', [])
                                 if a.get('NetworkInterfaceId'))
+            for address in item.get('NatGatewayAddresses', []):
+                nic_id = address.get('NetworkInterfaceId')
+                if nic_id:
+                    capture('nat-eni-' + nic_id, 'network_interface', nic_id, item['NatGatewayId'])
         elif kind == 'volume':
             for attachment in item.get('Attachments', []):
                 if (attachment.get('InstanceId') != graph['instance-database'].get('id')
@@ -4551,6 +4618,7 @@ def _dsb_verify_graph(ec2, contract, graph, objects):
                            or not a.get('NetworkAclAssociationId') for a in associations)
                     or len({a['NetworkAclAssociationId'] for a in associations}) != len(associations)):
                 _dsb_fail('default VPC network ACL has foreign entries or associations.')
+            capture('vpc-default-acl', 'network_acl', acl['NetworkAclId'], vpc_id)
         endpoints = _dsb_read_children(ec2, 'describe_vpc_endpoints', 'VpcEndpoints', filters)
         if endpoints:
             _dsb_fail('candidate VPC has foreign endpoints.')
@@ -4567,6 +4635,14 @@ def _dsb_verify_graph(ec2, contract, graph, objects):
                                  [{'Name': 'attachment.vpc-id', 'Values': [vpc_id]}])
         if vpn:
             _dsb_fail('candidate VPC has a foreign VPN gateway.')
+    if expected_cleanup_identity is not None:
+        if any(expected_cleanup_identity.get('implicit', {}).get(key) != row for key, row in implicit.items()):
+            _dsb_fail('sealed implicit allocation identity changed.')
+        live_ids = {row[_DSB_KINDS[_dsb_specs(contract, graph)[key][0]][2]] for key, row in objects.items()}
+        if any(row['parent_id'] in live_ids and key not in implicit
+               for key, row in expected_cleanup_identity.get('implicit', {}).items()):
+            _dsb_fail('sealed live parent lost a captured implicit allocation.')
+    return implicit
 
 
 def recover_distributed_deathstarbench_candidate(
@@ -4576,6 +4652,8 @@ def recover_distributed_deathstarbench_candidate(
     aws_session=None,
     wait_for_attachments=True,
     allow_quiesced_load_generator=False,
+    strict_cleanup=False,
+    expected_cleanup_identity=None,
 ):
     """Read-only cloud reconciliation; persist accepted IDs, never re-create."""
     state = _dsb_load(
@@ -4583,6 +4661,8 @@ def recover_distributed_deathstarbench_candidate(
         allow_quiesced_load_generator=allow_quiesced_load_generator,
     )
     contract, graph = state['contract'], state['graph']
+    if strict_cleanup and expected_cleanup_identity is not None:
+        _dsb_require_strict_boundary(graph, expected_cleanup_identity)
     session = _session(contract['profile'], contract['region'], aws_session)
     if session.client('sts', region_name=contract['region']).get_caller_identity()['Account'] != contract['account_id']:
         _dsb_fail('current AWS account differs from the launch account.')
@@ -4598,12 +4678,13 @@ def recover_distributed_deathstarbench_candidate(
             key,
             allow_attaching=may_wait,
             allow_quiesced_load_generator=allow_quiesced_load_generator,
+            strict_cleanup=strict_cleanup,
         )
         if found:
             if entry['status'] == 'deleted':
                 _dsb_fail(f'{key} reappeared after confirmed deletion.')
             if may_wait and key.startswith('instance-'):
-                found = _dsb_wait_for_primary_attachment(ec2, job, key, found, persist)
+                found = _dsb_wait_for_primary_attachment(ec2, job, key, found, persist, strict_cleanup=strict_cleanup)
             entry['id'] = found[_DSB_KINDS[_dsb_specs(contract, graph)[key][0]][2]]
             if key.startswith('instance-'):
                 observed_public_ip = found.get('PublicIpAddress')
@@ -4630,8 +4711,70 @@ def recover_distributed_deathstarbench_candidate(
                 _dsb_fail(f'{key} disappeared outside cleanup; ownership cannot be established.')
             entry['status'] = 'deleted'
             _dsb_save(job, persist)
-    _dsb_verify_graph(ec2, contract, graph, objects)
+    _dsb_verify_graph(ec2, contract, graph, objects, expected_cleanup_identity=expected_cleanup_identity)
     return objects
+
+
+def _dsb_require_strict_boundary(graph, expected):
+    if not isinstance(expected, dict) or set(expected) != {'explicit', 'implicit'}:
+        _dsb_fail('strict cleanup requires its original sealed allocation boundary.')
+    if expected['explicit'] != {key: entry.get('id') for key, entry in graph.items()}:
+        _dsb_fail('strict cleanup explicit original identity changed.')
+    for entry in graph.values():
+        if not entry.get('id') and entry.get('status') not in ('planned', 'deleted'):
+            _dsb_fail('strict original allocation identity is unresolved.')
+
+
+def prepare_distributed_candidate_cleanup(job, *, aws_session=None, expected_cleanup_identity=None):
+    """Read only: exact original IDs plus verified parent-owned children."""
+    state = _dsb_load(job, allow_quiesced_load_generator=True)
+    contract, graph = state['contract'], state['graph']
+    for entry in graph.values():
+        if not entry.get('id') and entry.get('status') not in ('planned', 'deleted'):
+            _dsb_fail('strict original allocation identity is unresolved.')
+    session = _session(contract['profile'], contract['region'], aws_session)
+    if session.client('sts', region_name=contract['region']).get_caller_identity()['Account'] != contract['account_id']:
+        _dsb_fail('current AWS account differs from the launch account.')
+    ec2 = _dsb_ec2_client(session, contract['region'])
+    objects = {}
+    for key, entry in graph.items():
+        found = _dsb_discover(ec2, contract, graph, key, strict_cleanup=True,
+                              allow_quiesced_load_generator=True)
+        if found is not None:
+            if entry['status'] == 'deleted':
+                _dsb_fail('strict deleted allocation reappeared.')
+            objects[key] = found
+        elif entry.get('id') and entry['status'] not in ('deleting', 'delete_ambiguous', 'deleted'):
+            _dsb_fail('original allocation disappeared without owned deletion intent.')
+    implicit = _dsb_verify_graph(ec2, contract, graph, objects, expected_cleanup_identity=expected_cleanup_identity, capture_ownership=True)
+    return {'explicit': {key: entry.get('id') for key, entry in graph.items()}, 'implicit': implicit}
+
+
+def attest_startup_candidate_absence(job, expected_cleanup_identity, *, aws_session=None):
+    """Independently GET every captured target; attachments follow ENI absence."""
+    state = _dsb_load(job, allow_quiesced_load_generator=True)
+    contract, graph = state['contract'], state['graph']
+    _dsb_require_strict_boundary(graph, expected_cleanup_identity)
+    session = _session(contract['profile'], contract['region'], aws_session)
+    if session.client('sts', region_name=contract['region']).get_caller_identity()['Account'] != contract['account_id']:
+        _dsb_fail('current AWS account differs from the launch account.')
+    ec2 = _dsb_ec2_client(session, contract['region'])
+    for key in graph:
+        if _dsb_discover(ec2, contract, graph, key, strict_cleanup=True, allow_quiesced_load_generator=True) is not None:
+            _dsb_fail('original explicit allocation is still present.')
+    for row in expected_cleanup_identity['implicit'].values():
+        kind = row['kind']
+        if kind == 'eni_attachment':
+            continue
+        if kind in ('network_interface', 'network_acl'):
+            method, result, field = ('describe_network_interfaces', 'NetworkInterfaces', 'network-interface-id') if kind == 'network_interface' else ('describe_network_acls', 'NetworkAcls', 'network-acl-id')
+            found = _dsb_read_children(ec2, method, result, [{'Name': field, 'Values': [row['id']]}])
+        else:
+            field = {'sg': 'group-id', 'route': 'route-table-id'}.get(kind, kind + '-id')
+            found = _dsb_list(ec2, kind, [{'Name': field, 'Values': [row['id']]}])
+        if found:
+            _dsb_fail('original implicit allocation is still present.')
+    return {'original_explicit_and_implicit_ids_absent': True}
 
 
 AWS_DSB_REJECTION_EVIDENCE_KEY = 'aws_candidate_capacity_rejection_cleanup_evidence'
@@ -4867,7 +5010,7 @@ def reconcile_distributed_capacity_rejection_for_cleanup(
 
 
 def quiesce_distributed_deathstarbench_load_generator(
-    job, *, aws_session=None,
+    job, *, aws_session=None, strict_cleanup=False, expected_cleanup_identity=None,
 ):
     """Stop only the exact owned load generator before graph-wide cleanup.
 
@@ -4879,6 +5022,9 @@ def quiesce_distributed_deathstarbench_load_generator(
     measured traffic has been quiesced.
     """
     resources = job.get('resources', {})
+    if strict_cleanup:
+        state = _dsb_load(job, allow_quiesced_load_generator=True)
+        _dsb_require_strict_boundary(state['graph'], expected_cleanup_identity)
     if DEATHSTARBENCH_EXECUTION_JOURNAL_KEY not in resources:
         return False
     state = _dsb_load(job, allow_quiesced_load_generator=True)
@@ -4901,6 +5047,7 @@ def quiesce_distributed_deathstarbench_load_generator(
         graph,
         'instance-load-generator',
         allow_quiesced_load_generator=True,
+        strict_cleanup=strict_cleanup,
     )
     if instance is None:
         return False
@@ -4931,6 +5078,7 @@ def quiesce_distributed_deathstarbench_load_generator(
             graph,
             'instance-load-generator',
             allow_quiesced_load_generator=True,
+            strict_cleanup=strict_cleanup,
         )
         if observed is None or observed.get('State', {}).get('Name') in quiet_states:
             return True
@@ -4941,6 +5089,7 @@ def quiesce_distributed_deathstarbench_load_generator(
         graph,
         'instance-load-generator',
         allow_quiesced_load_generator=True,
+        strict_cleanup=strict_cleanup,
     )
     if observed is not None and observed.get('State', {}).get('Name') not in quiet_states:
         _dsb_fail('load-generator stop was not confirmed.')
@@ -4949,6 +5098,7 @@ def quiesce_distributed_deathstarbench_load_generator(
 
 def destroy_distributed_deathstarbench_candidate(
     job, *, emit=None, persist=None, aws_session=None, preserve_status=False,
+    strict_cleanup=False, expected_cleanup_identity=None,
 ):
     """Quiesce exact load traffic, then verify and delete the whole graph.
 
@@ -4968,8 +5118,12 @@ def destroy_distributed_deathstarbench_candidate(
     c, g = state['contract'], state['graph']
     session = _session(c['profile'], c['region'], aws_session)
     ec2 = _dsb_ec2_client(session, c['region'])
+    if strict_cleanup:
+        _dsb_require_strict_boundary(g, expected_cleanup_identity)
+        prepare_distributed_candidate_cleanup(job, aws_session=session, expected_cleanup_identity=expected_cleanup_identity)
     quiesce_distributed_deathstarbench_load_generator(
-        job, aws_session=session,
+        job, aws_session=session, strict_cleanup=strict_cleanup,
+        expected_cleanup_identity=expected_cleanup_identity,
     )
     objects = recover_distributed_deathstarbench_candidate(
         job,
@@ -4977,6 +5131,8 @@ def destroy_distributed_deathstarbench_candidate(
         aws_session=session,
         wait_for_attachments=False,
         allow_quiesced_load_generator=True,
+        strict_cleanup=strict_cleanup,
+        expected_cleanup_identity=expected_cleanup_identity,
     )
     order = [*('instance-' + r for r in _dsb_contract_manifest(c).deletion_order),
              'database-data', 'nat', 'eip', *('sg-' + r for r in AWS_DSB_ADDRESSES),
@@ -4995,6 +5151,7 @@ def destroy_distributed_deathstarbench_candidate(
             g,
             key,
             allow_quiesced_load_generator=True,
+            strict_cleanup=strict_cleanup,
         )
         if item is None:
             if g[key]['status'] == 'planned':
@@ -5040,6 +5197,8 @@ def destroy_distributed_deathstarbench_candidate(
                     aws_session=session,
                     wait_for_attachments=False,
                     allow_quiesced_load_generator=True,
+                    strict_cleanup=strict_cleanup,
+                    expected_cleanup_identity=expected_cleanup_identity,
                 )
                 ec2.delete_vpc(VpcId=resource_id)
             for _ in range(AMBIGUOUS_TAG_LOOKUP_ATTEMPTS):
@@ -5049,6 +5208,7 @@ def destroy_distributed_deathstarbench_candidate(
                     g,
                     key,
                     allow_quiesced_load_generator=True,
+                    strict_cleanup=strict_cleanup,
                 ) is None:
                     break
                 time.sleep(AMBIGUOUS_TAG_LOOKUP_DELAY_SECONDS)

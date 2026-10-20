@@ -1021,6 +1021,8 @@ def _create_named_resource(
     get_request_type: str,
     get_values: Mapping[str, Any],
     clear_contract_on_confirmed_rejection: bool | None = None,
+    strict_create_identity: bool = False,
+    persist_create_resolution=None,
 ):
     """Insert one deterministic resource with a durable ambiguity contract."""
     resources = job.setdefault('resources', {})
@@ -1044,6 +1046,8 @@ def _create_named_resource(
         else clear_contract_on_confirmed_rejection
     )
     request_id = str(resources.get(request_key) or uuid.uuid4())
+    if strict_create_identity and prior_contract and clear_contract_on_confirmed_rejection is not True:
+        raise ValueError('Strict startup cannot replay a prior GCP create intent.')
     _forget(job, persist, error_key)
     _record(
         job,
@@ -1066,6 +1070,8 @@ def _create_named_resource(
         )
     except Exception as exc:
         if _http_status(exc) == 409:
+            if strict_create_identity:
+                raise
             # requestId retries and deterministic names may surface an
             # AlreadyExists response.  Accept it only after exact-name
             # discovery proves this is the resource body owned by this job.
@@ -1106,20 +1112,28 @@ def _create_named_resource(
         # that no resource was accepted. Once an operation is returned, a
         # wait/GET failure (including a visibility-lag 404) stays ambiguous.
         if _confirmed_rejection(exc) and clear_confirmed:
-            _forget(
-                job,
-                persist,
-                f'{prefix}_name',
-                request_key,
-                ambiguous_key,
-                error_key,
-            )
+            if strict_create_identity and persist_create_resolution is not None:
+                _startup_rejected_create(job, persist_create_resolution, prefix, request_id,
+                    'insert-rejected-before-allocation', str(_http_status(exc)))
+            else:
+                _forget(
+                    job,
+                    persist,
+                    f'{prefix}_name',
+                    request_key,
+                    ambiguous_key,
+                    error_key,
+                )
         raise
     expected_resource = next(
         value
         for key, value in insert_values.items()
         if key.endswith('_resource')
     )
+    captured = False
+    if strict_create_identity and getattr(operation, 'target_id', None) and getattr(operation, 'target_link', None):
+        _capture_original_operation_target(job, persist, prefix, name, operation, insert_request_type, insert_values)
+        captured = True
     try:
         _wait(operation)
     except Exception:
@@ -1143,7 +1157,13 @@ def _create_named_resource(
             if attempt + 1 < RECONCILIATION_ATTEMPTS:
                 time.sleep(RECONCILIATION_DELAY_SECONDS)
         if resource is None:
-            _forget(job, persist, *_contract_keys(prefix))
+            if strict_create_identity and persist_create_resolution is not None and not captured:
+                _startup_rejected_create(job, persist_create_resolution, prefix, request_id,
+                    'terminal-operation-failed-and-exact-target-absent', 'completed-error-exact-absence')
+            elif not strict_create_identity:
+                _forget(job, persist, *_contract_keys(prefix))
+            raise
+        if strict_create_identity:
             raise
         _assert_insert_resource_matches(
             prefix,
@@ -1164,6 +1184,8 @@ def _create_named_resource(
             },
         )
         return resource
+    if strict_create_identity and not captured:
+        _capture_original_operation_target(job, persist, prefix, name, operation, insert_request_type, insert_values)
     try:
         resource = _call(
             client,
@@ -1196,6 +1218,37 @@ def _create_named_resource(
         },
     )
     return resource
+
+
+def _startup_rejected_create(job, callback, prefix, request_id, result, classification):
+    """Fresh producer resolution; commit VM and shared boot intent together."""
+    resources = job['resources']
+    keys = list(_contract_keys(prefix))
+    for role, parent in DISTRIBUTED_NODE_PREFIXES.items():
+        if parent == prefix:
+            boot = DISTRIBUTED_BOOT_PREFIXES[role]
+            if resources.get(boot + '_request_id') != request_id:
+                raise ValueError('Strict parent/boot rejection crossed original request identity.')
+            keys.extend(_contract_keys(boot))
+    for key in keys:
+        resources.pop(key, None)
+    callback(job, resource_key=prefix, request_identity=request_id,
+             result=result, classification=classification)
+
+
+def _capture_original_operation_target(job, persist, prefix, name, operation, request_type, values):
+    resource_id = getattr(operation, 'target_id', None)
+    link = getattr(operation, 'target_link', None)
+    endpoints = {'InsertNetworkRequest': 'networks', 'InsertSubnetworkRequest': 'subnetworks',
+                 'InsertRouterRequest': 'routers', 'InsertFirewallRequest': 'firewalls',
+                 'InsertDiskRequest': 'disks', 'InsertInstanceRequest': 'instances'}
+    scope = 'zones/' + values['zone'] if values.get('zone') else 'regions/' + values['region'] if values.get('region') else 'global'
+    expected = f"projects/{values['project']}/{scope}/{endpoints[request_type]}/{name}"
+    if (type(resource_id) not in (str, int) or not re.fullmatch(r'[1-9][0-9]*', str(resource_id))
+            or type(link) is not str or not re.fullmatch(r'(?:https://(?:compute|www)\.googleapis\.com/compute/v1/)?projects/[A-Za-z0-9_./-]+', link)
+            or not _scoped_link_equal(link, expected)):
+        raise ValueError('Strict insert operation lacks its exact original numeric target identity.')
+    _record(job, persist, **{prefix + '_id': str(resource_id), prefix + '_self_link': link})
 
 
 def _link_equal(left: Any, right: Any) -> bool:
@@ -2057,6 +2110,8 @@ def _ensure_distributed_router(
     name: str,
     network: str,
     cluster_subnet: str,
+    strict_create_identity=False,
+    persist_create_resolution=None,
 ):
     """Create the base router, then idempotently enable its exact NAT."""
 
@@ -2085,6 +2140,8 @@ def _ensure_distributed_router(
 
     router = None
     if resources.get(f'{prefix}_name') == name:
+        if strict_create_identity and not (resources.get(prefix + '_id') and resources.get(prefix + '_self_link')):
+            raise ValueError('Strict router cannot adopt an unknown incarnation.')
         router = _get_or_none(
             clients['routers'],
             clients,
@@ -2117,6 +2174,8 @@ def _ensure_distributed_router(
             },
             get_request_type='GetRouterRequest',
             get_values=get_values,
+            strict_create_identity=strict_create_identity,
+            persist_create_resolution=persist_create_resolution,
         )
 
     if list(_value(router, 'nats', ()) or ()):
@@ -2685,6 +2744,8 @@ def _capture_boot_disk_identity(
     persist: PersistCallback | None,
     prefix: str,
     clients: Mapping[str, Any],
+    *,
+    strict_create_identity=False,
 ):
     resources = job['resources']
     disk = _bounded_cleanup_lookup(
@@ -2708,6 +2769,22 @@ def _capture_boot_disk_identity(
         prefix.removeprefix('gcp_').replace('_', ' '),
     )
     _verify_disk_profile(prefix, disk, resources)
+    if strict_create_identity:
+        role = next(key for key, value in DISTRIBUTED_BOOT_PREFIXES.items() if value == prefix)
+        parent_prefix = DISTRIBUTED_NODE_PREFIXES[role]
+        if not resources.get(parent_prefix + '_id') or not resources.get(parent_prefix + '_self_link'):
+            raise ValueError('Strict boot capture requires its original accepted VM identity.')
+        parent = _get_cleanup_resource(parent_prefix, resources, clients)
+        if parent is None:
+            raise ValueError('Strict boot capture cannot adopt a disk without its original VM.')
+        _assert_saved_identity(parent_prefix, parent, resources)
+        boots = [item for item in (_value(parent, 'disks', ()) or ()) if _value(item, 'boot') is True]
+        users = list(_value(disk, 'users', ()) or ())
+        disk_id, disk_link = _required_resource_identity(prefix, disk)
+        if (not re.fullmatch(r'[1-9][0-9]*', disk_id) or len(boots) != 1
+                or not _scoped_link_equal(_value(boots[0], 'source'), disk_link)
+                or len(users) != 1 or not _scoped_link_equal(users[0], resources[parent_prefix + '_self_link'])):
+            raise ValueError('Strict boot capture lacks its exact original VM attachment relationship.')
     _persist_recovered_identity(job, persist, prefix, disk)
     _record(
         job,
@@ -3455,6 +3532,8 @@ def provision_distributed_deathstarbench_candidate(
     persist: PersistCallback | None = None,
     credentials=None,
     clients=None,
+    strict_create_identity=False,
+    persist_create_resolution=None,
 ):
     """Create the unreleased five-node GCP DeathStarBench candidate.
 
@@ -3487,6 +3566,8 @@ def provision_distributed_deathstarbench_candidate(
             'distributed_tiered_v1/k3s_v1 contract.'
         )
     resources = job.setdefault('resources', {})
+    if strict_create_identity and resources:
+        raise ValueError('Strict startup cannot resume an existing GCP create invocation.')
     saved_provider = str(resources.get('provider') or '').strip().casefold()
     if (
         (saved_provider and saved_provider != 'gcp')
@@ -3687,6 +3768,8 @@ def provision_distributed_deathstarbench_candidate(
         job,
         persist,
         prefix='gcp_dsb_network',
+        strict_create_identity=strict_create_identity,
+        persist_create_resolution=persist_create_resolution,
         name=network_name,
         client=clients['networks'],
         clients=clients,
@@ -3725,6 +3808,8 @@ def provision_distributed_deathstarbench_candidate(
         subnet = _create_named_resource(
             job,
             persist,
+            strict_create_identity=strict_create_identity,
+            persist_create_resolution=persist_create_resolution,
             prefix=prefix,
             name=name,
             client=clients['subnetworks'],
@@ -3760,6 +3845,8 @@ def provision_distributed_deathstarbench_candidate(
         name=router_name,
         network=network_link,
         cluster_subnet=subnet_links['gcp_dsb_cluster_subnet'],
+        strict_create_identity=strict_create_identity,
+        persist_create_resolution=persist_create_resolution,
     )
 
     # Rebuild bodies with the authoritative returned network link before each
@@ -3775,6 +3862,8 @@ def provision_distributed_deathstarbench_candidate(
         _create_named_resource(
             job,
             persist,
+            strict_create_identity=strict_create_identity,
+            persist_create_resolution=persist_create_resolution,
             prefix=prefix,
             name=name,
             client=clients['firewalls'],
@@ -3802,6 +3891,8 @@ def provision_distributed_deathstarbench_candidate(
         database_disk = _create_named_resource(
             job,
             persist,
+            strict_create_identity=strict_create_identity,
+            persist_create_resolution=persist_create_resolution,
             prefix='gcp_dsb_database_data_disk',
             name=database_disk_name,
             client=clients['disks'],
@@ -3961,6 +4052,8 @@ def provision_distributed_deathstarbench_candidate(
                 clear_contract_on_confirmed_rejection=(
                     not instance_had_contract
                 ),
+                strict_create_identity=strict_create_identity,
+                persist_create_resolution=persist_create_resolution,
             )
         except Exception:
             if not resources.get(f'{prefix}_name'):
@@ -4025,7 +4118,7 @@ def provision_distributed_deathstarbench_candidate(
                 'loadgen_network_capacity_kind': 'maximum',
             })
         _record(job, persist, **values)
-        _capture_boot_disk_identity(job, persist, boot_prefix, clients)
+        _capture_boot_disk_identity(job, persist, boot_prefix, clients, strict_create_identity=strict_create_identity)
         _set_inventory_node_status(
             job,
             persist,
@@ -5669,6 +5762,38 @@ def quiesce_distributed_deathstarbench_load_generator(
     )
 
 
+def prepare_distributed_candidate_cleanup(job, *, credentials=None, clients=None):
+    """Exact known-incarnation, read-only startup cleanup gate."""
+    resources = job['resources']
+    manifest, _inventory, expected_names = _load_distributed_cleanup_contract(job)
+    project_id, _, clients = _runtime(str(resources['gcp_project_id']), credentials, clients)
+    project = _call(clients['projects'], 'get', clients, 'GetProjectRequest', project=project_id)
+    if str(_value(project, 'id', '') or '') != str(resources['gcp_compute_project_id']):
+        raise ValueError('Strict GCP cleanup project identity changed.')
+    found = {}
+    for prefix in DISTRIBUTED_RESOURCE_PREFIXES:
+        fields = [resources.get(prefix + '_' + key) for key in ('name', 'id', 'self_link', 'request_id', 'create_ambiguous')]
+        if not any(value is not None for value in fields):
+            continue
+        name, resource_id, link, request_id, ambiguous = fields
+        if (name != expected_names[prefix] or type(resource_id) is not str
+                or not re.fullmatch(r'[1-9][0-9]*', resource_id) or not link
+                or (request_id is not None and not _valid_request_id(request_id))):
+            raise ValueError('Strict GCP cleanup lacks original numeric allocation identity.')
+        if prefix in DISTRIBUTED_BOOT_PREFIXES.values():
+            role = next(role for role, boot in DISTRIBUTED_BOOT_PREFIXES.items() if boot == prefix)
+            parent_request = resources.get(DISTRIBUTED_NODE_PREFIXES[role] + '_request_id')
+            if parent_request and request_id != parent_request:
+                raise ValueError('Strict GCP cleanup boot request identity changed.')
+        found[prefix] = _get_cleanup_resource(prefix, resources, clients)
+        if found[prefix] is not None:
+            _assert_saved_identity(prefix, found[prefix], resources)
+        elif not resources.get(prefix + '_delete_request_id') and ambiguous is True:
+            raise ValueError('Strict GCP accepted create is still unresolved.')
+    _verify_distributed_cleanup_resources(job, found, manifest=manifest)
+    return found
+
+
 def _destroy_distributed_deathstarbench_candidate(
     job: dict[str, Any],
     *,
@@ -5677,8 +5802,11 @@ def _destroy_distributed_deathstarbench_candidate(
     credentials: Any,
     clients: Mapping[str, Any] | None,
     preserve_status: bool,
+    strict_cleanup: bool = False,
 ):
     resources = job.setdefault('resources', {})
+    if strict_cleanup:
+        prepare_distributed_candidate_cleanup(job, credentials=credentials, clients=clients)
     try:
         manifest, inventory, expected_names = (
             _load_distributed_cleanup_contract(job)
@@ -5767,7 +5895,7 @@ def _destroy_distributed_deathstarbench_candidate(
         job, found, manifest=manifest
     )
     for prefix, resource in found.items():
-        if resource is not None:
+        if resource is not None and not strict_cleanup:
             _persist_recovered_identity(job, persist, prefix, resource)
 
     if not preserve_status:
@@ -5915,6 +6043,7 @@ def destroy_resources(
     credentials=None,
     clients=None,
     preserve_status: bool = False,
+    strict_cleanup: bool = False,
 ):
     """Delete the exact, ownership-verified GCP resource graph for one job."""
     resources = job.setdefault('resources', {})
@@ -5926,7 +6055,10 @@ def destroy_resources(
             credentials=credentials,
             clients=clients,
             preserve_status=preserve_status,
+            strict_cleanup=strict_cleanup,
         )
+    if strict_cleanup:
+        raise ValueError('Strict GCP cleanup requires its original distributed contract.')
     if job.get('status') == 'destroyed' and not _managed_resources_remain(resources):
         return resources
     project_id = str(

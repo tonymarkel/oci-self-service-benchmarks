@@ -4442,6 +4442,34 @@ def _best_effort_deallocate_distributed_load_generator(
         return
 
 
+def prepare_distributed_candidate_cleanup(job, *, credential=None, clients=None):
+    """Read-only exact group/child gate before startup's independent seal."""
+    resources = job['resources']
+    if resources.get('azure_distributed_candidate') is not True:
+        raise ValueError('Strict Azure startup cleanup requires the distributed contract.')
+    subscription = str(resources.get('azure_subscription_id') or '')
+    group = str(resources.get('azure_resource_group_name') or '')
+    region = str(resources.get('region') or '')
+    expected = resources.get('azure_resource_group_expected_id')
+    tags = resources.get('azure_resource_group_tags')
+    if (not subscription or not region or group != _job_name(str(job['id']).lower())
+            or expected != _expected_id(subscription, group) or tags != _tags(str(job['id']), 'resource-group')):
+        raise ValueError('Strict Azure original scoped group identity differs.')
+    manifest, _inventory = _load_topology_inventory_contract(resources)
+    _validate_managed_expected_ids(resources, subscription_id=subscription, resource_group=group, manifest=manifest)
+    subscription, account, clients = _runtime(subscription, credential, clients)
+    tenant = str(_value(account, 'tenant_id', _value(account, 'tenantId', '')) or '')
+    if not tenant or tenant != resources.get('azure_tenant_id'):
+        raise ValueError('Strict Azure original tenant identity differs.')
+    observed = _get_or_none(_require_service(_resource_groups(clients), 'resource groups'), group)
+    if observed is not None:
+        _verify_group(observed, subscription_id=subscription, name=group, region=region,
+                      required_tags=tags, saved_id=expected)
+        _verify_resource_group_inventory(clients, resources, subscription_id=subscription,
+                                        resource_group=group, manifest=manifest)
+    return {'subscription_id': subscription, 'tenant_id': tenant, 'resource_group_id': expected}
+
+
 def destroy_resources(
     job: dict[str, Any],
     *,

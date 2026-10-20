@@ -33,6 +33,17 @@ per-run environment ID; an additional exact manifest digest records each run.
 Hotel metadata does not borrow Social Network graph hashes. The normal
 supervisor handles stop, failure, reports, and cloud cleanup.
 
+A [live OCI AMD UI smoke run](qualification/deathstarbench-hotel-ui-oci-amd-20261020.json)
+completed on October 20, 2026: run `bbaf8d2d0f4e`, E5 Flex application node,
+2 threads, 8 connections, 20 requested requests/second, 10 seconds warmup,
+and 30 seconds measurement. All five semantic checks passed; 651 responses
+passed body checks with no HTTP, semantic, or socket errors. Median latency
+was 2.083 ms and p99 was 6.079 ms. All 24 service pod identities remained
+unchanged. Chromium submitted the run and displayed the resulting report
+without page errors. All 21 recorded cloud resources were cleaned up, followed
+by a fresh independent cloud absence check. This is one short functional
+smoke test, not a saturation result or a multi-cloud/Arm qualification.
+
 The sections below preserve the stricter private candidate development history.
 Statements about closed gates describe that path, not experimental UI access.
 

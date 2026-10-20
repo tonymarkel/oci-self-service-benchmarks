@@ -53,6 +53,7 @@ _BLOB_HOSTS = frozenset({
     'production.cloudflare.docker.com',
     'production.cloudfront.docker.com',
     'docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com',
+    'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com',
 })
 _MANIFEST_TYPES = frozenset({
     'application/vnd.docker.distribution.manifest.v2+json',

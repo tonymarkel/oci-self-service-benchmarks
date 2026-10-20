@@ -211,6 +211,64 @@ class CandidateSupportImageAccessTests(unittest.TestCase):
         self.assertTrue(all('authorization' not in call[2] for call in cdn))
         self.assertNotIn('DO-NOT-RETAIN', json.dumps(proof.metadata()))
 
+    def test_s3_config_and_layers_complete_original_support_factory(self):
+        plan, stage, registry = self.case()
+        registry.redirect = lambda repo, selector: (
+            'https://docker-images-prod.s3.dualstack.us-east-1.amazonaws.com/fixture/'
+            + repo.replace('/', '!') + '/blobs/' + selector + '?synthetic-signature=S3-DO-NOT-RETAIN')
+        try:
+            proof = self.qualify(plan, stage, registry)
+        except access.CandidateImageAccessError as exc:
+            self.fail('Exact S3 config/layer redirect was rejected: ' + str(exc))
+        self.assertIs(access.require_candidate_support_image_access(proof, plan, stage), proof)
+        metadata = proof.metadata()
+        responses = [r for r in registry.responses if urllib.parse.urlsplit(r.url).hostname ==
+                     'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com']
+        self.assertEqual(len(responses), 8)
+        self.assertEqual(sum(r.body.startswith(b'{') for r in responses), 4)
+        for response in responses:
+            self.assertEqual(response.offset, len(response.body))
+            self.assertTrue(response.closed)
+            self.assertEqual(digest(response.body), urllib.parse.urlsplit(response.url).path.rsplit('/', 1)[1])
+        self.assertEqual(metadata['downloaded_bytes'], sum(len(r.body) for r in registry.responses))
+        self.assertEqual(sum(item['compressed_layer_bytes'] for item in metadata['images'].values()),
+                         sum(len(r.body) for r in responses if not r.body.startswith(b'{')))
+        self.assertTrue(all('authorization' not in call[2] for call in registry.calls if '/fixture/' in call[0]))
+        for forbidden in ('https://', 'synthetic-signature', 'S3-DO-NOT-RETAIN', 'public.'):
+            self.assertNotIn(forbidden, json.dumps(metadata))
+
+    def test_s3_nearby_hosts_region_and_wrong_port_are_not_followed(self):
+        plan, stage, original = self.case()
+        for host in ('docker-images-prod.s3.dualstack.us-east-1.amazonaws.com.evil.example',
+                     'docker-images-prod.s3.dualstack.us-west-2.amazonaws.com',
+                     'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com:444'):
+            registry = Registry(original.fixture)
+            destination = 'https://' + host + '/blob?synthetic-signature=DO-NOT-RETAIN'
+            registry.redirect = lambda _repo, _selector: destination
+            with self.subTest(host=host), self.assertRaises(access.CandidateImageAccessError):
+                self.qualify(plan, stage, registry)
+            self.assertFalse(any(call[0] == destination for call in registry.calls))
+
+    def test_s3_config_and_layer_corruption_and_truncation_still_fail(self):
+        plan, stage, original = self.case()
+        for part in ('config', 'layer'):
+            for truncate in (False, True):
+                registry = Registry(original.fixture)
+                registry.redirect = lambda repo, selector: (
+                    'https://docker-images-prod.s3.dualstack.us-east-1.amazonaws.com/fixture/'
+                    + repo.replace('/', '!') + '/blobs/' + selector)
+                def corrupt(url, body):
+                    selected = (urllib.parse.urlsplit(url).hostname ==
+                                'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com'
+                                and body.startswith(b'{') == (part == 'config'))
+                    return (body[:-1] if truncate else body[:-1] + b'!') if selected else body
+                registry.body_mutation = corrupt
+                with self.subTest(part=part, truncate=truncate), self.assertRaisesRegex(
+                        access.CandidateImageAccessError, 'SHA-256|Content-Length|body size'):
+                    self.qualify(plan, stage, registry)
+                self.assertTrue(any('/fixture/' in r.url for r in registry.responses))
+                self.assertTrue(all(r.closed for r in registry.responses))
+
     def test_bad_realm_service_scope_duplicate_and_basic_challenges_fail(self):
         plan, stage, original = self.case()
         changes = [lambda value: value.replace('auth.docker.io', 'attacker.example'),

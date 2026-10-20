@@ -125,6 +125,32 @@ class Registry:
         return response
 
 
+def s3_blob_redirect(registry_name, repository, kind, selector):
+    if registry_name == 'docker.io' and kind == 'blobs':
+        return ('https://docker-images-prod.s3.dualstack.us-east-1.amazonaws.com/fixture/'
+                + repository.replace('/', '!') + '/blobs/' + selector
+                + '?synthetic-signature=S3-DO-NOT-RETAIN')
+    return None
+
+
+def assert_complete_s3_bodies(test, metadata, registry):
+    responses = [r for r in registry.responses if urllib.parse.urlsplit(r.url).hostname ==
+                 'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com']
+    test.assertEqual(len(responses), 8)  # Four Docker configs and four compressed layers.
+    test.assertEqual(sum(r.body.startswith(b'{') for r in responses), 4)
+    for response in responses:
+        test.assertEqual(response.offset, len(response.body))
+        test.assertTrue(response.closed)
+        test.assertEqual(digest(response.body), urllib.parse.urlsplit(response.url).path.rsplit('/', 1)[1])
+    test.assertEqual(metadata['downloaded_bytes'], sum(len(r.body) for r in registry.responses))
+    test.assertEqual(sum(item['compressed_layer_bytes'] for item in metadata['images'].values()
+                         if item['image'].startswith('docker.io/')),
+                     sum(len(r.body) for r in responses if not r.body.startswith(b'{')))
+    test.assertTrue(all('authorization' not in call[2] for call in registry.calls if '/fixture/' in call[0]))
+    for forbidden in ('https://', 'synthetic-signature', 'S3-DO-NOT-RETAIN', 'anonymous.'):
+        test.assertNotIn(forbidden, json.dumps(metadata))
+
+
 class GuardedHotelImageAccessTests(unittest.TestCase):
     def case(self, *, variant='one', layer_change=None, config_change=None):
         fixture = adoption_fixtures.GuardedHotelArtifactsTests()
@@ -251,6 +277,49 @@ class GuardedHotelImageAccessTests(unittest.TestCase):
         self.assertEqual(len(cdn_calls), 14)
         self.assertTrue(all('authorization' not in call[2] for call in cdn_calls))
         self.assertNotIn('NEVER-RETAIN', json.dumps(metadata))
+
+    def test_s3_config_and_layers_complete_original_guarded_factory(self):
+        binding, registry = self.case()
+        registry.redirect = s3_blob_redirect
+        try:
+            capability = self.qualify(binding, registry)
+        except access.GuardedHotelImageAccessError as exc:
+            self.fail('Exact S3 config/layer redirect was rejected: ' + str(exc))
+        self.assertIs(access.require_guarded_hotel_image_access(capability, binding), capability)
+        assert_complete_s3_bodies(self, capability.metadata(), registry)
+
+    def test_s3_nearby_hosts_region_wrong_port_and_ghcr_scope_are_refused(self):
+        binding, original = self.case()
+        for source, host in (
+            ('docker.io', 'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com.evil.example'),
+            ('docker.io', 'docker-images-prod.s3.dualstack.us-west-2.amazonaws.com'),
+            ('docker.io', 'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com:444'),
+            ('ghcr.io', 'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com'),
+        ):
+            registry = Registry(original.fixture)
+            destination = 'https://' + host + '/blob?synthetic-signature=DO-NOT-RETAIN'
+            registry.redirect = lambda reg, _repo, kind, _sha: destination if reg == source and kind == 'blobs' else None
+            with self.subTest(source=source, host=host), self.assertRaises(access.GuardedHotelImageAccessError):
+                self.qualify(binding, registry)
+            self.assertFalse(any(call[0] == destination for call in registry.calls))
+
+    def test_s3_config_and_layer_corruption_and_truncation_still_fail(self):
+        binding, original = self.case()
+        for part in ('config', 'layer'):
+            for truncate in (False, True):
+                registry = Registry(original.fixture)
+                registry.redirect = s3_blob_redirect
+                def corrupt(url, body):
+                    selected = (urllib.parse.urlsplit(url).hostname ==
+                                'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com'
+                                and body.startswith(b'{') == (part == 'config'))
+                    return (body[:-1] if truncate else body[:-1] + b'!') if selected else body
+                registry.body_mutation = corrupt
+                with self.subTest(part=part, truncate=truncate), self.assertRaisesRegex(
+                        access.GuardedHotelImageAccessError, 'SHA-256|Content-Length|body size'):
+                    self.qualify(binding, registry)
+                self.assertTrue(any('/fixture/' in r.url for r in registry.responses))
+                self.assertTrue(all(r.closed for r in registry.responses))
 
     def test_strict_realm_service_scope_basic_duplicate_and_escaped_challenges(self):
         binding, original = self.case()

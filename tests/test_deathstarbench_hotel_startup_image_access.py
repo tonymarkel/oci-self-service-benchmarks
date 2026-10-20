@@ -13,6 +13,7 @@ import pickle
 import unittest
 from unittest import mock
 import urllib.error
+import urllib.parse
 
 from app import deathstarbench_hotel_image_access as shared
 from app import deathstarbench_hotel_initialization_operator as old_operator
@@ -21,7 +22,9 @@ from app import deathstarbench_hotel_startup_artifacts as adoption
 from app import deathstarbench_hotel_startup_image_access as access
 from tests import test_deathstarbench_candidate_image_lock as image_fixtures
 from tests import test_deathstarbench_hotel_image_access as old_fixtures
-from tests.test_deathstarbench_hotel_image_access import Registry, digest, encoded
+from tests.test_deathstarbench_hotel_image_access import (
+    Registry, assert_complete_s3_bodies, digest, encoded, s3_blob_redirect,
+)
 from tests.test_deathstarbench_hotel_startup_image_lock import StartupHotelFixtureMixin
 
 
@@ -246,6 +249,50 @@ class StartupHotelImageAccessTests(StartupHotelFixtureMixin, unittest.TestCase):
         self.assertEqual(len(redirected), 14)
         self.assertTrue(all('authorization' not in call[2] for call in redirected))
         self.assertNotIn('REDACT', json.dumps(metadata))
+
+    def test_s3_config_and_layers_complete_original_startup_factory(self):
+        binding, registry = self.case()
+        registry.redirect = s3_blob_redirect
+        try:
+            capability = self.qualify(binding, registry)
+        except access.StartupHotelImageAccessError as exc:
+            self.fail('Exact S3 config/layer redirect was rejected: ' + str(exc))
+        self.assertIs(type(capability), access.StartupHotelImageAccess)
+        self.assertIs(access.require_startup_hotel_image_access(capability, binding), capability)
+        assert_complete_s3_bodies(self, capability.metadata(), registry)
+
+    def test_s3_nearby_hosts_region_wrong_port_and_ghcr_scope_are_refused(self):
+        binding, original = self.case()
+        for source, host in (
+            ('docker.io', 'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com.evil.example'),
+            ('docker.io', 'docker-images-prod.s3.dualstack.us-west-2.amazonaws.com'),
+            ('docker.io', 'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com:444'),
+            ('ghcr.io', 'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com'),
+        ):
+            registry = Registry(original.fixture)
+            destination = 'https://' + host + '/blob?synthetic-signature=DO-NOT-RETAIN'
+            registry.redirect = lambda reg, _repo, kind, _sha: destination if reg == source and kind == 'blobs' else None
+            with self.subTest(source=source, host=host), self.assertRaises(access.StartupHotelImageAccessError):
+                self.qualify(binding, registry)
+            self.assertFalse(any(call[0] == destination for call in registry.calls))
+
+    def test_s3_config_and_layer_corruption_and_truncation_still_fail(self):
+        binding, original = self.case()
+        for part in ('config', 'layer'):
+            for truncate in (False, True):
+                registry = Registry(original.fixture)
+                registry.redirect = s3_blob_redirect
+                def corrupt(url, body):
+                    selected = (urllib.parse.urlsplit(url).hostname ==
+                                'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com'
+                                and body.startswith(b'{') == (part == 'config'))
+                    return (body[:-1] if truncate else body[:-1] + b'!') if selected else body
+                registry.body_mutation = corrupt
+                with self.subTest(part=part, truncate=truncate), self.assertRaisesRegex(
+                        access.StartupHotelImageAccessError, 'SHA-256|Content-Length|body size'):
+                    self.qualify(binding, registry)
+                self.assertTrue(any('/fixture/' in r.url for r in registry.responses))
+                self.assertTrue(all(r.closed for r in registry.responses))
 
     def test_current_fixed_byte_and_time_bounds_are_not_bypassable(self):
         for field, value in (('MAX_TOTAL_BYTES', 10), ('MAX_DOCUMENT_BYTES', 10),

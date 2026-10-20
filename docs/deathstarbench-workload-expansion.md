@@ -911,9 +911,12 @@ initialization or verifier gates.
 The operator subsequently confirmed that Docker URLs are intentionally blocked
 on the local corporate network and authorized temporary cloud compute for
 registry access. The private Hotel CLI therefore supports an explicit
-`--registry-egress` mapping for operator-owned SSH TCP forwards. Only the seven
+`--registry-egress` mapping for operator-owned SSH TCP forwards. Only the eight
 reviewed registry, anonymous-authentication and CDN HTTPS hosts on port 443 use
-this context-bound connector. URLs, HTTP Host, TLS server names, certificate and
+this context-bound connector, including the exact Docker redirect host
+`docker-images-prod.s3.dualstack.us-east-1.amazonaws.com`. All eight distinct
+IPv4-loopback routes are required; an older seven-route mapping is refused.
+URLs, HTTP Host, TLS server names, certificate and
 hostname validation, anonymous token scoping, redirect restrictions and full
 byte/digest validation remain unchanged. Global sockets, cloud SDK traffic,
 system proxy settings and system trust are not modified. A failed forward

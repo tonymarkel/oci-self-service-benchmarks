@@ -1,6 +1,6 @@
 """Explicit private-qualifier routing through operator-owned SSH TCP forwards.
 
-This changes only where the process opens TCP sockets for seven exact public
+This changes only where the process opens TCP sockets for eight exact public
 registry/auth/CDN HTTPS endpoints. The original urllib HTTPS connections still
 perform their own TLS handshake, hostname/certificate checks, HTTP requests,
 redirect validation, byte limits, and SHA-256 verification. No HTTP proxy,
@@ -43,6 +43,7 @@ HOSTS = frozenset({
     'production.cloudflare.docker.com', 'production.cloudfront.docker.com',
     'docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com',
     'ghcr.io', 'pkg-containers.githubusercontent.com',
+    'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com',
 })
 MAX_CONFIG_BYTES = 16 * 1024
 _FORBIDDEN_ENVIRONMENT = (
@@ -168,7 +169,7 @@ class RegistryEgressMapping(Mapping):
 
 
 def load_mapping(path):
-    """Read all seven routes from an exact owned 0600 file, without writes."""
+    """Read all eight routes from an exact owned 0600 file, without writes."""
     _require(os.getpid() == _MODULE_PID, 'Registry egress cannot be loaded in a forked process.')
     path = Path(path).absolute()
     _require('..' not in path.parts and path.parent.resolve(strict=True) == path.parent,
@@ -232,7 +233,7 @@ class _RoutedHTTPSConnection(http.client.HTTPSConnection):
         super().__init__(host, *args, **kwargs)
         _require(type(self.host) is str and self.host in HOSTS
                  and type(self.port) is int and self.port == 443,
-                 'Private registry HTTPS handlers accept only the seven exact reviewed hosts on port 443.')
+                 'Private registry HTTPS handlers accept only the eight exact reviewed hosts on port 443.')
         self._egress_state = egress_state
         self._create_connection = egress_state.connect
 

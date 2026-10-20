@@ -23,7 +23,13 @@ class RegistryEgressTests(unittest.TestCase):
         self.path = self.root / 'egress.json'
         self.value = {'schema_version': 1, 'transport': egress.TRANSPORT,
                       'forwards': {host: {'host': '127.0.0.1', 'port': 24000 + index}
-                                   for index, host in enumerate(sorted(egress.HOSTS))}}
+                                   for index, host in enumerate((
+                                       'registry-1.docker.io', 'auth.docker.io',
+                                       'production.cloudflare.docker.com', 'production.cloudfront.docker.com',
+                                       'docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com',
+                                       'ghcr.io', 'pkg-containers.githubusercontent.com',
+                                       'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com',
+                                   ))}}
         self.write(self.value)
         self.environment = mock.patch.dict(os.environ, {}, clear=True)
         self.environment.start()
@@ -95,6 +101,68 @@ class RegistryEgressTests(unittest.TestCase):
                     socket.create_connection(address, timeout=7)
                     original.assert_called_with(address, timeout=7)
                 self.assertFalse(session.metadata()['ssh_tcp_routing_used'])
+
+    def test_s3_route_uses_its_loopback_port_and_original_tls_hostname(self):
+        try:
+            mapping = self.load()
+        except egress.RegistryEgressError as exc:
+            self.fail('The exact eight-route mapping was rejected: ' + str(exc))
+        context, raw_socket = self.tls(), mock.Mock()
+        with mock.patch.object(socket, 'create_connection', return_value=raw_socket) as original:
+            with egress.registry_egress(mapping) as session:
+                connection = self.connection(
+                    egress.https_handler(context),
+                    'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com:443')
+                connection.connect()
+                original.assert_called_once_with(('127.0.0.1', 24007), timeout=8, source_address=None)
+                context.wrap_socket.assert_called_once_with(
+                    raw_socket, server_hostname='docker-images-prod.s3.dualstack.us-east-1.amazonaws.com')
+                self.assertEqual(connection.host, 'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com')
+                self.assertEqual(session.metadata()['connection_successes'][
+                    'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com'], 1)
+
+    def test_missing_s3_route_rejects_original_seven_route_mapping(self):
+        self.value['forwards'].pop('docker-images-prod.s3.dualstack.us-east-1.amazonaws.com')
+        self.write(self.value)
+        with mock.patch.object(socket, 'create_connection') as original:
+            with self.assertRaises(egress.RegistryEgressError):
+                self.load()
+            original.assert_not_called()
+
+    def test_nearby_s3_hosts_and_non_https_ports_rejected_before_tcp(self):
+        with mock.patch.object(socket, 'create_connection') as original:
+            with egress.registry_egress(self.load()):
+                handler = egress.https_handler(self.tls())
+                for host in (
+                    'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com.evil.example',
+                    'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com.',
+                    'DOCKER-IMAGES-PROD.s3.dualstack.us-east-1.amazonaws.com',
+                    'docker-images-prod.s3.dualstack.us-west-2.amazonaws.com',
+                    'docker-images-prod.s3.us-east-1.amazonaws.com',
+                    'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com:80',
+                    'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com:444',
+                ):
+                    with self.subTest(host=host), self.assertRaises(egress.RegistryEgressError):
+                        self.connection(handler, host).connect()
+            original.assert_not_called()
+
+    def test_s3_mapping_requires_exact_host_and_distinct_valid_loopback_port(self):
+        for replacement in ('docker-images-prod.s3.dualstack.us-west-2.amazonaws.com',
+                            'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com.evil.example'):
+            value = copy.deepcopy(self.value)
+            value['forwards'][replacement] = value['forwards'].pop(
+                'docker-images-prod.s3.dualstack.us-east-1.amazonaws.com')
+            self.write(value)
+            with self.subTest(host=replacement), self.assertRaises(egress.RegistryEgressError):
+                self.load()
+        for host, port in (('127.0.0.1', True), ('127.0.0.1', 0), ('127.0.0.1', 65536),
+                           ('127.0.0.1', 24000), ('localhost', 24007), ('::1', 24007)):
+            value = copy.deepcopy(self.value)
+            value['forwards']['docker-images-prod.s3.dualstack.us-east-1.amazonaws.com'] = {
+                'host': host, 'port': port}
+            self.write(value)
+            with self.subTest(host=host, port=port), self.assertRaises(egress.RegistryEgressError):
+                self.load()
 
     def test_active_handler_rejects_other_hosts_ports_and_proxy_tunnels(self):
         with mock.patch.object(socket, 'create_connection') as original:

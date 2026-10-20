@@ -509,7 +509,11 @@ def _startup_dhcp(raw):
             if not servers:
                 raise LifecycleError('Strict OCI custom DNS servers are missing.')
             for server in servers:
-                if type(server) is not str or str(ip_address(server)) != server:
+                try:
+                    valid = type(server) is str and str(ip_address(server)) == server
+                except (ValueError, TypeError):
+                    raise LifecycleError('Strict OCI DNS address is invalid.') from None
+                if not valid:
                     raise LifecycleError('Strict OCI DNS address is invalid.')
         elif row.get('custom_dns_servers') not in (None, []):
             raise LifecycleError('Strict OCI local DNS cannot have custom servers.')

@@ -2,6 +2,7 @@
 
 import copy
 from contextlib import ExitStack
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -304,6 +305,33 @@ class StartupCandidateProviderTests(OriginalArtifactsMixin, unittest.TestCase):
             self.cloud.destroy_and_prove(self.job, self.lease)
         self.assertEqual(self.ec2.calls[before:], [])
 
+    def test_disk_load_refuses_dropped_aws_id_with_retained_original_target(self):
+        # A valid checksum must not hide a native graph/independent-ID conflict.
+        from app import deathstarbench_hotel_startup_ownership as ownership
+        self.cloud.provision(self.job, self.lease)
+        path = self.store.root / RUN / 'hotel-startup-owned-graph.json'
+        original = json.loads(path.read_text())
+        target = copy.deepcopy(original['known_identities']['aws-key'])
+        self.assertTrue(target['id'].startswith('key-'))
+        before = list(self.ec2.calls)
+        for status in ('deleted', 'planned'):
+            with self.subTest(status=status):
+                checkpoint = copy.deepcopy(original)
+                checkpoint['resources'][provider.aws.AWS_DSB_GRAPH_KEY]['graph']['key'] = {'status': status}
+                checkpoint['fingerprint'] = provider.fingerprint({
+                    key: value for key, value in checkpoint.items() if key != 'fingerprint'})
+                path.write_text(provider.canonical(checkpoint))
+                checked = ownership.validate_hotel_startup_ownership_checkpoint(
+                    json.loads(path.read_text()), run_id=RUN, provider='aws')
+                self.assertEqual(checked['known_identities']['aws-key'], target)
+                self.assertEqual(checked['absence_targets']['aws-key'], target)
+                with self.assertRaises(ValueError):
+                    self.store.load_for_destroy(RUN, self.lease)
+                with self.assertRaises(ValueError):
+                    self.cloud.destroy_and_prove(self.job, self.lease)
+                self.assertEqual(self.ec2.calls, before)
+        path.write_text(provider.canonical(original))
+
     def test_partial_provision_uses_create_identity_not_fake_readiness(self):
         from botocore.exceptions import ClientError
         def reject(kind, request):
@@ -318,6 +346,15 @@ class StartupCandidateProviderTests(OriginalArtifactsMixin, unittest.TestCase):
         self.assertEqual(loaded['hotel_startup_owned_graph']['audits'], [])
         self.assertIn('aws-instance-control', loaded['hotel_startup_owned_graph']['create_attempts'])
         self.assertTrue(self.cloud.destroy_and_prove(loaded, self.lease)['cleanup_complete'])
+        terminal = self.store.load_for_destroy(RUN, self.lease)['hotel_startup_owned_graph']
+        graph = terminal['resources'][provider.aws.AWS_DSB_GRAPH_KEY]['graph']
+        self.assertEqual(graph['key']['id'], terminal['known_identities']['aws-key']['id'])
+        self.assertEqual(graph['key']['status'], 'deleted')
+        for key in ('instance-control', 'instance-load-generator'):
+            self.assertEqual(graph[key], {'status': 'deleted'})
+            self.assertNotIn('aws-' + key, terminal['known_identities'])
+        self.assertIn('aws-instance-control', terminal['create_attempts'])
+        self.assertNotIn('aws-instance-load-generator', terminal['create_attempts'])
 
 
 class AwsPublicKeyStartupTests(OriginalArtifactsMixin, unittest.TestCase):

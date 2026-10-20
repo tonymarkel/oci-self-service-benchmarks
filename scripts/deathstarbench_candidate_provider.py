@@ -121,6 +121,12 @@ def _startup_aws_projection(job, previous, *, transition=None, finalizing=False,
         name = request.get('KeyName') or request.get('GroupName') or next(tag['Value'] for tag in aws._dsb_tags(job['id'], key) if tag['Key'] == 'Name')
         parent = graph['vpc'].get('id') if kind in ('igw', 'subnet', 'sg', 'route', 'nat', 'instance') else None
         target = _startup_target('aws_' + kind, row.get('id'), name, scope, parent)
+        # During disk validation old_graph is this same document; independent
+        # retained facts must also agree with the native ID and exact recipe.
+        for retained in ('known_identities', 'absence_targets'):
+            if semantic in previous[retained]:
+                _startup_require(previous[retained][semantic] == target,
+                                 'Retained AWS allocation identity conflicts with its native graph.')
         if semantic in previous['create_attempts']:
             _startup_require(previous['create_attempts'][semantic] == {'candidate_schema': ownership.ATTEMPT_SCHEMA,
                 'kind': 'aws_' + kind, 'name': name, 'scope': scope, 'request_id': None})

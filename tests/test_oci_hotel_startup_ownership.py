@@ -1,6 +1,7 @@
 """Strict supported OCI snapshots over the actual stateful SDK fixture."""
 import copy
 import json
+import traceback
 import unittest
 
 from app.providers import oci
@@ -93,6 +94,28 @@ class OciStartupOwnershipTests(unittest.TestCase):
         row['egress_security_rules'] = [{'protocol': 'all', 'destination': '0.0.0.0/0', 'destination_type': 'CIDR_BLOCK'}]
         with self.assertRaises((ValueError, oci.LifecycleError)):
             oci.prepare_distributed_candidate_cleanup(self.job, clients=self.cloud.clients)
+
+    def test_malformed_live_custom_dns_never_exposes_payload_in_error_or_evidence(self):
+        # Exercise the SDK-returned DHCP body, not the parser in isolation.
+        self.provision()
+        row = next(iter(self.cloud.items['dhcp_options'].values()))
+        sentinel = 'SECRET_DNS_PAYLOAD'
+        before = list(self.cloud.calls)
+        for server in (sentinel, {'payload': sentinel}, None):
+            with self.subTest(server_type=type(server).__name__):
+                row['options'] = [{'type': 'DomainNameServer', 'server_type': 'CustomDnsServer',
+                                   'custom_dns_servers': [server]}]
+                try:
+                    oci.prepare_distributed_candidate_cleanup(self.job, clients=self.cloud.clients)
+                except (ValueError, oci.LifecycleError) as error:
+                    self.assertNotIn(sentinel, str(error))
+                    self.assertNotIn(sentinel, ''.join(traceback.format_exception(error)))
+                    self.assertIsInstance(error, oci.LifecycleError)
+                else:
+                    self.fail('Malformed SDK custom DNS configuration was accepted.')
+                self.assertEqual(self.cloud.calls, before)
+                self.assertNotIn(sentinel, json.dumps(self.saved))
+                self.assertNotIn(sentinel, json.dumps(self.job))
 
     def test_every_implicit_kind_keeps_creation_and_configuration_corroboration(self):
         self.provision()

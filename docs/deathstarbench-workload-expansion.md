@@ -1,6 +1,6 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-20: **published artifacts, support-only K3s staging, and a private one-shot Hotel initialization controller; not public benchmarks**.
+Status, 2026-10-20: **published artifacts, support-only K3s staging, and a private Hotel controller with one successful OCI AMD initialization/verification run; not public benchmarks**.
 Social Network is still the only released distributed workload. The audited
 foundations now have drift-checked application/frontend, initializer, and
 load-driver preparation tools, plus an explicit native publication pipeline.
@@ -925,9 +925,35 @@ real private journals/leases, response loss, callback mutation, and CLI-to-cloud
 cleanup propagation. They do not establish live cloud qualification of this
 implementation. Restored observations from earlier local work remain historical
 evidence; the CLI refuses legacy initialization state rather than migrating it
-into an executable attempt. Fresh live qualification, service startup/restart,
+into an executable attempt. Broader live qualification, service startup/restart,
 semantic login/reservation behavior, measurement and public release remain
 separate milestones.
+
+### OCI AMD live initialization observation
+
+The [October 20 live receipt](qualification/deathstarbench-hotel-initialization-oci-amd-v1.json)
+records fresh run `3ab32b58d2a5` against controller commit
+`55e356a2dfffefe9412995d243bbc7f67f0a4a0f`. It ran in OCI Ashburn on the pinned
+Oracle Linux 9 images with five AMD E5 Flex VMs and a 256 GiB database volume.
+The audited source was freshly checked out, original and guarded preparations
+were reconstructed, both publications were freshly adopted, and the controller
+obtained its own anonymous image-byte capability.
+
+The exact initializer and separate global read-only verifier both exited zero
+without container restarts. The controller retained their Pod/container
+identities and six journal events, including two distinct durable dispatch
+latches. All application Deployments remained at zero replicas. The CLI exited
+zero after exact teardown and independent absence proof; all 21 explicit
+infrastructure entries reached their deleted state. Private full state and
+journals remain under `app/runs/.candidate-support/3ab32b58d2a5/`; the shared
+receipt retains their state hash, artifact identities, Pod completion evidence,
+and cleanup assertions without account credentials or infrastructure OCIDs.
+
+This is one successful OCI AMD initialization observation. It does not cover
+ARM, other providers, injected live interruptions/response loss, application
+startup/restart, login/reservation semantics, or benchmark measurement. Public
+dispatch, application-start permission, broad runtime qualification and public
+release remain closed. Historical evidence cannot authorize another attempt.
 
 ## Next review slices and release prerequisites
 
@@ -936,6 +962,8 @@ separate milestones.
    bound image platforms. A later runtime attempt must freshly obtain its own
    artifact/access capabilities and qualify actual guest/CRI behavior; this
    historical observation cannot replace those checks. Media remains separate.
+   One OCI AMD Hotel initialization run now records actual guest/container
+   execution and cleanup; other provider/architecture combinations remain open.
    Read-only candidate adoption alone is not the access gate.
    Version tags/configuration metadata alone are not executed
    backing-image version or CPU-compatibility proof. Preparation receipts alone
@@ -947,8 +975,9 @@ separate milestones.
    supply the first boundaries. The private cleanup-owning operator now joins
    those boundaries; live support-stage evidence must be evaluated separately.
    The private Hotel controller supplies one-shot initialization and global
-   verification execution, with live qualification still required. Guarded
-   application startup and semantic measurement remain required before release.
+   verification execution, observed on one fresh OCI AMD run. Broader live
+   qualification, guarded application startup and semantic measurement remain
+   required before release.
    Add exact dataset and semantic response verification, durable one-shot
    initialization, unchanged pre/post pod identities, and workload-specific
    comparison cohorts. Do not populate Hotel/Media metadata with fabricated

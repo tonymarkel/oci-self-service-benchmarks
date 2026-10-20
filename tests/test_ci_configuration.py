@@ -68,7 +68,7 @@ class CiConfigurationTests(unittest.TestCase):
 
     def test_workflow_has_bounded_concurrency_and_one_stable_required_check(self):
         self.assertIn('cancel-in-progress: true', WORKFLOW)
-        self.assertIn('timeout-minutes: 15', WORKFLOW)
+        self.assertEqual(WORKFLOW_DATA['jobs']['test']['timeout-minutes'], 120)
         self.assertIn('name: Required CI', WORKFLOW)
         self.assertIn('TEST_RESULT: ${{ needs.test.result }}', WORKFLOW)
         self.assertIn('run: test "$TEST_RESULT" = "success"', WORKFLOW)

@@ -7,6 +7,7 @@ installation uses link(2)'s no-clobber final-name operation, not replace(2).
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -29,10 +30,11 @@ OWNERSHIP_FILE = 'hotel-startup-cleanup-ownership.json'
 OWNERSHIP_KEY = 'hotel_startup_cleanup_ownership'
 
 
-def _bounded_read(path):
+def _bounded_raw_read(path, *, private=True):
     details = path.lstat()
-    if (not stat.S_ISREG(details.st_mode) or details.st_uid != os.geteuid()
-            or stat.S_IMODE(details.st_mode) != 0o600 or details.st_nlink != 1
+    if (not stat.S_ISREG(details.st_mode)
+            or (private and (details.st_uid != os.geteuid() or stat.S_IMODE(details.st_mode) != 0o600))
+            or details.st_nlink != 1
             or not 0 < details.st_size <= MAX_STARTUP_FILE_BYTES):
         raise CandidateStateError('Startup state must be a bounded owned 0600 regular file.')
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -43,6 +45,10 @@ def _bounded_read(path):
         raw = stream.read(MAX_STARTUP_FILE_BYTES + 1)
     if len(raw) != details.st_size or len(raw) > MAX_STARTUP_FILE_BYTES or raw.startswith(b'\xef\xbb\xbf'):
         raise CandidateStateError('Startup state changed or exceeds its bound.')
+    return raw
+
+
+def _parse_bytes(raw):
     try:
         value = json.loads(raw.decode('utf-8'), object_pairs_hook=_object_pairs,
             parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
@@ -50,6 +56,10 @@ def _bounded_read(path):
         return value
     except (ValueError, UnicodeError, RecursionError) as exc:
         raise CandidateStateError('Invalid private startup JSON.') from exc
+
+
+def _bounded_read(path):
+    return _parse_bytes(_bounded_raw_read(path))
 
 
 def _bounded_bytes(value):
@@ -69,7 +79,11 @@ def _sync_directory(path):
 
 def _install_immutable(path, value):
     """Fully write first; atomically link the final name without replacement."""
-    raw = _bounded_bytes(value)
+    _install_immutable_raw(path, _bounded_bytes(value))
+
+
+def _install_immutable_raw(path, raw):
+    _parse_bytes(raw)
     temporary = path.parent / ('.' + path.name + '-' + uuid.uuid4().hex + '.tmp')
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
@@ -81,7 +95,7 @@ def _install_immutable(path, value):
     finally:
         temporary.unlink(missing_ok=True)
     _sync_directory(path.parent)
-    if canonical(_bounded_read(path)) != canonical(value):
+    if _bounded_raw_read(path) != raw:
         raise CandidateStateError('Immutable startup publication did not read back exactly.')
 
 
@@ -89,6 +103,25 @@ class HotelStartupStateStore(HotelInitializationStateStore):
     def __init__(self, root):
         super().__init__(root)
         self._initial_checkpoint_runs = set()
+
+    def publish_startup_artifact_input(self, run_id, filename, source, expected_sha256, lease):
+        """Snapshot original adopted evidence bytes, never an access capability."""
+        if filename not in ('startup-image-lock.json', 'startup-publication.json'):
+            raise CandidateStateError('Unknown startup Hotel evidence filename.')
+        directory = self.require_lease(run_id, lease)
+        raw = _bounded_raw_read(Path(source), private=False)
+        _parse_bytes(raw)
+        if hashlib.sha256(raw).hexdigest() != expected_sha256:
+            raise CandidateStateError('Startup artifact input changed after fresh adoption.')
+        path = directory / filename
+        try:
+            _install_immutable_raw(path, raw)
+        except FileExistsError:
+            if _bounded_raw_read(path) != raw:
+                raise CandidateStateError('Immutable startup artifact input differs from saved bytes.')
+            _sync_directory(directory)
+        self.require_lease(run_id, lease)
+        return path
 
     def publish_pin(self, pin, lease):
         directory = self.require_lease(pin['run_id'], lease)

@@ -1290,6 +1290,82 @@ Pod templates alone cannot satisfy any of those checks. Discovery/registration,
 verified preloads, semantic requests and restart/failure qualification remain
 separate live gates. Hotel and Media are still unavailable in the public form.
 
+## Private fresh-only Hotel startup CLI
+
+`scripts/qualify_deathstarbench_hotel_startup.py` joins the original support,
+guarded initialization and distinct startup artifacts under one private
+`.candidate-support` execution lease. A fresh invocation initializes a fresh
+dataset, starts Hotel once, and always attempts exact-owned destruction and
+independent absence. It creates five billable role VMs. It is **not** Hotel
+performance qualification, a public dispatch path or a release-gate bypass.
+
+Fresh mode requires `--plan`, `--image-lock`, `--publication`,
+`--workload-preparation`, `--driver-preparation`, `--guarded-lock`,
+`--guarded-publication`, `--guarded-preparation`, `--startup-lock`,
+`--startup-publication`, `--startup-preparation` and `--upstream`.
+Use the exact original complete prepared sources and lock/publication pairs;
+all three adoption factories revalidate evidence, and both Hotel families bind
+the same original baseline. Each image-access capability is freshly obtained
+in the executing process, never restored from saved metadata. Original input
+bytes are retained as private immutable evidence. SSH material is supplied by
+the existing `--ssh-env-file`/local environment channel, never infrastructure
+JSON or retained history. Explicit `--registry-egress` applies only to registry
+HTTPS and does not change system TLS trust, proxies or cloud SDK traffic.
+
+The infrastructure JSON remains the existing destroy-after, five-role
+`distributed_tiered_v1` / `k3s_v1` carrier (including its internal Social
+Network selector). Hotel is fixed internally; this does not enable Hotel in
+the public model. Support/load generation stay x86; application architectures
+are `x86_64` / `aarch64`, and K3s remains `v1.36.4+k3s1`. The startup window
+remains 900 seconds, observations at most 60 seconds and API requests at most
+15 seconds or the shorter remaining deadline. No retries on an old invocation,
+deliberate application failure, recovery score or time-to-recovery is added.
+
+For a retained identity, the only supported command is:
+
+```sh
+.venv/bin/python scripts/qualify_deathstarbench_hotel_startup.py \
+  --destroy-only --run-id TWELVE_LOWERCASE_HEX_DIGITS
+```
+
+Destroy-only reads independent pinned ownership, not execution history, and
+needs no source tree, registry, SSH or Kubernetes capability. It rejects all
+execution, artifact, registry, SSH and provider-selector overrides. Native SDK
+authentication is not deletion authority. The sole additional auth input is
+`--oci-config-file` for an independently pinned OCI carrier; original profile,
+region, compartment and OCIDs remain pinned, and config contents are never
+persisted. Non-OCI carriers reject that option before SDK calls.
+
+Strict completed cleanup with independent absence and no observed signal may
+exit zero in destroy-only mode, but reports execution as `not-evaluated` and
+never rewrites the original execution history. Failed/unproved or
+`not_required` cleanup remains nonzero; `not_required` means no provider create
+contract was authorized, not independently observed cloud absence. Fresh runner
+or application failure fails the entire execution even after successful
+cleanup. There are no `--resume`, `--recover` or `--interrupt-after` options.
+Diagnostics use fixed safe errors, not raw SDK/config/SSH exception text.
+
+Initial strict OCI cleanup supports a finite conservative payload subset.
+Required nonempty tenancy/automatic tags, configured defined tags, unsupported
+boot/source details and unknown configuration may refuse. Public SSH key
+comments are initially empty or exactly `benchmark` for OCI only; AWS retains
+its native key/comment acceptance. The new startup support pin binds the exact
+configured public-key bytes, including a comment, for native ownership; the
+nested legacy provider pin retains its distinct normalized key-material hash.
+Neither policy changes the legacy support/initialization CLI. An unsupported
+normal OCI cell needs a concrete reviewed extension, never a bypass or
+qualification pass.
+
+Local focused tests establish offline wiring/custody, not live startup.
+Milestone A still requires independent review, the current full repository
+check, both Python CI legs and native Go/Lua gates, followed only then by an
+authorized normal uninterrupted GCP Arm startup/absence attempt. The Python
+job's provisional outer budget is 120 minutes; all 38 fresh-interpreter cells,
+three-child concurrency and 900/4500-second child/matrix bounds are unchanged.
+That budget is not a CI pass or proof of sufficiency. No live milestone A
+outcome is claimed here, and startup observations alone never authorize later
+measurement results or public comparison charts.
+
 ## Next review slices and release prerequisites
 
 Hotel scope update, 2026-10-19: the current

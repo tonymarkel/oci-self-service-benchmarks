@@ -1,5 +1,6 @@
 """Real private filesystem custody; no cloud qualification."""
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -51,6 +52,65 @@ class StartupStateTests(OriginalArtifactsMixin, unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.store.load(RUN, self.lease)
             path.write_bytes(original)
+
+    def test_startup_inputs_retain_original_bytes_and_refuse_changed_adoption(self):
+        # Catches canonicalizing evidence, accepting changed hashes or clobbering.
+        source = self.root.parent / 'input.json'
+        raw = b'{ "source" : "original" }\n\n'
+        source.write_bytes(raw)
+        digest = hashlib.sha256(raw).hexdigest()
+        for name in ('startup-image-lock.json', 'startup-publication.json'):
+            path = self.store.publish_startup_artifact_input(RUN, name, source, digest, self.lease)
+            self.assertEqual(path.read_bytes(), raw)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(self.store.publish_startup_artifact_input(RUN, name, source, digest, self.lease), path)
+            source.write_bytes(b'{"source":"different"}')
+            with self.assertRaises(ValueError):
+                self.store.publish_startup_artifact_input(RUN, name, source, digest, self.lease)
+            with self.assertRaises(ValueError):
+                self.store.publish_startup_artifact_input(RUN, name, source, hashlib.sha256(source.read_bytes()).hexdigest(), self.lease)
+            self.assertEqual(path.read_bytes(), raw)
+            source.write_bytes(raw)
+
+    def test_startup_input_refuses_unsafe_source_json_and_destination(self):
+        # Catches unbounded/ambiguous JSON, symlink/hardlink custody and broad names.
+        source = self.root.parent / 'input.json'
+        for raw in (b'{"x":1,"x":2}', b'{"x":NaN}', b'\xef\xbb\xbf{}', b'{', b' ' * (1024 * 1024 + 1)):
+            source.write_bytes(raw)
+            with self.subTest(raw=raw[:20]), self.assertRaises(ValueError):
+                self.store.publish_startup_artifact_input(RUN, 'startup-image-lock.json', source, hashlib.sha256(raw).hexdigest(), self.lease)
+        source.write_bytes(b'{}')
+        digest = hashlib.sha256(b'{}').hexdigest()
+        for name in ('publication.json', '../startup-image-lock.json'):
+            with self.assertRaises(ValueError):
+                self.store.publish_startup_artifact_input(RUN, name, source, digest, self.lease)
+        alias = source.with_name('alias.json')
+        alias.symlink_to(source)
+        with self.assertRaises(ValueError):
+            self.store.publish_startup_artifact_input(RUN, 'startup-image-lock.json', alias, digest, self.lease)
+        alias.unlink()
+        os.link(source, alias)
+        with self.assertRaises(ValueError):
+            self.store.publish_startup_artifact_input(RUN, 'startup-image-lock.json', source, digest, self.lease)
+        alias.unlink()
+        destination = self.directory / 'startup-image-lock.json'
+        destination.symlink_to(source)
+        with self.assertRaises(ValueError):
+            self.store.publish_startup_artifact_input(RUN, destination.name, source, digest, self.lease)
+
+    def test_startup_input_publication_never_clobbers_racing_final_name(self):
+        # Catches an exists/replace implementation instead of exclusive install.
+        from scripts import deathstarbench_hotel_startup_operator_state as state
+        source = self.root.parent / 'input.json'
+        source.write_bytes(b'{ "original":true }\n')
+        real_link = os.link
+        def race(temporary, destination, **kwargs):
+            Path(destination).write_bytes(b'{"foreign":true}\n')
+            os.chmod(destination, 0o600)
+            return real_link(temporary, destination, **kwargs)
+        with mock.patch.object(state.os, 'link', side_effect=race), self.assertRaises(ValueError):
+            self.store.publish_startup_artifact_input(RUN, 'startup-image-lock.json', source, hashlib.sha256(source.read_bytes()).hexdigest(), self.lease)
+        self.assertEqual((self.directory / 'startup-image-lock.json').read_bytes(), b'{"foreign":true}\n')
 
     def test_destroy_load_ignores_corrupt_startup_history_not_corrupt_ownership(self):
         # Catches requiring execution history to obtain cleanup authority.

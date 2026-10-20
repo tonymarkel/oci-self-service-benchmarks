@@ -8,7 +8,7 @@ execution replay: an old identity is accepted only with --destroy-only.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 from pathlib import Path
 import re
@@ -93,6 +93,16 @@ def _run(args, *, store=None):
     from scripts.deathstarbench_registry_egress import load_mapping, registry_egress
     with registry_egress(load_mapping(args.registry_egress)):
         return _run_private(args, store=store)
+
+
+def _expected_cloud_identity(store, run_id, lease):
+    """Read original native-validated identity, never a completion/capability."""
+    checkpoint = store.checkpoint(run_id, lease)
+    audits = checkpoint.get('audits')
+    if (not isinstance(audits, list) or not audits or not isinstance(audits[-1], dict)
+            or not isinstance(audits[-1].get('cloud_identity'), dict) or not audits[-1]['cloud_identity']):
+        raise ValueError('Original provider-validated startup audit identity is required.')
+    return audits[-1]['cloud_identity']
 
 
 def _destroy(args, store):
@@ -242,7 +252,7 @@ def _run_private(args, *, store=None):
             require_acquired_run_lease(held, run_id)
             return prepare_guarded_hotel_initialization(value, guarded, baseline_artifacts=artifacts,
                 lease=held, execute=execute, persist=persist, image_access=qualify_guarded_hotel_image_access(guarded),
-                fresh_audit=cloud.audit, expected_cloud_identity=value[OPERATOR_JOURNAL_KEY]['cloud_identity'],
+                fresh_audit=cloud.audit, expected_cloud_identity=_expected_cloud_identity(store, run_id, held),
                 initialization_attempt_id=initialization_pin['initialization_attempt_id'], emit=emit)
 
         def startup(value, held, *, initialization_plan, initialization_stage):
@@ -252,11 +262,11 @@ def _run_private(args, *, store=None):
             return prepare_startup_hotel_applications(value, startup_artifacts, baseline_artifacts=artifacts,
                 initialization_plan=initialization_plan, initialization_stage=initialization_stage,
                 lease=held, execute=execute, persist=persist, image_access=qualify_startup_hotel_image_access(startup_artifacts),
-                fresh_audit=cloud.audit, expected_cloud_identity=value[OPERATOR_JOURNAL_KEY]['cloud_identity'],
+                fresh_audit=cloud.audit, expected_cloud_identity=_expected_cloud_identity(store, run_id, held),
                 startup_attempt_id=startup_pin['startup_attempt_id'], emit=emit)
 
         print(f'Private Hotel startup {run_id}: {plan.provider}; not performance qualification', flush=True)
-        with support._signals(job) as (_signals, cleanup_signals):
+        with support._signals(job) as (signals, cleanup_signals):
             outcome = run_hotel_startup_operator(job, lease=lease, pin=pin,
                 initialization_pin=initialization_pin, startup_pin=startup_pin,
                 persist=lambda value, held: persist(value), provision=cloud.provision, fresh_audit=cloud.audit,
@@ -264,8 +274,16 @@ def _run_private(args, *, store=None):
                 initialize=initialize, startup=startup, destroy_and_prove=cloud.destroy_and_prove,
                 artifacts=artifacts, guarded_artifacts=guarded, startup_artifacts=startup_artifacts,
                 cleanup_signal_context=cleanup_signals)
-            print(json.dumps({'mode': 'fresh', **asdict(outcome)}, sort_keys=True), flush=True)
-            return outcome.exit_code
+        # Settle every captured signal through handler restoration before final
+        # output, under the original lease. Never replay cleanup or treat an
+        # earlier private completed snapshot as public qualification authority.
+        number = signals.get('number')
+        if number in (signal.SIGINT, signal.SIGTERM):
+            outcome = replace(outcome, execution_outcome='failed',
+                error={**(outcome.error or {'code': 'execution-interrupted'}), 'interrupted': True},
+                exit_code=2 if outcome.cleanup_outcome == 'failed' else 128 + int(number))
+        print(json.dumps({'mode': 'fresh', **asdict(outcome)}, sort_keys=True), flush=True)
+        return outcome.exit_code
 
 
 def main(argv=None) -> int:

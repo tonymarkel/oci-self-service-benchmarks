@@ -191,6 +191,241 @@ class StartupCliTests(unittest.TestCase):
         self.assertTrue(any(name == 'terminate_instances' for name, _ in ec2.calls))
         self.assertNotIn('SIGNED_SECRET', (directory / 'state.json').read_text())
 
+    def completed_fresh_boundary(self, *, signal_at_exit=False, signal_during_output=False, audit_fault=None):
+        """Real operator/store/native lifecycle; only remote application IO is fake."""
+        from types import SimpleNamespace
+        from tests.test_aws_hotel_startup_ownership import StrictEC2
+        from tests.test_aws_deathstarbench_lifecycle import candidate_plan, PIN, PUBLIC_KEY as AWS_KEY
+        from tests.test_aws_provider import FakeSession
+        from tests.test_deathstarbench_distributed_runtime import FakeRemoteExecutor
+        from tests.test_deathstarbench_hotel_startup_operator import StartupOperatorTests
+        from app import deathstarbench_hotel_live_controller as initializer
+        from app import deathstarbench_hotel_startup_controller as startup
+        from app.deathstarbench_hotel_image_access import require_guarded_hotel_image_access
+        from app.deathstarbench_hotel_startup_image_access import require_startup_hotel_image_access
+        from scripts import deathstarbench_candidate_provider as provider
+        self.boundaries()
+        self.plan.write_text(json.dumps({**candidate_plan(), 'availability_domain': 'us-east-2a',
+            'ocpus': 8, 'memory_gb': 32, 'destroy_after_completion': True}))
+        image_pin = self.root / 'aws-images.json'
+        image_pin.write_text(json.dumps({'schema_version': 1, 'provider': 'aws',
+                                        'support_image': PIN, 'application_image': PIN}))
+        ec2 = StrictEC2()
+        ec2.application_capacity = (8, 32768)
+        session = FakeSession(ec2=ec2, sts=SimpleNamespace(get_caller_identity=lambda: {'Account': '123456789012'}))
+        phase = {'active': False, 'output_active': [], 'output_signal': False, 'outcomes': [],
+                 'destroy_calls': 0, 'startup_calls': 0, 'initialize_calls': 0}
+        original_handler = signal.getsignal(signal.SIGTERM)
+        remote = FakeRemoteExecutor(ca_sha256=hashlib.sha256(b'OFFLINE-CA-NOT-A-REAL-CERTIFICATE').hexdigest())
+        def execute(job, command, **kwargs):
+            if 'AWS_DSB_WORKLOAD_STORAGE' in command:
+                return ('AWS_DSB_WORKLOAD_STORAGE uuid=11111111-2222-3333-4444-555555555555 '
+                        'root=/var/lib/deathstarbench/database/mongodb databases=6\n')
+            if 'AWS_DSB_DATABASE_VOLUME' in command:
+                volume = cli.runtime.distributed_k3s_candidate_plan(job['resources']).database_volume_id
+                return (f'AWS_DSB_DATABASE_VOLUME volume_id={volume} '
+                    f'device_link=/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_{volume.replace("-", "")} '
+                    'uuid=11111111-2222-3333-4444-555555555555 '
+                    'mount_point=/var/lib/deathstarbench/database filesystem=xfs\n')
+            return remote(job, command, **kwargs)
+        def support_stage(job, artifacts, **kwargs):
+            from tests import test_deathstarbench_candidate_k3s as kubernetes
+            helper = StartupOperatorTests()
+            helper.calls, helper.baseline = [], artifacts
+            context = cli._context(job, artifacts, cli.runtime.distributed_k3s_candidate_plan)[3]
+            inventory = kubernetes.live_inventory
+            with mock.patch.object(kubernetes, 'live_inventory',
+                    side_effect=lambda stage: inventory(stage, context['role_nodes'])):
+                return helper.stage(job, kwargs['lease'])
+        def initialize(job, artifacts, **kwargs):
+            phase['initialize_calls'] += 1
+            require_guarded_hotel_image_access(kwargs['image_access'], artifacts)
+            self.assertIs(artifacts, phase['guarded'])
+            self.assertIs(kwargs['baseline_artifacts'], phase['baseline'])
+            self.assertIs(kwargs['lease'], phase['lease'])
+            self.assertEqual(kwargs['expected_cloud_identity'], kwargs['fresh_audit'](job, kwargs['lease'])['cloud_identity'])
+            self.assertEqual(kwargs['initialization_attempt_id'], job['hotel_initialization_pin']['initialization_attempt_id'])
+            value = {'schema_version': 1, 'candidate_schema': 'hotel-guarded-live-initialization-outcome-v1',
+                'candidate_only': True, 'released': False, 'run_id': job['id'],
+                'initialization_attempt_id': job['hotel_initialization_pin']['initialization_attempt_id'],
+                'guarded_artifact_fingerprint': artifacts.fingerprint,
+                'state': 'initialized-and-globally-verified-applications-paused',
+                **{key: True for key in ('initialization_executed', 'database_execution_verified',
+                    'global_readonly_verification_completed', 'applications_paused', 'all_application_replicas_zero')},
+                **{key: False for key in ('application_start_allowed', 'runtime_qualified', 'measurement_qualified',
+                    'cloud_qualified', 'public_release', 'public_dispatch_enabled')}}
+            job['guarded_hotel_initialization'] = value
+            return copy.deepcopy(value)
+        def start(job, artifacts, **kwargs):
+            phase['startup_calls'] += 1
+            require_startup_hotel_image_access(kwargs['image_access'], artifacts)
+            self.assertIs(artifacts, phase['startup'])
+            self.assertIs(kwargs['baseline_artifacts'], phase['baseline'])
+            self.assertIs(kwargs['lease'], phase['lease'])
+            self.assertIs(kwargs['initialization_plan'].artifacts, phase['guarded'])
+            self.assertEqual(kwargs['initialization_stage'].plan, kwargs['initialization_plan'])
+            self.assertEqual(kwargs['initialization_plan'].initialization_attempt_id,
+                             job['hotel_initialization_pin']['initialization_attempt_id'])
+            self.assertEqual(kwargs['startup_attempt_id'], job['hotel_startup_pin']['startup_attempt_id'])
+            self.assertEqual(kwargs['expected_cloud_identity'], kwargs['fresh_audit'](job, kwargs['lease'])['cloud_identity'])
+            value = {'schema_version': 1, 'candidate_schema': 'hotel-live-startup-outcome-v1',
+                'candidate_only': True, 'run_id': job['id'],
+                'startup_attempt_id': job['hotel_startup_pin']['startup_attempt_id'],
+                'initialization_attempt_id': job['hotel_initialization_pin']['initialization_attempt_id'],
+                'state': 'startup-and-service-identities-observed',
+                'startup_execution_observed': True, 'service_identity_observed': True,
+                **{key: False for key in ('released', 'application_start_allowed', 'application_started',
+                    'application_ready', 'startup_executed', 'initializer_authorized', 'runtime_authorized',
+                    'startup_authorized', 'runtime_qualified', 'measurement_qualified', 'dataset_qualified',
+                    'cloud_qualified', 'public_release', 'public_dispatch_enabled', 'semantic_correctness_observed')}}
+            job['hotel_application_startup'] = value
+            return copy.deepcopy(value)
+        original_operator = cli.run_hotel_startup_operator
+        def observe_operator(job, **kwargs):
+            self.assertIs(kwargs['lease'], job['_candidate_ssh_lease'])
+            require_acquired_run_lease(kwargs['lease'], job['id'])
+            phase.update(job=job, lease=kwargs['lease'], baseline=kwargs['artifacts'],
+                         guarded=kwargs['guarded_artifacts'], startup=kwargs['startup_artifacts'])
+            self.assertIs(type(phase['baseline']), baseline_adoption.CandidateArtifactBinding)
+            self.assertIs(type(phase['guarded']), guarded_adoption.GuardedHotelArtifactBinding)
+            self.assertIs(type(phase['startup']), startup_adoption.StartupHotelArtifactBinding)
+            def trace(name, callback):
+                def invoke(*args, **options):
+                    try:
+                        return callback(*args, **options)
+                    except BaseException as exc:
+                        phase['callback_failure'] = name
+                        raise
+                return invoke
+            for name in ('provision', 'fresh_audit', 'prepare_runtime', 'support_image_access', 'stage', 'initialize', 'startup'):
+                kwargs[name] = trace(name, kwargs[name])
+            result = original_operator(job, **kwargs)
+            if audit_fault is None:
+                self.assertEqual((result.execution_outcome, result.cleanup_outcome, result.exit_code),
+                                 ('completed', 'completed', 0), repr((result, phase.get('callback_failure'))))
+            phase['outcomes'].append(result)
+            return result
+        original_destroy = cli.CandidateCloud.destroy_and_prove
+        def destroy(cloud, job, lease):
+            self.assertIs(lease, phase['lease'])
+            phase['destroy_calls'] += 1
+            return original_destroy(cloud, job, lease)
+        original_signals = cli.support._signals
+        @contextmanager
+        def terminal_boundary(job):
+            with original_signals(job) as contexts:
+                phase['active'] = True
+                yield contexts
+                self.store.require_lease(job['id'], phase['lease'])
+                self.assertEqual(len(phase['outcomes']), 1)
+                if signal_at_exit:
+                    os.kill(os.getpid(), signal.SIGTERM)
+            phase['active'] = False
+        class FinalOutput(io.StringIO):
+            def write(stream, value):
+                if '"mode": "fresh"' in value:
+                    self.store.require_lease(phase['job']['id'], phase['lease'])
+                    phase['output_active'].append(phase['active'])
+                    if phase['active'] and signal_during_output:
+                        phase['output_signal'] = True
+                        os.kill(os.getpid(), signal.SIGTERM)
+                    if not phase['active']:
+                        self.assertEqual(signal.getsignal(signal.SIGTERM), original_handler)
+                return super().write(value)
+        output = FinalOutput()
+        if audit_fault is not None:
+            from app import deathstarbench_hotel_startup_ownership as ownership
+            from scripts.deathstarbench_candidate_operator_state import _atomic_write
+            from scripts.deathstarbench_hotel_startup_operator_state import CHECKPOINT_FILE
+            expected_identity = cli._expected_cloud_identity
+            def corrupt_audit(store, run_id, lease):
+                checkpoint = store.checkpoint(run_id, lease)
+                self.assertTrue(checkpoint['audits'])
+                if audit_fault == 'missing':
+                    checkpoint['audits'] = []
+                else:
+                    audit = checkpoint['audits'][-1]
+                    audit['cloud_identity']['run_id'] = '000000000000'
+                    audit['cloud_identity_sha256'] = ownership._fingerprint(audit['cloud_identity'])
+                checkpoint['fingerprint'] = ownership._fingerprint({key: value for key, value in checkpoint.items() if key != 'fingerprint'})
+                _atomic_write(store.require_lease(run_id, lease) / CHECKPOINT_FILE, checkpoint)
+                return expected_identity(store, run_id, lease)
+            self.stack.enter_context(mock.patch.object(cli, '_expected_cloud_identity', side_effect=corrupt_audit))
+        with mock.patch.object(provider.aws, '_session', return_value=session), \
+                mock.patch.object(cli.shared, '_ssh_material', return_value={
+                    'private_key': 'OFFLINE-PRIVATE', 'passphrase': None, 'public_key': AWS_KEY}), \
+                mock.patch.object(cli.application, 'ssh', side_effect=execute), \
+                mock.patch.object(cli, 'prepare_candidate_support_stage', side_effect=support_stage), \
+                mock.patch.object(initializer, 'prepare_guarded_hotel_initialization', side_effect=initialize), \
+                mock.patch.object(startup, 'prepare_startup_hotel_applications', side_effect=start), \
+                mock.patch.object(cli, 'run_hotel_startup_operator', side_effect=observe_operator), \
+                mock.patch.object(cli.CandidateCloud, 'destroy_and_prove', destroy), \
+                mock.patch.object(cli.support, '_signals', terminal_boundary), redirect_stdout(output):
+            result = cli._run(self.args('--aws-image-pin', str(image_pin)), store=self.store)
+        self.assertEqual((phase['destroy_calls'], phase['initialize_calls'], phase['startup_calls']),
+                         (1, 1, 1) if audit_fault is None else (1, 0, 0))
+        diagnostics, = [json.loads(line) for line in output.getvalue().splitlines() if line.startswith('{')]
+        return result, diagnostics, phase
+
+    def test_fresh_late_signal_after_completed_operator_fails_final_diagnostics(self):
+        # Catches ignoring a real signal captured after genuine completed
+        # execution/cleanup but before the outer handler context is restored.
+        result, diagnostics, phase = self.completed_fresh_boundary(signal_at_exit=True)
+        self.assertEqual(result, 143)
+        self.assertEqual(diagnostics['execution_outcome'], 'failed')
+        self.assertEqual(diagnostics['cleanup_outcome'], 'completed')
+        self.assertIs(diagnostics['error']['interrupted'], True)
+        self.assertEqual(diagnostics['error']['code'], 'execution-interrupted')
+        self.assertEqual(phase['output_active'], [False])
+
+    def test_fresh_final_output_is_after_signal_handler_restoration(self):
+        # Catches emitting authoritative success while a captured/deferred
+        # signal can still be silently observed during that output operation.
+        result, diagnostics, phase = self.completed_fresh_boundary(signal_during_output=True)
+        self.assertEqual(phase['output_active'], [False])
+        self.assertFalse(phase['output_signal'])
+        self.assertEqual((result, diagnostics['execution_outcome']), (0, 'completed'))
+
+    def test_fresh_late_signal_preserves_cleanup_failure_exit_and_error_codes(self):
+        # Narrow CLI outcome-policy case: a late signal must mark interruption
+        # without replacing prior static errors or cleanup failure's exit 2.
+        self.boundaries()
+        failed = operator.HotelStartupOperatorOutcome('failed', 'failed',
+            {'code': 'evidence-publication-failed', 'interrupted': False},
+            {'code': 'cleanup-failed', 'interrupted': False}, 2)
+        def failed_operator(job, **kwargs):
+            with kwargs['cleanup_signal_context']():
+                pass
+            return failed
+        original_signals = cli.support._signals
+        @contextmanager
+        def signal_at_exit(job):
+            with original_signals(job) as contexts:
+                yield contexts
+                os.kill(os.getpid(), signal.SIGINT)
+        with mock.patch.object(cli, 'run_hotel_startup_operator', side_effect=failed_operator), \
+                mock.patch.object(cli.support, '_signals', signal_at_exit):
+            self.assertEqual(cli._run(self.args(), store=self.store), 2)
+        diagnostics, = [json.loads(line) for line in self.output.getvalue().splitlines() if line.startswith('{')]
+        self.assertEqual(diagnostics['error'], {'code': 'evidence-publication-failed', 'interrupted': True})
+        self.assertEqual(diagnostics['cleanup_error'], {'code': 'cleanup-failed', 'interrupted': False})
+        self.assertEqual((diagnostics['execution_outcome'], diagnostics['cleanup_outcome'], diagnostics['exit_code']),
+                         ('failed', 'failed', 2))
+
+    def test_missing_retained_audit_refuses_before_lower_dispatch(self):
+        # Catches treating missing durable original identity as optional or
+        # falling back to a journal/saved completion before lower execution.
+        result, diagnostics, _ = self.completed_fresh_boundary(audit_fault='missing')
+        self.assertNotEqual(result, 0)
+        self.assertEqual(diagnostics['execution_outcome'], 'failed')
+
+    def test_crossed_retained_audit_refuses_before_lower_dispatch(self):
+        # Catches trusting a rehashed foreign audit instead of native original
+        # corroboration on the actual checkpoint read.
+        result, diagnostics, _ = self.completed_fresh_boundary(audit_fault='crossed')
+        self.assertNotEqual(result, 0)
+        self.assertEqual(diagnostics['execution_outcome'], 'failed')
+
     def test_input_change_after_original_adoption_refuses_before_provider(self):
         # Catches deferring exact input custody until after a create gate.
         self.boundaries()
@@ -283,75 +518,10 @@ class StartupCliTests(unittest.TestCase):
     def test_actual_lower_callback_handoff_uses_original_capabilities_and_lease(self):
         # Catches nesting cleanup owner, wrong callback signature, crossed
         # attempt UUIDs/baseline or replacing a capability with saved metadata.
-        from app import deathstarbench_hotel_live_controller as initializer
-        from app import deathstarbench_hotel_startup_controller as startup
-        from app.deathstarbench_hotel_image_access import require_guarded_hotel_image_access
-        from app.deathstarbench_hotel_startup_image_access import require_startup_hotel_image_access
-        from app.deathstarbench_hotel_runtime import create_guarded_hotel_runtime_plan
-        from app.deathstarbench_hotel_initialization_stage import build_guarded_hotel_initialization_stage
-        from tests.test_deathstarbench_hotel_startup_operator import StartupOperatorTests
-        from tests import test_deathstarbench_distributed_runtime as cloud_fixture
-        self.boundaries()
-        handoff = {}
-        def lower_initialize(job, artifacts, **kwargs):
-            require_acquired_run_lease(kwargs['lease'], job['id'])
-            require_guarded_hotel_image_access(kwargs['image_access'], artifacts)
-            self.assertIs(artifacts, handoff['guarded'])
-            self.assertIs(kwargs['baseline_artifacts'], handoff['baseline'])
-            self.assertEqual(kwargs['initialization_attempt_id'], job['hotel_initialization_pin']['initialization_attempt_id'])
-            job['guarded_hotel_initialization'] = {'independent': 'initializer'}
-            return copy.deepcopy(job['guarded_hotel_initialization'])
-        def lower_startup(job, artifacts, **kwargs):
-            require_startup_hotel_image_access(kwargs['image_access'], artifacts)
-            self.assertIs(artifacts, handoff['startup'])
-            self.assertIs(kwargs['baseline_artifacts'], handoff['baseline'])
-            self.assertIs(kwargs['lease'], handoff['lease'])
-            self.assertIs(kwargs['initialization_plan'], handoff['plan'])
-            self.assertIs(kwargs['initialization_stage'], handoff['stage'])
-            self.assertEqual(kwargs['startup_attempt_id'], job['hotel_startup_pin']['startup_attempt_id'])
-            self.assertEqual(job['guarded_hotel_initialization'], {'independent': 'initializer'})
-            handoff['completed'] = True
-            return {'independent': 'startup'}
-        def drive(job, **callbacks):
-            handoff.update(baseline=callbacks['artifacts'], guarded=callbacks['guarded_artifacts'],
-                           startup=callbacks['startup_artifacts'], lease=callbacks['lease'])
-            self.assertIs(type(handoff['baseline']), baseline_adoption.CandidateArtifactBinding)
-            self.assertIs(type(handoff['guarded']), guarded_adoption.GuardedHotelArtifactBinding)
-            self.assertIs(type(handoff['startup']), startup_adoption.StartupHotelArtifactBinding)
-            job['resources'] = copy.deepcopy(cloud_fixture.candidate_job()['resources'])
-            from app.providers import azure
-            job['resources']['azure_resource_group_tags'] = azure._tags(job['id'], 'resource-group')
-            helper = StartupOperatorTests()
-            helper.calls = []
-            helper.baseline = callbacks['artifacts']
-            handoff['support_helper'] = helper
-            helper.runtime(job, callbacks['lease'])
-            access = callbacks['support_image_access'](job, callbacks['lease'])
-            self.assertIs(access['anonymous_support_bytes_verified'], True)
-            callbacks['stage'](job, callbacks['lease'])
-            job[operator.OPERATOR_JOURNAL_KEY] = {'cloud_identity': {'offline': 'original'}}
-            self.assertEqual(callbacks['initialize'](job, callbacks['lease']), {'independent': 'initializer'})
-            _, support_plan, support_stage, _ = cli._context(job, callbacks['artifacts'], cli.runtime.distributed_k3s_candidate_plan)
-            plan = create_guarded_hotel_runtime_plan(callbacks['guarded_artifacts'],
-                support_plan, support_stage,
-                initialization_attempt_id=job['hotel_initialization_pin']['initialization_attempt_id'])
-            stage = build_guarded_hotel_initialization_stage(plan)
-            handoff.update(plan=plan, stage=stage)
-            self.assertEqual(callbacks['startup'](job, callbacks['lease'], initialization_plan=plan,
-                initialization_stage=stage), {'independent': 'startup'})
-            return operator.HotelStartupOperatorOutcome('failed', 'not_required', {'code': 'execution-failed', 'interrupted': False}, None, 1)
-        # This is a narrow CLI callback wiring test. The preceding test executes
-        # the real outer operator; operator regression suites cover its phases.
-        def lower_support(job, artifacts, **kwargs):
-            self.assertIs(artifacts, handoff['baseline'])
-            self.assertIs(kwargs['lease'], handoff['lease'])
-            return handoff['support_helper'].stage(job, kwargs['lease'])
-        with mock.patch.object(cli, 'run_hotel_startup_operator', side_effect=drive), \
-                mock.patch.object(cli, 'prepare_candidate_support_stage', side_effect=lower_support), \
-                mock.patch.object(initializer, 'prepare_guarded_hotel_initialization', side_effect=lower_initialize), \
-                mock.patch.object(startup, 'prepare_startup_hotel_applications', side_effect=lower_startup):
-            self.assertEqual(cli._run(self.args(), store=self.store), 1)
-        self.assertTrue(handoff['completed'])
+        result, diagnostics, phase = self.completed_fresh_boundary()
+        self.assertEqual((result, diagnostics['execution_outcome'], diagnostics['cleanup_outcome']),
+                         (0, 'completed', 'completed'))
+        self.assertEqual(len(phase['outcomes']), 1)
 
     def destroy_fixture(self):
         from tests.test_deathstarbench_hotel_candidate_provider import StartupCandidateProviderTests

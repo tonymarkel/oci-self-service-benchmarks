@@ -310,6 +310,29 @@ class AwsDistributedLifecycleTests(unittest.TestCase):
             public_key=PUBLIC_KEY, support_image=copy.deepcopy(PIN), application_image=copy.deepcopy(PIN),
             aws_session=self.session, **kwargs)
 
+    def test_hotel_uses_five_node_graph_and_exact_cleanup(self):
+        selected = candidate_plan()
+        selected['deathstarbench']['workload'] = 'hotel_reservation'
+        self.job['plan'] = selected
+        aws.provision_distributed_deathstarbench_candidate(
+            self.job, selected, public_key=PUBLIC_KEY,
+            support_image=copy.deepcopy(PIN), application_image=copy.deepcopy(PIN),
+            aws_session=self.session,
+        )
+        self.assertEqual(len(load_role_node_inventory(self.job['resources']).nodes), 5)
+        aws.destroy_distributed_deathstarbench_candidate(self.job, aws_session=self.session)
+        self.assertTrue(aws.distributed_deathstarbench_candidate_deleted(self.job))
+
+    def test_media_candidate_is_rejected_before_cloud_mutation(self):
+        selected = candidate_plan()
+        selected['deathstarbench']['workload'] = 'media_microservices'
+        with self.assertRaisesRegex(ValueError, 'Social Network or Hotel Reservation'):
+            aws.provision_distributed_deathstarbench_candidate(
+                self.job, selected, public_key=PUBLIC_KEY,
+                support_image=PIN, application_image=PIN, aws_session=self.session,
+            )
+        self.assertEqual(self.ec2.calls, [])
+
     def test_full_topology_is_persisted_before_first_create(self):
         snapshots = []
         self.ec2.on_create = lambda *_: snapshots.append(copy.deepcopy(self.job['resources']))

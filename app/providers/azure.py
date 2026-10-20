@@ -3607,10 +3607,10 @@ def provision_distributed_deathstarbench_candidate(
             'only selected benchmark.'
         )
     deathstarbench = _value(plan, 'deathstarbench', {}) or {}
-    if _value(deathstarbench, 'workload', None) != 'social_network':
+    if _value(deathstarbench, 'workload', None) not in ('social_network', 'hotel_reservation'):
         raise ValueError(
             'The Azure distributed candidate currently requires the exact '
-            'DeathStarBench Social Network workload.'
+            'DeathStarBench Social Network or Hotel Reservation workload.'
         )
     existing_resources = job.setdefault('resources', {})
     saved_provider = str(

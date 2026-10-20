@@ -100,6 +100,7 @@ from .deathstarbench_distributed_measurement import (
 )
 from .deathstarbench_public import (
     PublicDistributedLifecycleError,
+    distributed_workload,
     is_distributed_deathstarbench_plan,
     load_run_distributed_image_lock,
     preflight_distributed_deathstarbench_release,
@@ -890,7 +891,7 @@ def _exact_distributed_candidate_plan(job, provider):
         and not tuple(value(plan, 'llm_benchmarks', ()) or ())
         and value(options, 'topology_id') == DISTRIBUTED_TIERED_TOPOLOGY_ID
         and value(options, 'runtime_id') == K3S_RUNTIME_ID
-        and value(options, 'workload') == 'social_network'
+        and value(options, 'workload') in ('social_network', 'hotel_reservation')
     )
 
 
@@ -1916,11 +1917,20 @@ def catalog():
         # bundle is incomplete.  The exact profile stays hidden until every
         # coordinated release artifact validates together.
         pass
+    hotel_available = False
+    try:
+        preflight_distributed_deathstarbench_release(workload='hotel_reservation')
+        hotel_available = True
+    except PublicDistributedLifecycleError:
+        pass
     deathstarbench_topologies = []
     for topology in DEATHSTARBENCH_TOPOLOGIES:
         item = dict(topology)
         if item.get('topology_id') == DISTRIBUTED_TIERED_TOPOLOGY_ID:
-            item['released'] = distributed_released
+            item['released'] = distributed_released or hotel_available
+            item['workloads'] = [workload for workload in item['workloads']
+                                 if (workload == 'social_network' and distributed_released)
+                                 or (workload == 'hotel_reservation' and hotel_available)]
         deathstarbench_topologies.append(item)
     selectable_deathstarbench_workloads = {
         workload
@@ -2338,7 +2348,7 @@ async def create_job(plan: BenchmarkPlan):
             raise HTTPException(422, str(exc)) from exc
     if distributed_deathstarbench:
         try:
-            preflight_distributed_deathstarbench_release()
+            preflight_distributed_deathstarbench_release(workload=distributed_workload(plan))
         except PublicDistributedLifecycleError as exc:
             raise HTTPException(422, str(exc)) from exc
     try:
@@ -2398,7 +2408,7 @@ async def create_job(plan: BenchmarkPlan):
         ) from exc
     try:
         if distributed_deathstarbench:
-            snapshot_distributed_image_lock(run_directory)
+            snapshot_distributed_image_lock(run_directory, workload=distributed_workload(plan))
         (run_directory / 'plan.json').write_text(
             json.dumps(sanitized_plan, indent=2)
         )
@@ -3239,7 +3249,7 @@ def provision(job, plan):
         )
     if is_distributed_deathstarbench_plan(plan):
         validate_distributed_deathstarbench_plan(plan)
-        image_lock = load_run_distributed_image_lock(RUNS, job['id'])
+        image_lock = load_run_distributed_image_lock(RUNS, job['id'], workload=distributed_workload(plan))
         return provision_public_distributed_deathstarbench(
             job,
             plan,
@@ -6431,7 +6441,7 @@ def run_benchmarks(job, plan):
             if isinstance(options, dict)
             else getattr(options, 'runtime_id', None),
         )
-        image_lock = load_run_distributed_image_lock(RUNS, job['id'])
+        image_lock = load_run_distributed_image_lock(RUNS, job['id'], workload=distributed_workload(plan))
         return run_public_distributed_deathstarbench(
             job,
             plan,

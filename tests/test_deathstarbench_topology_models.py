@@ -111,6 +111,18 @@ class DeathStarBenchTopologyModelTests(unittest.TestCase):
                         runtime_id=runtime_id,
                     )
 
+    def test_distributed_hotel_is_accepted_but_media_is_not(self):
+        payload = legacy_plan_payload(storage={'additional_volume': False})
+        payload['deathstarbench'].update(
+            topology_id='distributed_tiered_v1', runtime_id='k3s_v1',
+            workload='hotel_reservation',
+        )
+        plan = BenchmarkPlan.model_validate(payload)
+        self.assertEqual(plan.deathstarbench.workload, 'hotel_reservation')
+        payload['deathstarbench']['workload'] = 'media_microservices'
+        with self.assertRaises(ValidationError):
+            BenchmarkPlan.model_validate(payload)
+
     def test_contract_identifiers_are_immutable_after_validation(self):
         options = DeathStarBenchOptions()
 

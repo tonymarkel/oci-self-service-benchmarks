@@ -1,11 +1,40 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-20: **published artifacts, support-only K3s staging, and a private Hotel controller with one successful OCI AMD initialization/verification run; not public benchmarks**.
-Social Network is still the only released distributed workload. The audited
-foundations now have drift-checked application/frontend, initializer, and
-load-driver preparation tools, plus an explicit native publication pipeline.
-No cloud provisioning, dataset initialization, live measurement, or cleanup
-qualification is claimed by the artifact pipeline.
+Status, 2026-10-20: **experimental synthetic Hotel benchmarking is available in
+the UI; Media remains a private candidate**. Hotel uses the existing five-node
+cloud lifecycle with a simpler deployment runner. The private controller and
+its historical qualification gates remain separate; their evidence does not
+claim broad provider or architecture qualification for the UI runner.
+
+## Experimental Hotel UI workflow
+
+The form accepts Hotel on `distributed_tiered_v1/k3s_v1`. Each run snapshots
+[the published image lock](qualification/deathstarbench-hotel-ui-images-v1.json),
+uses digest-pinned native applications, prepares SELinux-labeled database
+volumes, starts the supporting services, and seeds/verifies the fresh synthetic
+dataset. Normal Deployments start the eight backend services, then search and
+frontend. Cloud network isolation is retained; per-service NetworkPolicies and
+the private controller's dispatch approval machinery are omitted for these
+short-lived synthetic loads.
+
+Before load, the runner checks valid/invalid login, a successful reservation on
+unmeasured dates, and search/recommendation response structure. The pinned
+load driver reports HTTP and response-body failures separately. Throughput is
+body-check successes per second; error rate is failed completed responses over
+all completed responses. Socket errors and incomplete requests are additional
+metrics. Warmup and measurement mutate the same reservation state without a
+reset. Reservation writes retain upstream non-atomic behavior, so this measures
+synthetic workload performance rather than booking correctness.
+
+All 24 service pods must remain ready with unchanged identities and no restarts
+through warmup and measurement. Results record the dataset, images, driver,
+measurement method, and runtime revisions. Comparison identity normalizes the
+per-run environment ID; an additional exact manifest digest records each run.
+Hotel metadata does not borrow Social Network graph hashes. The normal
+supervisor handles stop, failure, reports, and cloud cleanup.
+
+The sections below preserve the stricter private candidate development history.
+Statements about closed gates describe that path, not experimental UI access.
 
 ## Completed foundation
 
@@ -59,9 +88,9 @@ executing it against actual cloud guests is still a runtime qualification gate.
 Hotel's pod policy uses port **5000**, not the external NodePort 8080. No
 cloud ingress or K3s NodePort-range expansion is needed.
 
-Both new profiles and assets remain unreleased. The existing public model,
-catalog, lifecycle, and released bundle validator continue to reject them;
-an asset flag or candidate preview cannot open their gates. Historical
+The original candidate profiles and assets retain their unreleased markers.
+The experimental Hotel UI uses its own checked-in runtime lock and validator;
+an asset flag or arbitrary candidate preview cannot enable that path. Historical
 compact API clients, reports, comparisons, and cleanup remain supported.
 
 ## Artifact preparation checkpoint
@@ -992,7 +1021,7 @@ cloud/cluster/storage ownership, per-Pod durable dispatch latches, exact live
 inventory validation, and cleanup remains the next implementation slice. No
 live startup or semantic transaction qualification is claimed by this bundle.
 
-## Next review slices and release prerequisites
+## Private qualification roadmap (retained separately from experimental UI)
 
 1. **Immutable artifacts and public access.** Hotel now has native guarded
    publication and complete anonymous byte-access observations for all seven
@@ -1031,7 +1060,7 @@ patch receipts identify the corrections adopted after that audit; the audit
 itself is not rewritten to imply qualification. HTTP 200 alone is not a
 successful login or reservation. Media still needs deployed dataset readiness
 and proof that a composed review reaches persistent storage and its user/movie
-references. Neither candidate is qualified for public execution yet.
+references. Neither candidate has completed the full private multi-cloud qualification matrix.
 
 Maintainers review each slice before merge. No automatic merge or release-flag
 promotion is part of this workflow.

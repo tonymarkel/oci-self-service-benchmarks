@@ -1,0 +1,50 @@
+{
+  "application_images": {
+    "linux/amd64": "ghcr.io/tonymarkel/deathstarbench-hotel-app@sha256:c86dfa0649a602d74b15eb85dc0cce27008e05d017beb9c341a6add20aafdd6f",
+    "linux/arm64": "ghcr.io/tonymarkel/deathstarbench-hotel-app@sha256:33fa3dbaa84430cb4d44467926cdfd74560ebee031c6a5808bbd40673e614ba9"
+  },
+  "candidate_images": {
+    "image_set_revision": "hotel-reservation-images-v1",
+    "platforms": {
+      "linux/amd64": {
+        "images": {
+          "consul": "docker.io/hashicorp/consul@sha256:5290ee6943eeac0350f193c8dc52ff27eb1042dd6f39ee597068e779c0ce4a9f",
+          "hotel-reservation": "ghcr.io/tonymarkel/deathstarbench-hotel-app@sha256:4b95713e61229cdc95148b80cdbd760e3c7809824845dd28d730addf8c487017",
+          "jaeger": "docker.io/jaegertracing/all-in-one@sha256:f1f9682412cfca7a2d4c3f612f8eb79216222ca791589b04485d71a0b6bc80b9",
+          "memcached": "docker.io/library/memcached@sha256:405390d9c38a0e3d59f34088c2265a710da10e5e9f3cdeb4fb5264c829509aa5",
+          "mongodb": "docker.io/library/mongo@sha256:f7a950ee4a1cc048300cd3b3da3e939974eb8278525101ac917dbed1a3ce3d51"
+        }
+      },
+      "linux/arm64": {
+        "images": {
+          "hotel-reservation": "ghcr.io/tonymarkel/deathstarbench-hotel-app@sha256:14ff6ba619bf5b11b4628f28265d1bbbef7539e3c9ee2fb72e03cdadd71df336"
+        }
+      }
+    },
+    "released": false,
+    "schema_version": 2,
+    "upstream_revision": "6ecb09706140f8730b5385c08f1386c654c3c526",
+    "workload_id": "hotel_reservation",
+    "workload_revision": "hotel-reservation-6ecb097-workload-v1"
+  },
+  "dataset_fingerprint": "sha256:7d1e07da21efdf9df9cf2062f09546b8eb153c03af69be9e2cb4a635956d6681",
+  "dataset_manifest_sha256": "7d1e07da21efdf9df9cf2062f09546b8eb153c03af69be9e2cb4a635956d6681",
+  "dataset_revision": "hotel-reservation-deterministic-rounded-baseline-candidate-v1",
+  "experimental": true,
+  "initializer_sha256": "dc508e0a6e18c79b01d20a97f6077da66386244b91d7e2ceb3d36a2a2d50ab3d",
+  "load_driver_context_sha256": "beacbc2b30b72942c0959e1d2c3c5e934f9349f9028d4c7e169b8c78c084ca31",
+  "load_driver_revision": "wrk2-6ecb097-hotel-oci-amd64-candidate-v1",
+  "load_generator_image": "ghcr.io/tonymarkel/deathstarbench-hotel-load-driver@sha256:911e797bffcabe968d05424d05e4bee0ced19718544e7d44e064881d0f4326b4",
+  "load_script_sha256": "ac34afc602c95879bb3b0f3a17a06a0c15d46bfa261a926ceed5a2849ab96858",
+  "measurement_revision": "hotel-synthetic-mixed-k3s-v1",
+  "runtime_revision": "hotel-synthetic-k3s-v1",
+  "schema_version": 1,
+  "source_artifacts": {
+    "baseline_lock_sha256": "a53ceb377feef1a064d990dbc403deccd8d761b8bd70db2e912af69df3d3e86f",
+    "guarded_lock_sha256": "ddb175985a0555adca5d2457198a289f588aa847301c95dd47e1f5ae4796fee6"
+  },
+  "upstream_revision": "6ecb09706140f8730b5385c08f1386c654c3c526",
+  "workload_id": "hotel_reservation",
+  "workload_revision": "hotel-reservation-6ecb097-workload-v1",
+  "wrk_binary_sha256": "33c77b146cfe4347608cfe831c98b32187bc0079cadce77fb38ca81cf1e00fd3"
+}

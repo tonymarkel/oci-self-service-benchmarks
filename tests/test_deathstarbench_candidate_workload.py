@@ -410,9 +410,9 @@ class CandidateRenderTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     require_released_distributed_bundle(candidate_images(workload_id))
 
-    def test_new_candidates_stay_rejected_by_public_plan_and_lifecycle(self):
+    def test_media_candidate_stays_rejected_by_public_plan_and_lifecycle(self):
         for provider in ('aws', 'gcp', 'azure', 'oci'):
-            for workload_id in CANDIDATES:
+            for workload_id in ('media_microservices',):
                 with self.subTest(provider=provider, workload=workload_id):
                     plan = {
                         'provider': provider, 'region': 'test-region-1',
@@ -424,7 +424,7 @@ class CandidateRenderTests(unittest.TestCase):
                     }
                     with self.assertRaisesRegex(ValueError, 'Social Network'):
                         BenchmarkPlan.model_validate(plan)
-                    with self.assertRaisesRegex(ValueError, 'exact Social Network'):
+                    with self.assertRaisesRegex(ValueError, 'requires Social Network or Hotel'):
                         validate_distributed_deathstarbench_plan(plan)
 
 

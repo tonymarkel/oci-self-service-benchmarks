@@ -847,9 +847,15 @@ def _deathstarbench_execution_context(
             'load_driver_revision',
             'measurement_revision',
             'initializer_sha256',
-            'dataset_nodes_sha256',
-            'dataset_edges_sha256',
             'load_script_sha256',
+        )
+        # Hotel seeds a deterministic collection manifest rather than a
+        # social graph. Preserve its real dataset identity in comparison
+        # cohorts without inventing graph inputs that were never used.
+        identity_keys += (
+            ('dataset_manifest_sha256',)
+            if options.get('workload') == 'hotel_reservation'
+            else ('dataset_nodes_sha256', 'dataset_edges_sha256')
         )
         for key in identity_keys:
             raw = metadata.get(key)
@@ -877,6 +883,7 @@ def _deathstarbench_execution_context(
                 'initializer_sha256',
                 'dataset_nodes_sha256',
                 'dataset_edges_sha256',
+                'dataset_manifest_sha256',
                 'load_script_sha256',
             } and not re.fullmatch(r'[0-9a-f]{64}', value):
                 issues.append(

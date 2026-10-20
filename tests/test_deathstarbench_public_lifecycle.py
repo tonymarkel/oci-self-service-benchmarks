@@ -65,9 +65,9 @@ class PublicContractTests(unittest.TestCase):
             public.validate_distributed_deathstarbench_plan(mixed)
 
         wrong_workload = distributed_plan()
-        wrong_workload['deathstarbench']['workload'] = 'hotel_reservation'
+        wrong_workload['deathstarbench']['workload'] = 'media_microservices'
         self.assertTrue(public.is_distributed_deathstarbench_plan(wrong_workload))
-        with self.assertRaisesRegex(ValueError, 'exact Social Network'):
+        with self.assertRaisesRegex(ValueError, 'requires Social Network or Hotel'):
             public.validate_distributed_deathstarbench_plan(wrong_workload)
 
         compact = distributed_plan()
@@ -514,9 +514,9 @@ class MainIntegrationTests(unittest.TestCase):
                 ],
                 [('distributed_tiered_v1', 'k3s_v1')],
             )
-            self.assertEqual(
+            self.assertCountEqual(
                 [item['id'] for item in document['deathstarbench_workloads']],
-                ['social_network'],
+                list(document['deathstarbench_topologies'][0]['workloads']),
             )
             return document['deathstarbench_topologies'][0]
 
@@ -569,7 +569,7 @@ class MainIntegrationTests(unittest.TestCase):
         ):
             result = main.provision(job, distributed_plan('azure'))
         self.assertEqual(result, {'distributed': True})
-        load_lock.assert_called_once_with(main.RUNS, job['id'])
+        load_lock.assert_called_once_with(main.RUNS, job['id'], workload='social_network')
         distributed.assert_called_once()
         compact.assert_not_called()
 
@@ -592,7 +592,7 @@ class MainIntegrationTests(unittest.TestCase):
         ):
             result = main.run_benchmarks(job, distributed_plan('gcp'))
         self.assertEqual(result, {'status': 'completed'})
-        load_lock.assert_called_once_with(main.RUNS, job['id'])
+        load_lock.assert_called_once_with(main.RUNS, job['id'], workload='social_network')
         self.assertIs(distributed.call_args.args[2], run_lock)
         compact.assert_not_called()
 
@@ -716,16 +716,16 @@ class CreateJobSnapshotTests(unittest.IsolatedAsyncioTestCase):
         task = Task()
         lease = Lease()
 
-        def snapshot(run_directory):
+        def snapshot(run_directory, **kwargs):
             order.append('snapshot')
-            return public.snapshot_distributed_image_lock(run_directory)
+            return public.snapshot_distributed_image_lock(run_directory, **kwargs)
 
         def create_task(coroutine):
             order.append('task')
             coroutine.close()
             return task
 
-        def preflight():
+        def preflight(**kwargs):
             order.append('preflight')
 
         with tempfile.TemporaryDirectory() as temporary:

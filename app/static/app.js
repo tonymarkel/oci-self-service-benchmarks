@@ -338,7 +338,7 @@ function updateProviderTopologyCopy() {
             ? 'private Azure VNet address'
             : (gcp ? 'private Google Cloud VPC address' : 'private OCI VCN address'));
     $('#deathstarDeploymentHint').textContent =
-        'The Social Network service graph runs across application, database, cache, and control VMs with K3s. ' +
+        'The selected workload runs across application, database, cache, and control VMs with K3s. ' +
         `A fifth load-generator VM sends traffic over a ${privateNetwork}.`;
 }
 
@@ -631,7 +631,7 @@ function selectableDeathstarTopologies(catalog) {
         && topology.runtime_id === DISTRIBUTED_DEATHSTAR_RUNTIME_ID
         && topology.node_count === 5
         && Array.isArray(topology.workloads)
-        && topology.workloads.includes('social_network')
+        && topology.workloads.some(workload => ['social_network', 'hotel_reservation'].includes(workload))
     ));
 }
 
@@ -656,7 +656,10 @@ function enforceDeathstarTopologyValues({newlySelected = false} = {}) {
     if (!checkbox || !topologySelect) return;
     const distributed = isDistributedDeathstarbenchSelected();
     if (distributed) {
-        $('#deathstarWorkload').value = 'social_network';
+        const allowed = selectedDeathstarTopology().workloads;
+        if (!allowed.includes($('#deathstarWorkload').value)) {
+            $('#deathstarWorkload').value = allowed[0];
+        }
         if (newlySelected) $('#deathstarConnections').value = '4';
         if ($('#additional').dataset.deathstarPreviousAdditional === undefined) {
             $('#additional').dataset.deathstarPreviousAdditional = String($('#additional').checked);
@@ -698,10 +701,9 @@ function handleDeathstarSelectionChange() {
 
 function setDeathstarValues(options = deathstarDefaults) {
     $('#deathstarTopology').value = deathstarTopologies[0]?.topology_id || '';
-    $('#deathstarWorkload').value = 'social_network';
-    if (!$('#deathstarWorkload').value && deathstarWorkloads.length) {
-        $('#deathstarWorkload').value = deathstarWorkloads[0].id;
-    }
+    const allowed = selectedDeathstarTopology()?.workloads || [];
+    $('#deathstarWorkload').value = allowed.includes(options.workload)
+        ? options.workload : (allowed[0] || '');
     $('#deathstarWarmup').value = options.warmup_seconds ?? deathstarDefaults.warmup_seconds;
     $('#deathstarDuration').value = options.duration_seconds ?? deathstarDefaults.duration_seconds;
     $('#deathstarThreads').value = options.threads ?? deathstarDefaults.threads;
@@ -716,7 +718,7 @@ function restoreDeathstarSelection(plan) {
     const retired = requested && (
         options.topology_id !== DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID
         || options.runtime_id !== DISTRIBUTED_DEATHSTAR_RUNTIME_ID
-        || options.workload !== 'social_network'
+        || !deathstarTopologies.some(topology => topology.workloads.includes(options.workload))
     );
     const checkbox = $('input[data-kind="bench"][value="deathstarbench"]');
     if (checkbox) checkbox.checked = requested && !retired;
@@ -727,10 +729,9 @@ function restoreDeathstarSelection(plan) {
 function toggleDeathstarSettings() {
     const checkbox = $('input[data-kind="bench"][value="deathstarbench"]');
     const selected = Boolean(checkbox?.checked);
-    const distributed = isDistributedDeathstarbenchSelected();
     $('#deathstarSettings').hidden = !selected;
     $$('#deathstarSettings input, #deathstarSettings select, #deathstarSettings textarea').forEach(field => {
-        field.disabled = !selected || (distributed && field.id === 'deathstarWorkload');
+        field.disabled = !selected;
     });
 }
 
@@ -806,10 +807,10 @@ function renderCatalog(catalog) {
         `${escape(topology.node_count)} VMs</option>`,
     ).join('');
     deathstarWorkloads = (catalog.deathstarbench_workloads || []).filter(
-        workload => workload.id === 'social_network',
+        workload => deathstarTopologies.some(topology => topology.workloads.includes(workload.id)),
     );
     $('#deathstarWorkload').innerHTML = deathstarWorkloads.map(workload =>
-        `<option value="${workload.id}">${workload.name}</option>`,
+        `<option value="${escape(workload.id)}">${escape(workload.name)}</option>`,
     ).join('');
     setDeathstarValues();
 

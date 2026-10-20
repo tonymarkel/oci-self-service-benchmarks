@@ -28,12 +28,12 @@ def plan(**overrides):
 
 
 class CatalogAndNetworkTests(unittest.TestCase):
-    def test_catalog_offers_only_distributed_social_network(self):
+    def test_catalog_offers_distributed_social_and_experimental_hotel(self):
         payload = main.catalog()
 
         self.assertEqual(
             {item['id'] for item in payload['deathstarbench_workloads']},
-            {'social_network'},
+            {'social_network', 'hotel_reservation'},
         )
         self.assertEqual(
             [
@@ -44,7 +44,7 @@ class CatalogAndNetworkTests(unittest.TestCase):
         )
         self.assertEqual(
             payload['deathstarbench_topologies'][0]['workloads'],
-            ['social_network'],
+            ['social_network', 'hotel_reservation'],
         )
 
     def test_legacy_single_host_plans_and_report_names_remain_available(self):

@@ -2,8 +2,9 @@
 
 Provider callbacks own provisioning, fresh read-only cloud audits and exact
 terminal deletion proof. This boundary owns durable intent, the acquired lease,
-phase sequencing and evidence preservation. It never dispatches a public run,
-starts an application, initializes a dataset or produces benchmark results.
+phase sequencing and evidence preservation. A separately pinned private Hotel
+extension may initialize its dataset. No path dispatches a public run, starts
+an application or produces benchmark results.
 """
 
 from __future__ import annotations
@@ -35,6 +36,8 @@ PIN_SCHEMA = 'candidate-support-operator-pin-v1'
 OPERATOR_SCHEMA = 'candidate-support-operator-v1'
 ARCHIVE_SCHEMA = 'candidate-support-stage-archive-v1'
 CLEANUP_PROOF_SCHEMA = 'candidate-support-cleanup-proof-v1'
+HOTEL_PIN_KEY = 'guarded_hotel_initialization_pin'
+HOTEL_STATE_KEY = 'guarded_hotel_initialization'
 _SHA256 = re.compile(r'sha256:[0-9a-f]{64}\Z')
 _STATES = frozenset({
     'accepted', 'provisioning', 'auditing_cloud', 'preparing_runtime',
@@ -60,14 +63,80 @@ def _copy(value):
     return json.loads(encoded)
 
 
-def _scope():
-    return {
+def _scope(guarded_hotel_initialization=False):
+    value = {
         'scope': 'support-stage-only-applications-paused',
         'application_start_allowed': False,
         'operator_started_applications': False, 'operator_initialized_dataset': False,
         'operator_executed_benchmark': False, 'public_dispatch_enabled': False,
         'cleanup_policy': 'always-attempt-exact-owned-infrastructure-destruction',
         'qualification': _closed_gates(),
+    }
+    if guarded_hotel_initialization:
+        value['scope'] = 'support-stage-and-guarded-hotel-initialization-applications-paused'
+        del value['operator_initialized_dataset']
+        value['dataset_execution_evidence_key'] = HOTEL_STATE_KEY
+    return value
+
+
+def _hotel_operation_pin(job, pin, lease, enabled):
+    """Validate immutable operation identity, never reconstruct runtime authority."""
+    supplied = job.get(HOTEL_PIN_KEY)
+    if not enabled:
+        if supplied is not None:
+            raise CandidateOperatorRefusal('A pinned Hotel operation requires its explicit initialization scope.')
+        return None
+    from scripts.deathstarbench_candidate_operator_state import _read
+    try:
+        saved = _read(lease.path.parent / 'hotel-initialization-pin.json')
+        if (pin['workload_id'] != 'hotel_reservation' or not isinstance(supplied, Mapping)
+                or _canonical(saved) != _canonical(supplied)
+                or supplied.get('candidate_schema') != 'hotel-guarded-initialization-operator-pin-v1'
+                or type(supplied.get('schema_version')) is not int or supplied['schema_version'] != 1
+                or supplied.get('candidate_only') is not True or supplied.get('released') is not False
+                or supplied.get('run_id') != pin['run_id']
+                or supplied.get('support_pin_fingerprint') != pin['fingerprint']
+                or supplied.get('baseline_artifact_fingerprint') != pin['artifact_fingerprint']
+                or not isinstance(supplied.get('initialization_attempt_id'), str)
+                or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',
+                                    supplied['initialization_attempt_id'])
+                or any(supplied.get(key) is not False for key in (
+                    'application_start_allowed', 'runtime_qualified', 'measurement_qualified', 'public_release'))
+                or supplied.get('fingerprint') != _fingerprint({key: value for key, value in supplied.items() if key != 'fingerprint'})):
+            raise ValueError('Guarded Hotel operation pin differs.')
+        metadata = supplied['guarded_artifacts']
+        if (metadata['workload_id'] != 'hotel_reservation'
+                or metadata['baseline']['binding_fingerprint'] != pin['artifact_fingerprint']
+                or metadata['fingerprint'] != supplied['guarded_artifact_fingerprint']
+                or metadata['fingerprint'] != _fingerprint({key: value for key, value in metadata.items() if key != 'fingerprint'})):
+            raise ValueError('Guarded Hotel artifact pin differs.')
+        return _copy(supplied)
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise CandidateOperatorRefusal('The explicit Hotel scope requires its matching immutable initialization pin.') from exc
+
+
+def _hotel_summary(job, pin):
+    """Report retained execution evidence without promoting qualification gates."""
+    record = job.get(HOTEL_STATE_KEY)
+    identity_matches = isinstance(record, Mapping) and all(record.get(key) == expected for key, expected in (
+        ('run_id', pin['run_id']), ('initialization_attempt_id', pin['initialization_attempt_id']),
+        ('guarded_artifact_fingerprint', pin['guarded_artifact_fingerprint']),
+    ))
+    initialized = record.get('initialization_executed') if identity_matches else False if record is None else None
+    initialized = initialized if type(initialized) is bool else None
+    complete = (identity_matches
+                and record.get('state') == 'initialized-and-globally-verified-applications-paused'
+                and initialized is True and record.get('database_execution_verified') is True
+                and record.get('global_readonly_verification_completed') is True)
+    completion = ('completed' if complete else 'not-started' if record is None else
+                  'failed' if identity_matches and record.get('state') == 'failed-cleanup-only' else 'unknown')
+    return {
+        'completion': completion, 'evidence_key': HOTEL_STATE_KEY,
+        'initialization_executed': initialized,
+        'database_execution_verified': complete,
+        'global_readonly_verification_completed': complete,
+        'application_start_allowed': False, 'runtime_qualified': False,
+        'measurement_qualified': False, 'public_release': False,
     }
 
 
@@ -123,12 +192,12 @@ def _validate_pin(job, pin, artifacts, *, cleanup_only):
     return provider
 
 
-def _new_record(pin):
+def _new_record(pin, *, guarded_hotel_initialization=False):
     return {
         'schema_version': 1, 'candidate_schema': OPERATOR_SCHEMA,
         'candidate_only': True, 'released': False,
         'run_id': pin['run_id'], 'workload_id': pin['workload_id'],
-        'pin_fingerprint': pin['fingerprint'], 'scope': _scope(),
+        'pin_fingerprint': pin['fingerprint'], 'scope': _scope(guarded_hotel_initialization),
         'attempt': 1, 'state': 'accepted', 'cloud_identity': None,
         'audits': [], 'support_image_access': None, 'support_snapshot': None,
         'support_stage_complete': False, 'cleanup_complete': False,
@@ -136,9 +205,14 @@ def _new_record(pin):
     }
 
 
-def validate_candidate_operator_record(value, pin):
+def validate_candidate_operator_record(value, pin, *, guarded_hotel_initialization=None):
     """Validate retained history; it cannot substitute for fresh audit/access."""
-    expected = _new_record(pin)
+    if guarded_hotel_initialization is None:
+        guarded_hotel_initialization = (isinstance(value, Mapping)
+                                        and _canonical(value.get('scope')) == _canonical(_scope(True)))
+    if guarded_hotel_initialization and pin['workload_id'] != 'hotel_reservation':
+        raise CandidateOperatorRefusal('Guarded initialization scope is Hotel-only.')
+    expected = _new_record(pin, guarded_hotel_initialization=guarded_hotel_initialization)
     dynamic = set(expected) - {
         'schema_version', 'candidate_schema', 'candidate_only', 'released',
         'run_id', 'workload_id', 'pin_fingerprint', 'scope',
@@ -258,6 +332,7 @@ class CandidateOperatorOutcome:
     _cleanup_json: str | None
     failure: str | None
     cleanup_failure: str | None
+    _hotel_json: str | None = None
 
     @property
     def support_snapshot(self):
@@ -268,17 +343,20 @@ class CandidateOperatorOutcome:
         return json.loads(self._cleanup_json) if self._cleanup_json is not None else None
 
     def metadata(self):
-        return {key: getattr(self, key) for key in (
+        value = {key: getattr(self, key) for key in (
             'exit_code', 'support_stage_complete', 'cleanup_complete', 'support_snapshot',
             'cleanup_proof', 'failure', 'cleanup_failure',
         )}
+        if self._hotel_json is not None:
+            value.update(operation_scope=_scope(True), hotel_initialization=json.loads(self._hotel_json))
+        return value
 
 
 def run_candidate_support_operator(
     job, *, lease: RunLease, pin, persist, provision=None, fresh_audit=None,
     prepare_runtime=None, support_image_access=None, stage=None, destroy_and_prove,
     artifacts=None, resume=False, cleanup_only=False, cleanup_signal_context=None,
-    interrupt_exceptions=(KeyboardInterrupt,),
+    interrupt_exceptions=(KeyboardInterrupt,), guarded_hotel_initialization=False,
 ) -> CandidateOperatorOutcome:
     """Run support staging with one lease, or perform registry/SSH-free cleanup.
 
@@ -289,11 +367,14 @@ def run_candidate_support_operator(
     """
     if type(resume) is not bool or type(cleanup_only) is not bool or (resume and cleanup_only):
         raise CandidateOperatorRefusal('Choose exactly one new, resume or cleanup-only mode.')
+    if type(guarded_hotel_initialization) is not bool or (guarded_hotel_initialization and resume):
+        raise CandidateOperatorRefusal('Guarded Hotel operations require explicit new or cleanup-only scope.')
     if (not isinstance(interrupt_exceptions, tuple) or not interrupt_exceptions
             or any(not isinstance(item, type) or not issubclass(item, BaseException) for item in interrupt_exceptions)):
         raise CandidateOperatorRefusal('Interruption exception types must be explicit BaseException subclasses.')
     provider = _validate_pin(job, pin, artifacts, cleanup_only=cleanup_only)
     require_acquired_run_lease(lease, pin['run_id'])
+    hotel_pin = _hotel_operation_pin(job, pin, lease, guarded_hotel_initialization)
     if lease.path.parent.parent.name != '.candidate-support':
         raise CandidateOperatorRefusal('Candidate operators require the private candidate state namespace.')
     if not callable(persist) or not callable(destroy_and_prove):
@@ -305,7 +386,7 @@ def run_candidate_support_operator(
     pin = _copy(dict(pin))
     original = job.get(OPERATOR_JOURNAL_KEY)
     if resume or cleanup_only:
-        current = validate_candidate_operator_record(original, pin)
+        current = validate_candidate_operator_record(original, pin, guarded_hotel_initialization=guarded_hotel_initialization)
         if not cleanup_only and current['state'] in _TEARDOWN:
             raise CandidateOperatorRefusal('Teardown has begun; only cleanup-only recovery is permitted.')
     else:
@@ -313,10 +394,13 @@ def run_candidate_support_operator(
             raise CandidateOperatorRefusal('A new operator cannot adopt existing state or resources.')
         current = None
     expected_record = current
+    teardown = False
 
     def binding():
         require_acquired_run_lease(lease, pin['run_id'])
         _validate_pin(job, pin, artifacts, cleanup_only=cleanup_only)
+        if not teardown and _canonical(_hotel_operation_pin(job, pin, lease, guarded_hotel_initialization)) != _canonical(hotel_pin):
+            raise CandidateOperatorError('Guarded Hotel operation identity changed outside its durable lifecycle.')
         if _canonical(job.get(OPERATOR_JOURNAL_KEY)) != _canonical(expected_record):
             raise CandidateOperatorError('Operator intent changed outside its durable lifecycle.')
 
@@ -329,8 +413,8 @@ def run_candidate_support_operator(
     def write(**changes):
         nonlocal current, expected_record
         binding()
-        candidate = {**(current or _new_record(pin)), **changes}
-        candidate = validate_candidate_operator_record(candidate, pin)
+        candidate = {**(current or _new_record(pin, guarded_hotel_initialization=guarded_hotel_initialization)), **changes}
+        candidate = validate_candidate_operator_record(candidate, pin, guarded_hotel_initialization=guarded_hotel_initialization)
         current = expected_record = candidate
         job[OPERATOR_JOURNAL_KEY] = _copy(candidate)
         callback(persist)
@@ -377,12 +461,18 @@ def run_candidate_support_operator(
             write(state='checking_support_access', audits=[*current['audits'], after_runtime])
             access = _access(callback(support_image_access), pin)
             write(state='staging_support', support_image_access=access)
-            support = _validated_support(job, artifacts, callback(stage), access)
+            staged = callback(stage)
+            if guarded_hotel_initialization and _hotel_summary(job, hotel_pin)['completion'] != 'completed':
+                raise CandidateOperatorError('Guarded Hotel staging lacks completed initialization and global verification evidence.')
+            support = _validated_support(job, artifacts, staged, access)
             write(state='support_observed', support_stage_complete=True, support_snapshot=support)
     except BaseException as exc:
         interrupted = isinstance(exc, interrupt_exceptions)
         failure = _error(exc, interrupted)
     finally:
+        # Hotel-only evidence damage forbids further execution, but cannot
+        # revoke cleanup of the original support/cloud identity already owned.
+        teardown = True
         # Evidence archival is deliberately independent of fresh registry/SSH
         # prerequisites, and runs under signal deferral with exact cleanup.
         try:
@@ -468,4 +558,5 @@ def run_candidate_support_operator(
         _canonical(cleanup) if complete else None,
         None if failure is None else failure['type'] + ': ' + failure['message'],
         None if cleanup_failure is None else cleanup_failure['type'] + ': ' + cleanup_failure['message'],
+        _canonical(_hotel_summary(job, hotel_pin)) if guarded_hotel_initialization else None,
     )

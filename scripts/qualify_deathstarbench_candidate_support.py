@@ -10,7 +10,9 @@ public UI dispatch is permitted. State and leases are kept outside web history.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass
 import json
 import math
 import os
@@ -25,6 +27,7 @@ if __package__ in (None, ''):
 from app import main as application
 from app import deathstarbench_distributed as runtime
 from app.deathstarbench_candidate_artifacts import adopt_candidate_artifacts, _read_input
+from app.deathstarbench_candidate_artifacts import CandidateArtifactBinding
 from app.deathstarbench_candidate_deployment import _context, prepare_candidate_support_stage
 from app.deathstarbench_contract import DISTRIBUTED_TIERED_TOPOLOGY_ID, K3S_RUNTIME_ID
 from app.models import BenchmarkPlan
@@ -39,15 +42,19 @@ PIN_SCHEMA = 'candidate-support-operator-pin-v1'
 STATE_ROOT = application.RUNS / '.candidate-support'
 
 
-def _parser():
+def _parser(*, allow_resume=True, workloads=('hotel_reservation', 'media_microservices'),
+            interruption_checkpoints=('cluster-ready', 'support-ready')):
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument('--resume', metavar='RUN_ID')
+    if allow_resume:
+        mode.add_argument('--resume', metavar='RUN_ID')
+    else:
+        parser.set_defaults(resume=None)
     mode.add_argument('--cleanup-only', metavar='RUN_ID')
     parser.add_argument('--reconcile-aws-capacity-rejection', metavar='CLOUDTRAIL_EVENT_ID',
                         help='Explicit AWS cleanup-only recovery of one exact authoritative rejected launch; never replay.')
     parser.add_argument('--plan', type=Path, help='Exact five-role infrastructure BenchmarkPlan JSON for a new run.')
-    parser.add_argument('--workload', choices=('hotel_reservation', 'media_microservices'))
+    parser.add_argument('--workload', choices=workloads)
     parser.add_argument('--image-lock', type=Path)
     parser.add_argument('--publication', type=Path)
     parser.add_argument('--workload-preparation', type=Path)
@@ -60,7 +67,7 @@ def _parser():
     parser.add_argument('--oci-application-image-id')
     parser.add_argument('--oci-support-image-id')
     parser.add_argument('--oci-defined-tags-json', type=Path)
-    parser.add_argument('--interrupt-after', choices=('cluster-ready', 'support-ready'),
+    parser.add_argument('--interrupt-after', choices=interruption_checkpoints,
                         help='Qualification-only interruption after the durable named checkpoint.')
     parser.add_argument('--interrupt-mode', choices=('graceful', 'hard'), default='graceful')
     return parser
@@ -177,11 +184,23 @@ def _checkpoint(args, job, name, persist):
     raise application.RunCancelled('Requested support-stage qualification interruption.')
 
 
-def _run(args, *, store=None):
+@dataclass(frozen=True)
+class _SupportStageInitializer:
+    """Process-local extension for a private caller; never restored from JSON."""
+
+    artifacts: CandidateArtifactBinding
+    persist_inputs: Callable
+    initialize: Callable
+
+
+def _run(args, *, store=None, initializer: _SupportStageInitializer | None = None):
     from app.deathstarbench_candidate_operator import run_candidate_support_operator
     from app.deathstarbench_candidate_image_access import (
         qualify_candidate_support_image_access, require_candidate_support_image_access,
     )
+    if initializer is not None and (type(initializer) is not _SupportStageInitializer
+                                    or args.resume or args.cleanup_only):
+        raise ValueError('A private initializer requires a new run and fresh process-local inputs.')
     if args.interrupt_after is None and args.interrupt_mode != 'graceful':
         raise ValueError('--interrupt-mode requires --interrupt-after.')
     if args.reconcile_aws_capacity_rejection and not args.cleanup_only:
@@ -205,6 +224,8 @@ def _run(args, *, store=None):
         try:
             job = store.load(run_id, lease)
             pin = job['candidate_support_pin']
+            if args.resume and job.get('guarded_hotel_initialization_pin') is not None:
+                raise ValueError('Guarded Hotel initialization cannot resume; use --cleanup-only.')
             if args.workload is not None and args.workload != pin['workload_id']:
                 raise ValueError('Resume workload differs from its immutable candidate pin.')
             ssh = None if args.cleanup_only else shared._ssh_material(args.ssh_env_file)
@@ -229,7 +250,7 @@ def _run(args, *, store=None):
         ssh = shared._ssh_material(args.ssh_env_file)
         plan = _infrastructure_plan(_read_input(args.plan, 'infrastructure plan')[0], ssh)
         provider_pin = _provider_pin(args, plan, ssh)
-        artifacts = _adopt(args)
+        artifacts = initializer.artifacts if initializer is not None else _adopt(args)
         run_id, lease = store.allocate()
         try:
             pin = _new_pin(run_id, plan, provider_pin, artifacts, ssh)
@@ -240,6 +261,8 @@ def _run(args, *, store=None):
                 'created_at': timestamp, 'updated_at': timestamp,
             }
             store.publish_pin(pin, lease)
+            if initializer is not None:
+                initializer.persist_inputs(job, store, lease)
             store.save(job, lease)
             metadata = artifacts.metadata()
             store.publish_artifact_input(run_id, 'candidate-image-lock.json', args.image_lock,
@@ -293,9 +316,21 @@ def _run(args, *, store=None):
             require_candidate_support_image_access(access, candidate, bundle)
             result = prepare_candidate_support_stage(value, artifacts, lease=held, execute=execute, persist=persist, emit=emit)
             _checkpoint(args, value, 'support-ready', persist)
+            if initializer is not None:
+                initialized = initializer.initialize(value, held, execute=execute, persist=persist,
+                                                     fresh_audit=cloud.audit)
+                if (not isinstance(initialized, dict)
+                        or canonical(initialized) != canonical(value.get('guarded_hotel_initialization'))
+                        or initialized.get('state') != 'initialized-and-globally-verified-applications-paused'
+                        or any(initialized.get(key) is not True for key in (
+                            'initialization_executed', 'database_execution_verified',
+                            'global_readonly_verification_completed'))):
+                    raise ValueError('Guarded Hotel initialization did not return its exact completed persisted evidence.')
             return result
 
-        print(f'Private support candidate {run_id}: {plan.provider}/{pin["workload_id"]}; state {store.directory(run_id)}', flush=True)
+        hotel_operation = initializer is not None or job.get('guarded_hotel_initialization_pin') is not None
+        label = 'guarded Hotel initialization' if hotel_operation else 'support'
+        print(f'Private {label} candidate {run_id}: {plan.provider}/{pin["workload_id"]}; state {store.directory(run_id)}', flush=True)
         with _signals(job) as (signal_state, cleanup_signals):
             if args.reconcile_aws_capacity_rejection:
                 cloud.reconcile_aws_capacity_rejection(job, lease, event_id=args.reconcile_aws_capacity_rejection)
@@ -306,6 +341,7 @@ def _run(args, *, store=None):
                 destroy_and_prove=cloud.destroy_and_prove, resume=bool(args.resume),
                 cleanup_only=bool(args.cleanup_only), cleanup_signal_context=cleanup_signals,
                 interrupt_exceptions=(KeyboardInterrupt, application.RunCancelled),
+                guarded_hotel_initialization=hotel_operation,
             )
             print(json.dumps(outcome.metadata(), indent=2, sort_keys=True), flush=True)
             return outcome.exit_code

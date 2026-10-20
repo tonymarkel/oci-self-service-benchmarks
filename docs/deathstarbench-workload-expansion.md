@@ -1,6 +1,6 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-15: **published artifacts, support-only K3s staging, guarded Hotel image access and offline initialization-control foundations; not public benchmarks**.
+Status, 2026-10-20: **published artifacts, support-only K3s staging, and a private one-shot Hotel initialization controller; not public benchmarks**.
 Social Network is still the only released distributed workload. The audited
 foundations now have drift-checked application/frontend, initializer, and
 load-driver preparation tools, plus an explicit native publication pipeline.
@@ -825,9 +825,9 @@ an apparently successful initializer or verifier. Local command-output records
 must match the exact run/dataset/mode/Pod UID and still retain false start gates.
 They are unverified observations, not fresh database or Pod execution proof.
 
-**No cloud/Kubernetes initialization or application executor is implemented by
-this slice.** Nothing applies these new policies/Pods, removes a gate, starts
-MongoDB or application services, or sends benchmark traffic. The next controller
+**The October 15 foundation did not implement a cloud/Kubernetes initialization
+or application executor.** That slice did not apply these policies/Pods, remove a
+gate, start MongoDB or application services, or send benchmark traffic. A live controller
 must freshly verify cloud/cluster ownership, CA, complete admitted Pod specs,
 container images/exit/restart state, and unchanged namespace/Node/PV/PVC/Pod
 identities under its held lease. MongoDB Service/EndpointSlice targets must
@@ -849,6 +849,86 @@ matches the reviewed guarded publication. The record retains the exact receipt
 hash and per-platform images/counts, without treating that historical JSON as
 a capability or as live workload qualification.
 
+## Private live Hotel initialization controller
+
+The October 20 controller adds a private execution path for the guarded Hotel
+initializer and its separate global read-only verifier. It runs inside the
+existing cleanup-owning support operator, after the original support stage is
+ready. Hotel application Deployments remain at zero replicas. It produces
+private execution observations, not public benchmark results, application-start
+permission, or a workload release.
+
+`app/deathstarbench_hotel_live.py` collects and validates the complete support
+inventory, the Kubernetes server CA, kube-system Namespace UID, exact
+initialization Pods/policies, and MongoDB Service/EndpointSlice targets. It
+checks admitted Pod specs against the approved templates with a narrow set of
+known Kubernetes defaults. The remote helper source is frozen at import and
+remains compatible with guest Python 3.9. Commands have bounded Kubernetes
+requests; logs are capped at 4,096 bytes.
+
+`app/deathstarbench_hotel_controller.py` retains the original run lease and
+rechecks provider ownership, the database volume/filesystem, runtime/SSH
+bindings, and support resource identities. It freshly verifies anonymous image
+bytes, creates the two gated standalone Pods once, and persists each exclusive
+dispatch latch before releasing its gate. Immediately before each release, the
+guest rechecks identities and sequencing; a JSON Patch tests the exact admitted
+Pod spec, UID, resourceVersion and metadata before removing the gate. The same
+Pod and container execution identities must survive polling and log collection.
+Controller SSH commands disable automatic transport retries so a lost response
+cannot trigger another dispatch.
+Only successful initialization followed by successful global verification can
+produce the narrow `initialized-and-globally-verified-applications-paused`
+observation.
+
+The private CLI provisions five billable VMs and the database disk using the
+existing provider lifecycle. A new run needs complete source preparations,
+freshly adopted original/guarded publications, a sanitized five-role plan, and
+the existing SSH/provider setup:
+
+```sh
+.venv/bin/python scripts/qualify_deathstarbench_hotel_initialization.py \
+  --plan /secure/hotel-five-role-plan.json \
+  --image-lock /secure/hotel/candidate-image-lock.json \
+  --publication /secure/hotel/publication.json \
+  --workload-preparation /secure/prepared/hotel \
+  --driver-preparation /secure/prepared/hotel-driver \
+  --guarded-image-lock /secure/hotel/guarded-image-lock.json \
+  --guarded-publication /secure/hotel/guarded-publication.json \
+  --guarded-preparation /secure/prepared/hotel-guarded \
+  --upstream /secure/DeathStarBench
+```
+
+AWS/OCI require the same explicit provider image pins as the support CLI.
+Original and guarded input bytes plus an immutable attempt UUID are persisted
+under `app/runs/.candidate-support/<run-id>/` before provisioning.
+The operator records a distinct guarded-initialization scope and reports the
+controller's persisted initialization status, including uncertainty after intent.
+
+Every normal or exceptional exit attempts exact infrastructure destruction and
+independent absence checks. Hard termination requires explicit recovery:
+
+```sh
+.venv/bin/python scripts/qualify_deathstarbench_hotel_initialization.py \
+  --cleanup-only RUN_ID
+```
+
+Cleanup does not require source preparations, registry access, or SSH keys.
+There is no initialization resume, retry, latch reset or journal repair. Lost
+creation/release responses, replaced resources, changed container identities,
+timeouts and uncertain persistence require cleanup. Qualification checkpoints
+include `cluster-ready`, `support-ready`, `initializer-intent`,
+`initializer-exit`, and `verifier-intent`, with `--interrupt-mode graceful|hard`.
+The support CLI also refuses to resume a guarded initialization run.
+
+Tests exercise synthetic Kubernetes responses, actual generated guest commands,
+real private journals/leases, response loss, callback mutation, and CLI-to-cloud
+cleanup propagation. They do not establish live cloud qualification of this
+implementation. Restored observations from earlier local work remain historical
+evidence; the CLI refuses legacy initialization state rather than migrating it
+into an executable attempt. Fresh live qualification, service startup/restart,
+semantic login/reservation behavior, measurement and public release remain
+separate milestones.
+
 ## Next review slices and release prerequisites
 
 1. **Immutable artifacts and public access.** Hotel now has native guarded
@@ -866,8 +946,9 @@ a capability or as live workload qualification.
    Candidate artifact/storage preflight and support-only K3s apply/readiness now
    supply the first boundaries. The private cleanup-owning operator now joins
    those boundaries; live support-stage evidence must be evaluated separately.
-   Guarded application startup and semantic initialization/measurement remain
-   required before release.
+   The private Hotel controller supplies one-shot initialization and global
+   verification execution, with live qualification still required. Guarded
+   application startup and semantic measurement remain required before release.
    Add exact dataset and semantic response verification, durable one-shot
    initialization, unchanged pre/post pod identities, and workload-specific
    comparison cohorts. Do not populate Hotel/Media metadata with fabricated

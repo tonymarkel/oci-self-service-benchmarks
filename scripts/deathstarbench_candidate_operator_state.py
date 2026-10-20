@@ -161,6 +161,28 @@ class CandidateStateStore:
             raise CandidateStateError('Private candidate pin crossed its run identity.')
         return value
 
+    def publish_hotel_initialization_pin(self, pin, lease):
+        """Retain one attempt identity; this JSON never grants runtime authority."""
+        directory = self.require_lease(pin['run_id'], lease)
+        path = directory / 'hotel-initialization-pin.json'
+        if path.exists() or path.is_symlink():
+            raise CandidateStateError('An immutable Hotel initialization pin cannot be replaced.')
+        _atomic_write(path, pin)
+
+    @staticmethod
+    def _require_hotel_initialization_pin(job, directory):
+        if 'hotel_initialization_pin' in job:
+            raise CandidateStateError('Legacy Hotel initialization state is refused; no migration is performed.')
+        path = directory / 'hotel-initialization-pin.json'
+        supplied = job.get('guarded_hotel_initialization_pin')
+        if path.exists() or path.is_symlink():
+            pin = _read(path)
+            if (not isinstance(pin, dict) or pin.get('run_id') != job.get('id')
+                    or canonical(supplied) != canonical(pin)):
+                raise CandidateStateError('Hotel initialization attempt pin changed before persistence.')
+        elif supplied is not None:
+            raise CandidateStateError('The immutable Hotel initialization attempt pin is missing.')
+
     def save(self, job, lease):
         directory = self.require_lease(job['id'], lease)
         pin = self.pin(job['id'], lease)
@@ -169,6 +191,8 @@ class CandidateStateStore:
             raise CandidateStateError('Candidate pin or infrastructure plan changed before persistence.')
         if any(key in job['plan'] for key in ('ssh_private_key', 'ssh_public_key', 'ssh_key_passphrase')):
             raise CandidateStateError('SSH material must not enter the private plan snapshot.')
+        # Hotel evidence is checked at load/admission and every execution
+        # boundary. Its damage must not block durable cloud cleanup ownership.
         value = {key: item for key, item in job.items() if not key.startswith('_')}
         _atomic_write(directory / 'state.json', value)
         self.require_lease(job['id'], lease)
@@ -183,10 +207,12 @@ class CandidateStateStore:
             raise CandidateStateError('Private candidate state/pin ownership differs.')
         if any(key.startswith('_') for key in value):
             raise CandidateStateError('Process-local material was persisted in candidate state.')
+        self._require_hotel_initialization_pin(value, directory)
         return value
 
     def publish_artifact_input(self, run_id, filename, source, expected_sha256, lease):
-        if filename not in ('candidate-image-lock.json', 'publication.json'):
+        if filename not in ('candidate-image-lock.json', 'publication.json',
+                            'guarded-image-lock.json', 'guarded-publication.json'):
             raise CandidateStateError('Unknown candidate evidence filename.')
         directory = self.require_lease(run_id, lease)
         path = directory / filename

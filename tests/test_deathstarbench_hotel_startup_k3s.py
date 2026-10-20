@@ -2,9 +2,11 @@
 import copy
 from contextlib import redirect_stdout
 from email.message import Message
+import errno
 import hashlib
 import io
 import json
+import os
 import shlex
 import signal
 import subprocess
@@ -332,16 +334,14 @@ class StartupObservationTests(StartupRuntimeFixtureMixin, unittest.TestCase):
             if replace:
                 raw, code = replace(key, raw)
             if not isinstance(raw, bytes): raw = json.dumps(raw).encode()
-            if len(raw) > 100000:
-                with tempfile.TemporaryFile() as payload:
-                    payload.write(raw)
-                    payload.seek(0)
-                    return real_popen([sys.executable, '-c',
-                        'import sys;sys.stdout.buffer.write(sys.stdin.buffer.read());sys.exit(int(sys.argv[1]))',
-                        str(code)], stdin=payload, **kwargs)
-            return real_popen([sys.executable, '-c',
-                'import sys;sys.stdout.buffer.write(bytes.fromhex(sys.argv[1]));sys.exit(int(sys.argv[2]))',
-                raw.hex(), str(code)], **kwargs)
+            # Keep complete response bytes off argv: hex encoding even a normal
+            # inventory can exceed Linux's per-argument limit before spawn.
+            with tempfile.TemporaryFile() as payload:
+                payload.write(raw)
+                payload.seek(0)
+                return real_popen([sys.executable, '-c',
+                    'import sys;sys.stdout.buffer.write(sys.stdin.buffer.read());sys.exit(int(sys.argv[1]))',
+                    str(code)], stdin=payload, **kwargs)
         class Response(io.BytesIO):
             def __init__(self, data, filtered='false'):
                 super().__init__(json.dumps(data).encode())
@@ -416,6 +416,36 @@ class StartupObservationTests(StartupRuntimeFixtureMixin, unittest.TestCase):
                 return changed, 0
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 self.execute_command(command, responses, consul=consul, replace=replace)
+
+    def test_generated_collector_runs_real_children_with_linux_argument_bound(self):
+        # Catches response fixtures that fit macOS argv but exceed Linux's
+        # MAX_ARG_STRLEN: 32 * 4096 bytes including the terminating NUL.
+        command, responses, consul, ca = self.remote_fixture()
+        argument_limit = 32 * 4096
+        for argument in (command, *shlex.split(command)):
+            self.assertLessEqual(len(os.fsencode(argument)) + 1, argument_limit)
+        real_popen = subprocess.Popen
+        children, payloads = [], []
+        def linux_popen(arguments, **kwargs):
+            if any(len(os.fsencode(arg)) + 1 > argument_limit for arg in arguments):
+                raise OSError(errno.E2BIG, 'Argument list too long', arguments[0])
+            child = real_popen(arguments, **kwargs)
+            children.append(child)
+            if 'stdin' in kwargs: payloads.append(kwargs['stdin'])
+            return child
+        with patch('subprocess.Popen', linux_popen):
+            try:
+                wire, calls, _, _ = self.execute_command(command, responses, consul=consul)
+            except OSError as exc:
+                self.fail(f'Generated collector fixture could not spawn its real child: {exc}')
+        observed = live.parse_startup_hotel_kubernetes_observation(json.dumps(wire), self.runtime,
+            self.stage, self.initialization_plan, self.initialization_stage, ROLES, ca)
+        self.assertFalse(observed['startup_execution_observed'])
+        self.assertEqual({call[-1] for call in calls}, set(responses))
+        self.assertEqual(wire['collections'], {path: responses[path] for path in wire['collections']})
+        self.assertTrue(children)
+        self.assertTrue(all(child.returncode == 0 and child.stdout.closed for child in children))
+        self.assertTrue(all(payload.closed for payload in payloads))
 
     def test_generated_observation_does_not_reread_later_checkout_source(self):
         # Catches helper generation splicing a changed checkout or depending on source that disappeared.

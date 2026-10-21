@@ -43,6 +43,19 @@ warmup, and measurement share mutable state; each new run starts fresh.
 A new workload-specific runtime, measurement, initializer, dataset, and image
 identity prevent accidental comparison with Social or historical compact runs.
 
+The [live OCI AMD UI smoke record](qualification/deathstarbench-media-ui-oci-amd-20261021.json)
+captures run `7e188bb09995` on 2026-10-21 using an E5 Flex application VM with
+4 OCPUs and 32 GB RAM. A 10-second warmup and 30-second measurement at a target
+20 requests/second produced 650 successful responses (21.66/second), with
+6.311 ms p99 latency and no HTTP/body-check failures. The driver sent 651
+requests and recorded one uncompleted request; stored reviews and both index
+reference counts each grew by 651. These differences remain visible in the
+report. All 32 pods retained their identities without restarts. The browser
+rendered the completed report, and all 21 recorded cloud resources were deleted
+and independently checked absent. Repository checks ran 1,992 tests with two
+skipped. This live evidence covers OCI AMD; other Media cloud/architecture
+combinations remain to be exercised.
+
 ## Experimental Hotel UI workflow
 
 The form accepts Hotel on `distributed_tiered_v1/k3s_v1`. Each run snapshots

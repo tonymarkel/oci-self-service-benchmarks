@@ -70,4 +70,3 @@ def parse_body_metrics(output, *, workload, label, error_type=RuntimeError):
     if rss:
         metrics['load_generator_peak_rss_kb'] = int(rss[1])
     return metrics
-

@@ -410,9 +410,9 @@ class CandidateRenderTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     require_released_distributed_bundle(candidate_images(workload_id))
 
-    def test_media_candidate_stays_rejected_by_public_plan_and_lifecycle(self):
+    def test_unknown_workload_stays_rejected_by_public_plan_and_lifecycle(self):
         for provider in ('aws', 'gcp', 'azure', 'oci'):
-            for workload_id in ('media_microservices',):
+            for workload_id in ('unpublished_workload',):
                 with self.subTest(provider=provider, workload=workload_id):
                     plan = {
                         'provider': provider, 'region': 'test-region-1',
@@ -422,7 +422,7 @@ class CandidateRenderTests(unittest.TestCase):
                         'ocpus': 4, 'memory_gb': 16, 'benchmarks': ['deathstarbench'],
                         'deathstarbench': {'topology_id': 'distributed_tiered_v1', 'runtime_id': 'k3s_v1', 'workload': workload_id},
                     }
-                    with self.assertRaisesRegex(ValueError, 'Social Network'):
+                    with self.assertRaises(ValueError):
                         BenchmarkPlan.model_validate(plan)
                     with self.assertRaisesRegex(ValueError, 'requires Social Network or Hotel'):
                         validate_distributed_deathstarbench_plan(plan)

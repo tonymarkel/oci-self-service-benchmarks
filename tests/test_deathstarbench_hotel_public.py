@@ -75,7 +75,10 @@ class HotelPublicTests(unittest.TestCase):
 
     def test_catalog_workloads_are_available_independently(self):
         for available in ({'social_network'}, {'hotel_reservation'},
-                          {'social_network', 'hotel_reservation'}, set()):
+                          {'social_network', 'hotel_reservation'}, {'media_microservices'},
+                          {'social_network', 'media_microservices'},
+                          {'hotel_reservation', 'media_microservices'},
+                          {'social_network', 'hotel_reservation', 'media_microservices'}, set()):
             def preflight(*, workload='social_network'):
                 if workload not in available:
                     raise public.PublicDistributedLifecycleError('Unavailable test lock')

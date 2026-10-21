@@ -33,6 +33,7 @@ from .deathstarbench_k3s_workload import (
     require_released_distributed_bundle,
 )
 from . import deathstarbench_hotel_release as hotel_release
+from . import deathstarbench_media_release as media_release
 from .providers import aws, azure, gcp, oci
 from .providers.registry import provider_id
 
@@ -67,6 +68,8 @@ def distributed_workload(plan: Any) -> str:
 def _lock_source(workload):
     if workload == 'hotel_reservation':
         return hotel_release.CHECKED_IN_IMAGE_LOCK, hotel_release.IMAGE_LOCK_FILENAME
+    if workload == 'media_microservices':
+        return media_release.CHECKED_IN_IMAGE_LOCK, media_release.IMAGE_LOCK_FILENAME
     if workload == 'social_network':
         return CHECKED_IN_IMAGE_LOCK, IMAGE_LOCK_FILENAME
     raise PublicDistributedLifecycleError('Unsupported distributed workload: ' + str(workload))
@@ -76,11 +79,18 @@ def _validate_workload_lock(workload, value):
     _lock_source(workload)
     if workload == 'hotel_reservation':
         return hotel_release.validate_hotel_runtime_lock(value)
+    if workload == 'media_microservices':
+        return media_release.validate_media_runtime_lock(value)
     return require_released_distributed_bundle(value)
 
 
 def run_hotel_benchmark(*args, **kwargs):
     from .deathstarbench_hotel_benchmark import run_hotel_benchmark as run
+    return run(*args, **kwargs)
+
+
+def run_media_benchmark(*args, **kwargs):
+    from .deathstarbench_media_benchmark import run_media_benchmark as run
     return run(*args, **kwargs)
 
 
@@ -110,11 +120,11 @@ def validate_distributed_deathstarbench_plan(plan: Any) -> str:
     if (
         _value(options, 'topology_id') != DISTRIBUTED_TIERED_TOPOLOGY_ID
         or _value(options, 'runtime_id') != K3S_RUNTIME_ID
-        or _value(options, 'workload') not in ('social_network', 'hotel_reservation')
+        or _value(options, 'workload') not in ('social_network', 'hotel_reservation', 'media_microservices')
     ):
         raise ValueError(
             'The public distributed lifecycle requires Social Network or '
-            'Hotel Reservation with distributed_tiered_v1/k3s_v1.'
+            'Hotel Reservation or Media Microservices with distributed_tiered_v1/k3s_v1.'
         )
     return provider
 
@@ -341,6 +351,8 @@ def run_distributed_deathstarbench(
     )
     if distributed_workload(plan) == 'hotel_reservation':
         return run_hotel_benchmark(job, plan, image_lock, execute=execute, emit=emit, persist=persist)
+    if distributed_workload(plan) == 'media_microservices':
+        return run_media_benchmark(job, plan, image_lock, execute=execute, emit=emit, persist=persist)
     prepare_distributed_social_network_candidate(
         job,
         image_lock,

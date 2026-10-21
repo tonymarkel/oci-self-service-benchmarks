@@ -323,9 +323,22 @@ class AwsDistributedLifecycleTests(unittest.TestCase):
         aws.destroy_distributed_deathstarbench_candidate(self.job, aws_session=self.session)
         self.assertTrue(aws.distributed_deathstarbench_candidate_deleted(self.job))
 
-    def test_media_candidate_is_rejected_before_cloud_mutation(self):
+    def test_media_uses_five_node_graph_and_exact_cleanup(self):
         selected = candidate_plan()
         selected['deathstarbench']['workload'] = 'media_microservices'
+        self.job['plan'] = selected
+        aws.provision_distributed_deathstarbench_candidate(
+            self.job, selected, public_key=PUBLIC_KEY,
+            support_image=copy.deepcopy(PIN), application_image=copy.deepcopy(PIN),
+            aws_session=self.session,
+        )
+        self.assertEqual(len(load_role_node_inventory(self.job['resources']).nodes), 5)
+        aws.destroy_distributed_deathstarbench_candidate(self.job, aws_session=self.session)
+        self.assertTrue(aws.distributed_deathstarbench_candidate_deleted(self.job))
+
+    def test_unknown_candidate_is_rejected_before_cloud_mutation(self):
+        selected = candidate_plan()
+        selected['deathstarbench']['workload'] = 'unknown_workload'
         with self.assertRaisesRegex(ValueError, 'Social Network or Hotel Reservation'):
             aws.provision_distributed_deathstarbench_candidate(
                 self.job, selected, public_key=PUBLIC_KEY,

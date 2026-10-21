@@ -631,7 +631,7 @@ function selectableDeathstarTopologies(catalog) {
         && topology.runtime_id === DISTRIBUTED_DEATHSTAR_RUNTIME_ID
         && topology.node_count === 5
         && Array.isArray(topology.workloads)
-        && topology.workloads.some(workload => ['social_network', 'hotel_reservation'].includes(workload))
+        && topology.workloads.some(workload => ['social_network', 'hotel_reservation', 'media_microservices'].includes(workload))
     ));
 }
 

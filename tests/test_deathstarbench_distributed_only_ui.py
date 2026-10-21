@@ -241,7 +241,7 @@ const invalid = [
     {...topologyFixture, runtime_id: 'k3s_v2'},
     {...topologyFixture, node_count: 2},
     {...topologyFixture, node_count: '5'},
-    {...topologyFixture, workloads: ['media_microservices']},
+    {...topologyFixture, workloads: ['unknown_workload']},
     {...topologyFixture, workloads: 'social_network'},
     {...topologyFixture, workloads: null},
 ];
@@ -256,7 +256,7 @@ return {
         self.assertEqual(selected['topology_id'], 'distributed_tiered_v1')
         self.assertEqual(selected['runtime_id'], 'k3s_v1')
         self.assertEqual(selected['node_count'], 5)
-        self.assertEqual(selected['workloads'], ['social_network', 'hotel_reservation'])
+        self.assertEqual(selected['workloads'], ['social_network', 'hotel_reservation', 'media_microservices'])
         self.assertEqual(result['unavailable'], [[], [], [], []])
 
     def test_hotel_only_catalog_selects_hotel_without_social_fallback(self):
@@ -278,6 +278,26 @@ return {
         self.assertTrue(result['selected'])
         self.assertTrue(result['enabled'])
         self.assertEqual(result['options']['workload'], 'hotel_reservation')
+
+    def test_media_only_catalog_selects_media_without_social_fallback(self):
+        result = self.run_ui(r"""
+deathstarTopologies = selectableDeathstarTopologies({deathstarbench_topologies: [
+    {...topologyFixture, workloads: ['media_microservices']},
+]});
+setDeathstarValues();
+ids.get('bench-deathstarbench').checked = true;
+handleDeathstarSelectionChange();
+return {
+    topologyCount: deathstarTopologies.length,
+    selected: ids.get('bench-deathstarbench').checked,
+    options: deathstarOptions(true),
+    enabled: !$('#deathstarWorkload').disabled,
+};
+""")
+        self.assertEqual(result['topologyCount'], 1)
+        self.assertTrue(result['selected'])
+        self.assertTrue(result['enabled'])
+        self.assertEqual(result['options']['workload'], 'media_microservices')
 
     def test_new_selection_is_exclusive_warns_and_restores_previous_data_volume(self):
         results = self.run_ui(r"""
@@ -427,7 +447,7 @@ return fixtures.plans.map(plan => {
             {'topology_id': 'distributed_tiered_v1', 'runtime_id': 'k3s_v1'},
             {
                 'topology_id': 'distributed_tiered_v1', 'runtime_id': 'k3s_v1',
-                'workload': 'media_microservices',
+                'workload': 'unknown_workload',
             },
         ]
         results = self.run_ui(r"""
@@ -512,6 +532,40 @@ return {
             storage={'additional_volume': False},
         ))
         self.assertEqual(parsed.deathstarbench.workload, 'hotel_reservation')
+
+    def test_media_selection_survives_provider_refresh_and_saved_plan_restore(self):
+        options = {
+            'topology_id': 'distributed_tiered_v1', 'runtime_id': 'k3s_v1',
+            'workload': 'media_microservices', 'warmup_seconds': 0,
+            'duration_seconds': 30, 'threads': 4, 'connections': 8,
+            'request_rate': 100,
+        }
+        result = self.run_ui(r"""
+restoreDeathstarSelection({benchmarks: ['deathstarbench'], deathstarbench: fixtures.options});
+applyProviderBenchmarkSupport();
+const restored = deathstarOptions(true);
+$('#provider').value = 'aws';
+applyProviderBenchmarkSupport();
+return {
+    restored, options: deathstarOptions(true),
+    selected: ids.get('bench-deathstarbench').checked,
+    enabled: !$('#deathstarWorkload').disabled,
+    warningHidden: $('#deathstarLegacyPlanWarning').hidden,
+    description: $('#deathstarWorkloadDescription').textContent,
+};
+""", options=options)
+        self.assertTrue(result['selected'])
+        self.assertTrue(result['enabled'])
+        self.assertTrue(result['warningHidden'])
+        self.assertEqual(result['restored'], options)
+        self.assertEqual(result['options'], options)
+        self.assertIn('Experimental', result['description'])
+        self.assertIn('synthetic', result['description'])
+        parsed = BenchmarkPlan.model_validate(ordinary_plan(
+            'aws', benchmarks=['deathstarbench'], deathstarbench=result['options'],
+            storage={'additional_volume': False},
+        ))
+        self.assertEqual(parsed.deathstarbench.workload, 'media_microservices')
 
     def test_non_deathstarbench_saved_defaults_do_not_show_retirement_warning(self):
         result = self.run_ui(r"""

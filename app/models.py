@@ -369,10 +369,10 @@ class BenchmarkPlan(BaseModel):
                     'Distributed DeathStarBench must be the only selected '
                     'benchmark.'
                 )
-            if self.deathstarbench.workload not in ('social_network', 'hotel_reservation'):
+            if self.deathstarbench.workload not in ('social_network', 'hotel_reservation', 'media_microservices'):
                 raise ValueError(
                     'Distributed DeathStarBench supports the Social Network '
-                    'and Hotel Reservation workloads.'
+                    'and experimental Hotel Reservation and Media Microservices workloads.'
                 )
             if self.storage.additional_volume:
                 raise ValueError(

@@ -83,6 +83,19 @@ class AzureDeathStarBenchLifecycleTests(unittest.TestCase):
         self.assertEqual(job['status'], 'destroyed')
         self.assertNotIn('azure_distributed_candidate', job['resources'])
 
+    def test_media_uses_five_node_graph_and_exact_cleanup(self):
+        clients = self._distributed_clients()
+        selected = self._distributed_plan()
+        selected['deathstarbench']['workload'] = 'media_microservices'
+        job = {'id': 'azuremediaflow', 'resources': {}, 'plan': selected}
+        azure.provision_distributed_deathstarbench_candidate(
+            job, selected, public_key=PUBLIC_KEY, clients=clients,
+        )
+        self.assertEqual(len(load_role_node_inventory(job['resources']).nodes), 5)
+        azure.destroy_resources(job, clients=clients)
+        self.assertEqual(job['status'], 'destroyed')
+        self.assertNotIn('azure_distributed_candidate', job['resources'])
+
     def test_compact_provision_dual_writes_full_inventory_before_group_put(self):
         clients = fake_clients()
         job = {'id': 'dsbcompact', 'resources': {}}
@@ -1022,7 +1035,7 @@ class AzureDeathStarBenchLifecycleTests(unittest.TestCase):
                 clients=clients,
             )
 
-        for workload in (None, 'media_microservices'):
+        for workload in (None, 'unknown_workload'):
             with self.subTest(workload=workload):
                 wrong_workload = self._distributed_plan()
                 if workload is None:
@@ -1031,7 +1044,7 @@ class AzureDeathStarBenchLifecycleTests(unittest.TestCase):
                     wrong_workload['deathstarbench']['workload'] = workload
                 with self.assertRaisesRegex(
                     ValueError,
-                    'exact DeathStarBench Social Network or Hotel Reservation workload',
+                    'exact DeathStarBench Social Network or Hotel Reservation or Media Microservices workload',
                 ):
                     azure.provision_distributed_deathstarbench_candidate(
                         {'id': 'dsbwrongworkload', 'resources': {}},

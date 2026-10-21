@@ -3472,10 +3472,10 @@ def provision_distributed_deathstarbench_candidate(
             'only selected benchmark.'
         )
     deathstarbench = _value(plan, 'deathstarbench', {}) or {}
-    if _value(deathstarbench, 'workload', None) not in ('social_network', 'hotel_reservation'):
+    if _value(deathstarbench, 'workload', None) not in ('social_network', 'hotel_reservation', 'media_microservices'):
         raise ValueError(
             'The GCP distributed candidate currently requires the exact '
-            'DeathStarBench Social Network or Hotel Reservation workload.'
+            'DeathStarBench Social Network or Hotel Reservation or Media Microservices workload.'
         )
     topology_id, runtime_id = _deathstarbench_contract_ids(plan)
     if (

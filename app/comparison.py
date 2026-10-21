@@ -849,12 +849,12 @@ def _deathstarbench_execution_context(
             'initializer_sha256',
             'load_script_sha256',
         )
-        # Hotel seeds a deterministic collection manifest rather than a
-        # social graph. Preserve its real dataset identity in comparison
+        # Hotel and Media seed deterministic collection manifests rather than a
+        # social graph. Preserve their real dataset identities in comparison
         # cohorts without inventing graph inputs that were never used.
         identity_keys += (
             ('dataset_manifest_sha256',)
-            if options.get('workload') == 'hotel_reservation'
+            if options.get('workload') in ('hotel_reservation', 'media_microservices')
             else ('dataset_nodes_sha256', 'dataset_edges_sha256')
         )
         for key in identity_keys:

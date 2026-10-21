@@ -4,7 +4,7 @@ from .deathstarbench_contract import (
 
 
 BENCHMARKS = [
-    {"id": "deathstarbench", "category": "Comprehensive", "name": "DeathStarBench", "description": "Runs Social Network or experimental Hotel Reservation across a five-VM K3s topology with separate application, database, cache, control, and load-generator roles.", "requires_data": False},
+    {"id": "deathstarbench", "category": "Comprehensive", "name": "DeathStarBench", "description": "Runs Social Network, experimental Hotel Reservation, or experimental Media Microservices across a five-VM K3s topology with separate application, database, cache, control, and load-generator roles.", "requires_data": False},
     {"id": "apachebench", "category": "Comprehensive", "name": "ApacheBench", "description": "Measures Apache HTTP Server throughput and latency over the private VCN from a separate load-generator VM.", "requires_data": False},
     {"id": "sysbench", "category": "Comprehensive", "name": "Sysbench", "description": "Runs one or more selectable CPU, memory, and file I/O workloads."},
     {"id": "phoronix", "category": "Comprehensive", "name": "Phoronix Test Suite", "description": "Runs one or more selectable, pinned OpenBenchmarking CPU and memory profiles.", "requires_data": False},
@@ -111,7 +111,7 @@ DEATHSTARBENCH_WORKLOADS = [
     {
         "id": "media_microservices",
         "name": "Media Microservices",
-        "description": "Movie-review composition across C++, Nginx, MongoDB, Redis, and Memcached services.",
+        "description": "Experimental synthetic compose-review workload across C++, Nginx, MongoDB, Redis, and Memcached services.",
     },
     {
         "id": "hotel_reservation",
@@ -145,9 +145,9 @@ DEATHSTARBENCH_TOPOLOGIES = [
     _deathstarbench_topology(
         DISTRIBUTED_TIERED_PROFILE,
         description=(
-            "Runs Social Network or experimental Hotel Reservation across application, database, cache, and "
+            "Runs Social Network, experimental Hotel Reservation, or experimental Media Microservices across application, database, cache, and "
             "control VMs with K3s, plus a separate load-generator VM."
         ),
-        workloads=("social_network", "hotel_reservation"),
+        workloads=("social_network", "hotel_reservation", "media_microservices"),
     ),
 ]

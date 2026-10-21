@@ -111,17 +111,23 @@ class DeathStarBenchTopologyModelTests(unittest.TestCase):
                         runtime_id=runtime_id,
                     )
 
-    def test_distributed_hotel_is_accepted_but_media_is_not(self):
-        payload = legacy_plan_payload(storage={'additional_volume': False})
-        payload['deathstarbench'].update(
-            topology_id='distributed_tiered_v1', runtime_id='k3s_v1',
-            workload='hotel_reservation',
-        )
-        plan = BenchmarkPlan.model_validate(payload)
-        self.assertEqual(plan.deathstarbench.workload, 'hotel_reservation')
-        payload['deathstarbench']['workload'] = 'media_microservices'
-        with self.assertRaises(ValidationError):
-            BenchmarkPlan.model_validate(payload)
+    def test_distributed_experimental_workloads_are_accepted_all_providers(self):
+        for provider in ('oci', 'aws', 'azure', 'gcp'):
+            for workload in ('hotel_reservation', 'media_microservices'):
+                with self.subTest(provider=provider, workload=workload):
+                    payload = legacy_plan_payload(
+                        provider=provider, storage={'additional_volume': False},
+                        azure_subscription_id='test-subscription', azure_zone='1',
+                        gcp_project_id='test-project', gcp_zone='us-east1-b',
+                    )
+                    payload['deathstarbench'].update(
+                        topology_id='distributed_tiered_v1', runtime_id='k3s_v1', workload=workload,
+                    )
+                    plan = BenchmarkPlan.model_validate(payload)
+                    self.assertEqual(plan.deathstarbench.workload, workload)
+                    payload['deathstarbench']['workload'] = 'unknown_workload'
+                    with self.assertRaises(ValidationError):
+                        BenchmarkPlan.model_validate(payload)
 
     def test_contract_identifiers_are_immutable_after_validation(self):
         options = DeathStarBenchOptions()

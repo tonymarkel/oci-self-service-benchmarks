@@ -52,7 +52,7 @@ class DeathStarBenchPublicUiTests(unittest.TestCase):
             DISTRIBUTED_TIERED_PROFILE.released,
         )
         self.assertEqual(distributed['node_count'], 5)
-        self.assertEqual(distributed['workloads'], ['social_network', 'hotel_reservation'])
+        self.assertEqual(distributed['workloads'], ['social_network', 'hotel_reservation', 'media_microservices'])
         self.assertEqual(
             distributed['roles'],
             ['control', 'database', 'cache', 'application', 'load_generator'],

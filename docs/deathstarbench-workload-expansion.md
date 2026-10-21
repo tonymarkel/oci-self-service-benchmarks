@@ -1,10 +1,47 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-20: **experimental synthetic Hotel benchmarking is available in
-the UI; Media remains a private candidate**. Hotel uses the existing five-node
-cloud lifecycle with a simpler deployment runner. The private controller and
-its historical qualification gates remain separate; their evidence does not
-claim broad provider or architecture qualification for the UI runner.
+Status, 2026-10-21: **experimental synthetic Hotel and Media benchmarking are
+available in the UI**. Both use the existing five-node cloud lifecycle. The
+private controllers and historical qualification gates remain separate; their
+evidence does not claim broad provider or architecture qualification for the
+UI runners.
+
+## Experimental Media UI workflow
+
+Media uses digest-pinned native application/frontend images from the restored
+[publication record](qualification/deathstarbench-hotel-media-candidate-images-v1.json)
+and its own [runtime lock](qualification/deathstarbench-media-ui-images-v1.json).
+The five VMs host twelve C++ services, nginx, eight MongoDB processes, seven
+Memcached processes, three Redis processes, and Jaeger; the fifth VM runs the
+fixed x86 load driver. The normal supervisor handles reports, stopping, and
+cleanup. Database directories receive the same SELinux labeling as Hotel.
+
+Each fresh run registers 1,000 synthetic users and the 995 distinct titles
+sampled by the published driver. The source script contains 1,000 title
+entries; duplicate titles retain their first-index synthetic movie ID. The
+exact list is checked in at
+`app/manifests/deathstarbench/media-synthetic-v1/movie-titles.json`, extracted
+from the audited request script SHA-256
+`147fdc983955c46a06c80ab41c188e0d946b37eb45e019a1f0a9e3073017bbaa`.
+No cast-info, plot, or movie-info records are loaded for this compose-review
+workload. Its dataset revision is `media-synthetic-users-driver-titles-v1`,
+separate from the earlier full TMDB initialization proposal.
+
+The runner verifies baseline collection counts and user/title keyspace, then
+submits one canary review and checks the stored document and exact 64-bit
+user/movie review references. Mutating requests are not automatically retried.
+All 32 service pods must remain ready and keep the same container identities
+through warmup and measurement. Normal Deployments and cloud isolation are
+used without per-service NetworkPolicies or private dispatch approval steps.
+
+The pinned driver treats an empty HTTP 200 as a successful compose response.
+Reports therefore distinguish HTTP/body throughput from stored reviews and
+user/movie index counts. Per-phase persistence differences are exposed;
+upstream writes are not transactional, and these counts do not establish
+one-to-one request attribution or end-to-end durable-write latency. The canary,
+warmup, and measurement share mutable state; each new run starts fresh.
+A new workload-specific runtime, measurement, initializer, dataset, and image
+identity prevent accidental comparison with Social or historical compact runs.
 
 ## Experimental Hotel UI workflow
 
@@ -100,7 +137,7 @@ Hotel's pod policy uses port **5000**, not the external NodePort 8080. No
 cloud ingress or K3s NodePort-range expansion is needed.
 
 The original candidate profiles and assets retain their unreleased markers.
-The experimental Hotel UI uses its own checked-in runtime lock and validator;
+The experimental Hotel and Media UIs use their own checked-in runtime locks and validators;
 an asset flag or arbitrary candidate preview cannot enable that path. Historical
 compact API clients, reports, comparisons, and cleanup remain supported.
 

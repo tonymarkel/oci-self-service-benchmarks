@@ -891,7 +891,7 @@ def _exact_distributed_candidate_plan(job, provider):
         and not tuple(value(plan, 'llm_benchmarks', ()) or ())
         and value(options, 'topology_id') == DISTRIBUTED_TIERED_TOPOLOGY_ID
         and value(options, 'runtime_id') == K3S_RUNTIME_ID
-        and value(options, 'workload') in ('social_network', 'hotel_reservation')
+        and value(options, 'workload') in ('social_network', 'hotel_reservation', 'media_microservices')
     )
 
 
@@ -1908,29 +1908,21 @@ def ssh_defaults(request: Request):
 
 @app.get('/api/catalog')
 def catalog():
-    distributed_released = False
-    try:
-        preflight_distributed_deathstarbench_release()
-        distributed_released = True
-    except PublicDistributedLifecycleError:
-        # Catalog discovery is read-only and remains usable while a release
-        # bundle is incomplete.  The exact profile stays hidden until every
-        # coordinated release artifact validates together.
-        pass
-    hotel_available = False
-    try:
-        preflight_distributed_deathstarbench_release(workload='hotel_reservation')
-        hotel_available = True
-    except PublicDistributedLifecycleError:
-        pass
+    available_workloads = set()
+    for workload in ('social_network', 'hotel_reservation', 'media_microservices'):
+        try:
+            preflight_distributed_deathstarbench_release(workload=workload)
+            available_workloads.add(workload)
+        except PublicDistributedLifecycleError:
+            # A malformed workload bundle must not hide other valid workloads.
+            pass
     deathstarbench_topologies = []
     for topology in DEATHSTARBENCH_TOPOLOGIES:
         item = dict(topology)
         if item.get('topology_id') == DISTRIBUTED_TIERED_TOPOLOGY_ID:
-            item['released'] = distributed_released or hotel_available
             item['workloads'] = [workload for workload in item['workloads']
-                                 if (workload == 'social_network' and distributed_released)
-                                 or (workload == 'hotel_reservation' and hotel_available)]
+                                 if workload in available_workloads]
+            item['released'] = bool(item['workloads'])
         deathstarbench_topologies.append(item)
     selectable_deathstarbench_workloads = {
         workload

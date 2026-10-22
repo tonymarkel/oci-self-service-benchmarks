@@ -107,7 +107,7 @@ DATA_VOLUME_CONTRACT_KEYS = (
     'aws_data_volume_throughput_mibps',
 )
 PEER_BOOT_SIZE_GB = 20
-WEB_BENCHMARKS = frozenset({'apachebench', 'deathstarbench'})
+WEB_BENCHMARKS = frozenset({'apachebench', 'hey', 'deathstarbench'})
 LOAD_GENERATOR_INSTANCE_TYPES = (
     'm7i.large',
     'm6i.large',
@@ -247,7 +247,7 @@ def _web_benchmarks(plan):
     selected = set(_value(plan, 'benchmarks', ()) or ())
     return tuple(
         benchmark
-        for benchmark in ('apachebench', 'deathstarbench')
+        for benchmark in ('apachebench', 'hey', 'deathstarbench')
         if benchmark in selected
     )
 
@@ -1215,7 +1215,7 @@ def provision(
             }],
         )
         web_permissions = []
-        if 'apachebench' in web_benchmarks:
+        if {'apachebench', 'hey'} & set(web_benchmarks):
             web_permissions.append({
                 'IpProtocol': 'tcp',
                 'FromPort': 80,
@@ -4280,10 +4280,10 @@ def provision_distributed_deathstarbench_candidate(
     dsb = _value(plan, 'deathstarbench', {}) or {}
     if (_value(plan, 'provider') != 'aws'
             or tuple(_value(plan, 'benchmarks', ())) != ('deathstarbench',)
-            or _value(dsb, 'workload') != 'social_network'
+            or _value(dsb, 'workload') not in ('social_network', 'hotel_reservation', 'media_microservices')
             or _value(dsb, 'topology_id') != DISTRIBUTED_TIERED_TOPOLOGY_ID
             or _value(dsb, 'runtime_id') != K3S_RUNTIME_ID):
-        raise ValueError('AWS candidate requires only distributed_tiered_v1/k3s_v1 Social Network.')
+        raise ValueError('AWS candidate requires only distributed_tiered_v1/k3s_v1 Social Network or Hotel Reservation or Media Microservices.')
     job_id = str(job.get('id', ''))
     if not re.fullmatch(r'[a-z0-9]{8,32}', job_id):
         raise ValueError('AWS candidate job ID must be 8–32 lowercase alphanumeric characters.')

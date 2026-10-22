@@ -170,7 +170,7 @@ class DeathStarBenchRuntimeContractTests(unittest.TestCase):
             raised.exception.detail,
             'coordinated release marker',
         )
-        preflight.assert_called_once_with()
+        preflight.assert_called_once_with(workload='social_network')
         derive.assert_not_called()
 
 

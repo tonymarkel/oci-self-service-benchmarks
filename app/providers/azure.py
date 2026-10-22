@@ -74,7 +74,7 @@ DATA_DISK_LUN = 0
 DATA_DISK_DEVICE = '/dev/disk/azure/scsi1/lun0'
 SUPPORTED_ARCHITECTURES = frozenset({'x86_64', 'arm64'})
 SUPPORTED_IPERF3_PROTOCOLS = frozenset({'tcp', 'udp'})
-WEB_BENCHMARKS = frozenset({'apachebench', 'deathstarbench'})
+WEB_BENCHMARKS = frozenset({'apachebench', 'hey', 'deathstarbench'})
 LOADGEN_VM_SIZES = (
     'Standard_D2as_v7',
 )
@@ -1801,7 +1801,7 @@ def _selected_iperf3_protocols(plan: Any) -> tuple[str, ...]:
 
 def _selected_web_benchmarks(plan: Any) -> tuple[str, ...]:
     selected = set(_value(plan, 'benchmarks', ()) or ())
-    return tuple(item for item in ('apachebench', 'deathstarbench') if item in selected)
+    return tuple(item for item in ('apachebench', 'hey', 'deathstarbench') if item in selected)
 
 
 def _deathstarbench_contract_ids(plan: Any) -> tuple[str, str]:
@@ -2059,7 +2059,7 @@ def _security_rules(
         ))
     selected_web = set(web_benchmarks)
     ports = []
-    if 'apachebench' in selected_web:
+    if {'apachebench', 'hey'} & selected_web:
         ports.append('80')
     if 'deathstarbench' in selected_web:
         ports.extend(('5000', '8080'))
@@ -3607,10 +3607,10 @@ def provision_distributed_deathstarbench_candidate(
             'only selected benchmark.'
         )
     deathstarbench = _value(plan, 'deathstarbench', {}) or {}
-    if _value(deathstarbench, 'workload', None) != 'social_network':
+    if _value(deathstarbench, 'workload', None) not in ('social_network', 'hotel_reservation', 'media_microservices'):
         raise ValueError(
             'The Azure distributed candidate currently requires the exact '
-            'DeathStarBench Social Network workload.'
+            'DeathStarBench Social Network or Hotel Reservation or Media Microservices workload.'
         )
     existing_resources = job.setdefault('resources', {})
     saved_provider = str(

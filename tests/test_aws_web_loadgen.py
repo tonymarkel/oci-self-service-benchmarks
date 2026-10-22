@@ -313,6 +313,15 @@ class AwsWebLoadGeneratorProvisionTests(unittest.TestCase):
             'sg-loadgen',
         )
 
+    def test_hey_shares_one_helper_with_apachebench_and_opens_private_http(self):
+        _, resources = self.provision(('hey', 'apachebench'))
+        self.assertEqual(resources['aws_loadgen_instance_id'], 'i-loadgen')
+        self.assertEqual(len(self.ec2.run_instances.call_args_list), 2)
+        ingress = self.ec2.authorize_security_group_ingress.call_args_list[2].kwargs
+        self.assertEqual([p['FromPort'] for p in ingress['IpPermissions']], [80])
+        self.assertEqual(ingress['IpPermissions'][0]['UserIdGroupPairs'][0]['GroupId'], 'sg-loadgen')
+        self.assertNotIn('IpRanges', ingress['IpPermissions'][0])
+
     def test_deathstarbench_opens_only_private_ports_5000_and_8080(self):
         self.provision(('deathstarbench',))
 

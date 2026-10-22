@@ -65,6 +65,7 @@ class ProviderRegistryTests(unittest.TestCase):
             [
                 'deathstarbench',
                 'apachebench',
+                'hey',
                 'sysbench',
                 'stream',
                 'phoronix',

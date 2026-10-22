@@ -32,6 +32,8 @@ from .deathstarbench_distributed_measurement import (
 from .deathstarbench_k3s_workload import (
     require_released_distributed_bundle,
 )
+from . import deathstarbench_hotel_release as hotel_release
+from . import deathstarbench_media_release as media_release
 from .providers import aws, azure, gcp, oci
 from .providers.registry import provider_id
 
@@ -59,6 +61,39 @@ def _deathstarbench_options(plan: Any) -> Any:
     return _value(plan, 'deathstarbench', {}) or {}
 
 
+def distributed_workload(plan: Any) -> str:
+    return _value(_deathstarbench_options(plan), 'workload', 'social_network')
+
+
+def _lock_source(workload):
+    if workload == 'hotel_reservation':
+        return hotel_release.CHECKED_IN_IMAGE_LOCK, hotel_release.IMAGE_LOCK_FILENAME
+    if workload == 'media_microservices':
+        return media_release.CHECKED_IN_IMAGE_LOCK, media_release.IMAGE_LOCK_FILENAME
+    if workload == 'social_network':
+        return CHECKED_IN_IMAGE_LOCK, IMAGE_LOCK_FILENAME
+    raise PublicDistributedLifecycleError('Unsupported distributed workload: ' + str(workload))
+
+
+def _validate_workload_lock(workload, value):
+    _lock_source(workload)
+    if workload == 'hotel_reservation':
+        return hotel_release.validate_hotel_runtime_lock(value)
+    if workload == 'media_microservices':
+        return media_release.validate_media_runtime_lock(value)
+    return require_released_distributed_bundle(value)
+
+
+def run_hotel_benchmark(*args, **kwargs):
+    from .deathstarbench_hotel_benchmark import run_hotel_benchmark as run
+    return run(*args, **kwargs)
+
+
+def run_media_benchmark(*args, **kwargs):
+    from .deathstarbench_media_benchmark import run_media_benchmark as run
+    return run(*args, **kwargs)
+
+
 def is_distributed_deathstarbench_plan(plan: Any) -> bool:
     """Return true only for the exact versioned distributed profile."""
 
@@ -72,12 +107,7 @@ def is_distributed_deathstarbench_plan(plan: Any) -> bool:
 
 
 def validate_distributed_deathstarbench_plan(plan: Any) -> str:
-    """Validate the exact public lifecycle contract without opening its gate.
-
-    The release flag remains enforced by the API, provisioner, and benchmark
-    dispatcher.  Keeping this structural validator independent lets the
-    operator-qualified implementation be tested while that flag is closed.
-    """
+    """Validate topology and workload; callers separately validate its image lock."""
 
     provider = provider_id(plan)
     benchmarks = tuple(_value(plan, 'benchmarks', ()) or ())
@@ -90,16 +120,16 @@ def validate_distributed_deathstarbench_plan(plan: Any) -> str:
     if (
         _value(options, 'topology_id') != DISTRIBUTED_TIERED_TOPOLOGY_ID
         or _value(options, 'runtime_id') != K3S_RUNTIME_ID
-        or _value(options, 'workload') != 'social_network'
+        or _value(options, 'workload') not in ('social_network', 'hotel_reservation', 'media_microservices')
     ):
         raise ValueError(
-            'The public distributed lifecycle requires the exact Social '
-            'Network distributed_tiered_v1/k3s_v1 contract.'
+            'The public distributed lifecycle requires Social Network or '
+            'Hotel Reservation or Media Microservices with distributed_tiered_v1/k3s_v1.'
         )
     return provider
 
 
-def _read_image_lock(path: Path) -> tuple[bytes, dict[str, Any]]:
+def _read_image_lock(path: Path, workload='social_network') -> tuple[bytes, dict[str, Any]]:
     try:
         payload = path.read_bytes()
     except OSError as exc:
@@ -117,7 +147,7 @@ def _read_image_lock(path: Path) -> tuple[bytes, dict[str, Any]]:
             'The distributed image lock must be a JSON object.'
         )
     try:
-        require_released_distributed_bundle(value)
+        _validate_workload_lock(workload, value)
     except ValueError as exc:
         raise PublicDistributedLifecycleError(
             f'The distributed image lock is invalid: {exc}'
@@ -127,24 +157,28 @@ def _read_image_lock(path: Path) -> tuple[bytes, dict[str, Any]]:
 
 def preflight_distributed_deathstarbench_release(
     *,
-    source: Path = CHECKED_IN_IMAGE_LOCK,
+    source: Path | None = None,
+    workload: str = 'social_network',
 ) -> dict[str, Any]:
     """Validate the complete checked-in public bundle before run creation."""
 
-    _payload, value = _read_image_lock(source)
+    default, _filename = _lock_source(workload)
+    _payload, value = _read_image_lock(source or default, workload)
     return value
 
 
 def snapshot_distributed_image_lock(
     run_directory: Path,
     *,
-    source: Path = CHECKED_IN_IMAGE_LOCK,
+    source: Path | None = None,
+    workload: str = 'social_network',
 ) -> Path:
     """Validate and exclusively snapshot the release lock before dispatch."""
 
-    payload, _ = _read_image_lock(source)
-    target = run_directory / IMAGE_LOCK_FILENAME
-    temporary = run_directory / f'.{IMAGE_LOCK_FILENAME}.{uuid.uuid4().hex}.tmp'
+    default, filename = _lock_source(workload)
+    payload, _ = _read_image_lock(source or default, workload)
+    target = run_directory / filename
+    temporary = run_directory / f'.{filename}.{uuid.uuid4().hex}.tmp'
     linked = False
     try:
         with temporary.open('xb') as artifact:
@@ -211,6 +245,7 @@ def snapshot_distributed_image_lock(
 def load_run_distributed_image_lock(
     runs_root: Path,
     job_id: str,
+    *, workload: str = 'social_network',
 ) -> dict[str, Any]:
     """Load only the immutable copy owned by one persisted run."""
 
@@ -219,9 +254,8 @@ def load_run_distributed_image_lock(
         raise PublicDistributedLifecycleError(
             'A canonical run ID is required to load the distributed image lock.'
         )
-    _payload, value = _read_image_lock(
-        runs_root / job_id / IMAGE_LOCK_FILENAME
-    )
+    _default, filename = _lock_source(workload)
+    _payload, value = _read_image_lock(runs_root / job_id / filename, workload)
     return value
 
 
@@ -238,7 +272,7 @@ def provision_distributed_deathstarbench(
     """Dispatch the exact five-node provider graph and publish SSH aliases."""
 
     provider = validate_distributed_deathstarbench_plan(plan)
-    require_released_distributed_bundle(image_lock)
+    _validate_workload_lock(distributed_workload(plan), image_lock)
     if provider == 'azure':
         return azure.provision_distributed_deathstarbench_candidate(
             job,
@@ -305,16 +339,20 @@ def run_distributed_deathstarbench(
     emit: Callable[..., Any],
     persist: Callable[..., Any],
 ) -> dict[str, Any]:
-    """Run the qualified provider-neutral runtime exactly once."""
+    """Run the selected provider-neutral workload on the shared K3s topology."""
 
     validate_distributed_deathstarbench_plan(plan)
-    require_released_distributed_bundle(image_lock)
+    _validate_workload_lock(distributed_workload(plan), image_lock)
     prepare_distributed_k3s_candidate(
         job,
         execute=execute,
         emit=emit,
         persist=persist,
     )
+    if distributed_workload(plan) == 'hotel_reservation':
+        return run_hotel_benchmark(job, plan, image_lock, execute=execute, emit=emit, persist=persist)
+    if distributed_workload(plan) == 'media_microservices':
+        return run_media_benchmark(job, plan, image_lock, execute=execute, emit=emit, persist=persist)
     prepare_distributed_social_network_candidate(
         job,
         image_lock,

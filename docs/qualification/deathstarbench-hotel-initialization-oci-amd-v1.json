@@ -1,0 +1,105 @@
+{
+  "all_application_replicas_zero": true,
+  "application_architecture": "x86_64",
+  "application_shape": "VM.Standard.E5.Flex",
+  "application_start_allowed": false,
+  "applications_paused": true,
+  "artifact_fingerprint": "sha256:71949735027ff9b51ab5091b7061d37a45ed37f1dfaaab5d38dca9b476071df4",
+  "baseline_artifact_fingerprint": "sha256:5ffb28eba5643a61e79e33c5fe472f2c73d13c550c155a2c6760c7c440129bd2",
+  "candidate_only": true,
+  "candidate_schema": "hotel-live-initialization-historical-observation-v1",
+  "cleanup": {
+    "candidate_only": true,
+    "candidate_schema": "candidate-support-cleanup-proof-v1",
+    "cleanup_complete": true,
+    "independent_absence_proved": true,
+    "provider": "oci",
+    "run_id": "3ab32b58d2a5",
+    "schema_version": 1
+  },
+  "cloud_qualified": false,
+  "command_exit_code": 0,
+  "completed_at": "2026-10-20T20:34:18.459749+00:00",
+  "created_at": "2026-10-20T20:00:27.232379+00:00",
+  "database_execution_verified": true,
+  "global_readonly_verification_completed": true,
+  "grants_execution_authority": false,
+  "historical_observation_only": true,
+  "hotel_state": "initialized-and-globally-verified-applications-paused",
+  "image_access_fingerprint": "sha256:a5753c83af7db3d5eacf6916d92633d52e73969f4b2e9d6799157b6cb3decc96",
+  "implementation_commit": "55e356a2dfffefe9412995d243bbc7f67f0a4a0f",
+  "initialization_attempt_id": "335f93d0-aa7c-47cb-9e6e-e41ece8861f5",
+  "initialization_executed": true,
+  "input_file_sha256": {
+    "candidate-image-lock.json": "a53ceb377feef1a064d990dbc403deccd8d761b8bd70db2e912af69df3d3e86f",
+    "guarded-image-lock.json": "ddb175985a0555adca5d2457198a289f588aa847301c95dd47e1f5ae4796fee6",
+    "guarded-publication.json": "2bfcf18580a4a2092896816ffa4eb2a451d97a69d31b22a263ec4c4548d6701b",
+    "publication.json": "bef00c72962b3f26393eadbc8e4149888bf6c019e7d7299d32985d5da2eb6ea8"
+  },
+  "journal": {
+    "dispatch_latches": [
+      "initialize-empty",
+      "verify"
+    ],
+    "event_count": 6,
+    "resume_policy": "cleanup-only-no-replay",
+    "state": "verify-exit-recorded"
+  },
+  "limitations": [
+    "One fresh OCI AMD run; other providers and ARM are not qualified by this observation.",
+    "Application startup, login/reservation semantics, benchmark measurement and public release were not exercised.",
+    "Interruption and response-loss behavior have synthetic regression coverage; this run did not inject a failure.",
+    "Saved observations and publication files cannot authorize a later initialization attempt."
+  ],
+  "measurement_qualified": false,
+  "operation_scope": {
+    "application_start_allowed": false,
+    "cleanup_policy": "always-attempt-exact-owned-infrastructure-destruction",
+    "dataset_execution_evidence_key": "guarded_hotel_initialization",
+    "operator_executed_benchmark": false,
+    "operator_started_applications": false,
+    "public_dispatch_enabled": false,
+    "qualification": {
+      "anonymous_layer_pull": false,
+      "cleanup": false,
+      "cloud_runtime": false,
+      "dataset": false,
+      "denied_edges": false,
+      "measurement": false,
+      "public_release": false
+    },
+    "scope": "support-stage-and-guarded-hotel-initialization-applications-paused"
+  },
+  "owned_resources_observed_deleted": 21,
+  "plan_fingerprint": "sha256:2421aad4d59b3de9dca1ffb828c8436446fcda25fa55f1753284b2bfa7a8f7a6",
+  "pods": {
+    "initialize-empty": {
+      "container_id": "containerd://ecda12367a817af033917e2e32a10c1190d267d40014175f65dc8ee6e616bee4",
+      "exit_code": 0,
+      "image_id": "ghcr.io/tonymarkel/deathstarbench-hotel-app@sha256:c86dfa0649a602d74b15eb85dc0cce27008e05d017beb9c341a6add20aafdd6f",
+      "phase": "Succeeded",
+      "restart_count": 0,
+      "started_at": "2026-10-20T20:24:22Z",
+      "uid": "77354c11-ef2d-41bf-8630-e09c6497e2f1"
+    },
+    "verify": {
+      "container_id": "containerd://ab45e6ef97f289b1533009694ffca8035d970be91bb9322ec668021c9da6faad",
+      "exit_code": 0,
+      "image_id": "ghcr.io/tonymarkel/deathstarbench-hotel-app@sha256:c86dfa0649a602d74b15eb85dc0cce27008e05d017beb9c341a6add20aafdd6f",
+      "phase": "Succeeded",
+      "restart_count": 0,
+      "started_at": "2026-10-20T20:25:38Z",
+      "uid": "3d5b561c-7f01-4e19-8fd5-9c39f96e51ce"
+    }
+  },
+  "private_state_sha256": "82ada3a83c09fab0ff8e3c2543c5315f0568d8ad41d689939a7f1eff84531d49",
+  "provider": "oci",
+  "public_dispatch_enabled": false,
+  "public_release": false,
+  "region": "us-ashburn-1",
+  "run_id": "3ab32b58d2a5",
+  "runtime_qualified": false,
+  "schema_version": 1,
+  "source_revision": "6ecb09706140f8730b5385c08f1386c654c3c526",
+  "stage_fingerprint": "sha256:944c0a15c11ffb58055ba48fc8aa401a2fe5f834319cdd00260f70352abe83c8"
+}

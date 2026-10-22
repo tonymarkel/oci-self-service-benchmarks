@@ -15,7 +15,7 @@ from app.guests import amazon_linux, oracle_linux, rocky_linux
 
 
 SUPPORTED_PROVIDERS = frozenset({'oci', 'aws', 'gcp', 'azure'})
-SUPPORTED_BENCHMARKS = frozenset({'apachebench', 'deathstarbench'})
+SUPPORTED_BENCHMARKS = frozenset({'apachebench', 'hey', 'deathstarbench'})
 SUPPORTED_ROLES = frozenset({'service', 'loadgen'})
 
 PODMAN_COMPOSE_VERSION = '1.5.0'
@@ -176,7 +176,9 @@ def readiness_hosts(
         base = ('mirrors.rockylinux.org',)
     else:
         base = (_BASE_READINESS_HOST[provider],)
-    if benchmark == 'apachebench':
+    if benchmark in {'apachebench', 'hey'}:
+        if benchmark == 'hey' and role == 'loadgen':
+            return (*base, 'proxy.golang.org', 'sum.golang.org', 'storage.googleapis.com')
         return base
     additional = (
         _DEATHSTARBENCH_SERVICE_HOSTS

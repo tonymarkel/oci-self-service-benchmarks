@@ -155,6 +155,68 @@ def document(
 
 
 class DeathStarBenchComparisonContractTests(unittest.TestCase):
+    def test_hotel_dataset_identity_is_comparable_without_social_graph_hashes(self):
+        selected = plan(distributed=True)
+        selected['deathstarbench']['workload'] = 'hotel_reservation'
+        attestation = metadata()
+        attestation.pop('dataset_nodes_sha256')
+        attestation.pop('dataset_edges_sha256')
+        attestation['dataset_manifest_sha256'] = 'a' * 64
+        first = comparison.workload_fingerprint('deathstarbench', selected, attestation)
+        self.assertFalse(first['contract_unknown'], first['issues'])
+        settings = first['contract']['settings']
+        self.assertEqual(settings['dataset_manifest_sha256'], 'a' * 64)
+        self.assertNotIn('dataset_nodes_sha256', settings)
+        attestation['dataset_manifest_sha256'] = 'b' * 64
+        second = comparison.workload_fingerprint('deathstarbench', selected, attestation)
+        self.assertNotEqual(first['fingerprint'], second['fingerprint'])
+
+    def test_media_dataset_identity_is_comparable_without_social_graph_hashes(self):
+        selected = plan(distributed=True)
+        selected['deathstarbench']['workload'] = 'media_microservices'
+        attestation = metadata(
+            workload_revision='media-microservices-v1',
+            image_set_revision='media-candidate-images-v1',
+            dataset_revision='media-synthetic-users-driver-titles-v1',
+            measurement_revision='media-synthetic-compose-k3s-v1',
+        )
+        attestation.pop('dataset_nodes_sha256')
+        attestation.pop('dataset_edges_sha256')
+        attestation['dataset_manifest_sha256'] = 'a' * 64
+        first = comparison.workload_fingerprint('deathstarbench', selected, attestation)
+        self.assertFalse(first['contract_unknown'], first['issues'])
+        settings = first['contract']['settings']
+        self.assertEqual(settings['dataset_manifest_sha256'], 'a' * 64)
+        self.assertNotIn('dataset_nodes_sha256', settings)
+        self.assertEqual(settings['workload_revision'], 'media-microservices-v1')
+        self.assertEqual(settings['dataset_revision'], 'media-synthetic-users-driver-titles-v1')
+        self.assertEqual(settings['measurement_revision'], 'media-synthetic-compose-k3s-v1')
+        attestation['dataset_manifest_sha256'] = 'b' * 64
+        second = comparison.workload_fingerprint('deathstarbench', selected, attestation)
+        self.assertNotEqual(first['fingerprint'], second['fingerprint'])
+
+    def test_hotel_missing_or_invalid_dataset_manifest_prevents_comparison(self):
+        selected = plan(distributed=True)
+        selected['deathstarbench']['workload'] = 'hotel_reservation'
+        for value in (None, '', 'not-a-digest'):
+            with self.subTest(value=value):
+                attestation = metadata()
+                attestation['dataset_manifest_sha256'] = value
+                contract = comparison.workload_fingerprint('deathstarbench', selected, attestation)
+                self.assertTrue(contract['contract_unknown'])
+                self.assertTrue(any('dataset_manifest_sha256' in issue for issue in contract['issues']))
+
+    def test_media_missing_or_invalid_dataset_manifest_prevents_comparison(self):
+        selected = plan(distributed=True)
+        selected['deathstarbench']['workload'] = 'media_microservices'
+        for value in (None, '', 'not-a-digest'):
+            with self.subTest(value=value):
+                attestation = metadata()
+                attestation['dataset_manifest_sha256'] = value
+                contract = comparison.workload_fingerprint('deathstarbench', selected, attestation)
+                self.assertTrue(contract['contract_unknown'])
+                self.assertTrue(any('dataset_manifest_sha256' in issue for issue in contract['issues']))
+
     def test_historical_result_normalizes_to_single_host_runtime(self):
         historical = comparison.workload_fingerprint(
             'deathstarbench',

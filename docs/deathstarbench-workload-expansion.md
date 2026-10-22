@@ -1,11 +1,101 @@
 # Distributed Hotel Reservation and Media Microservices
 
-Status, 2026-10-15: **published artifacts, support-only K3s staging, guarded Hotel image access and offline initialization-control foundations; not public benchmarks**.
-Social Network is still the only released distributed workload. The audited
-foundations now have drift-checked application/frontend, initializer, and
-load-driver preparation tools, plus an explicit native publication pipeline.
-No cloud provisioning, dataset initialization, live measurement, or cleanup
-qualification is claimed by the artifact pipeline.
+Status, 2026-10-21: **experimental synthetic Hotel and Media benchmarking are
+available in the UI**. Both use the existing five-node cloud lifecycle. The
+private controllers and historical qualification gates remain separate; their
+evidence does not claim broad provider or architecture qualification for the
+UI runners.
+
+## Experimental Media UI workflow
+
+Media uses digest-pinned native application/frontend images from the restored
+[publication record](qualification/deathstarbench-hotel-media-candidate-images-v1.json)
+and its own [runtime lock](qualification/deathstarbench-media-ui-images-v1.json).
+The five VMs host twelve C++ services, nginx, eight MongoDB processes, seven
+Memcached processes, three Redis processes, and Jaeger; the fifth VM runs the
+fixed x86 load driver. The normal supervisor handles reports, stopping, and
+cleanup. Database directories receive the same SELinux labeling as Hotel.
+
+Each fresh run registers 1,000 synthetic users and the 995 distinct titles
+sampled by the published driver. The source script contains 1,000 title
+entries; duplicate titles retain their first-index synthetic movie ID. The
+exact list is checked in at
+`app/manifests/deathstarbench/media-synthetic-v1/movie-titles.json`, extracted
+from the audited request script SHA-256
+`147fdc983955c46a06c80ab41c188e0d946b37eb45e019a1f0a9e3073017bbaa`.
+No cast-info, plot, or movie-info records are loaded for this compose-review
+workload. Its dataset revision is `media-synthetic-users-driver-titles-v1`,
+separate from the earlier full TMDB initialization proposal.
+
+The runner verifies baseline collection counts and user/title keyspace, then
+submits one canary review and checks the stored document and exact 64-bit
+user/movie review references. Mutating requests are not automatically retried.
+All 32 service pods must remain ready and keep the same container identities
+through warmup and measurement. Normal Deployments and cloud isolation are
+used without per-service NetworkPolicies or private dispatch approval steps.
+
+The pinned driver treats an empty HTTP 200 as a successful compose response.
+Reports therefore distinguish HTTP/body throughput from stored reviews and
+user/movie index counts. Per-phase persistence differences are exposed;
+upstream writes are not transactional, and these counts do not establish
+one-to-one request attribution or end-to-end durable-write latency. The canary,
+warmup, and measurement share mutable state; each new run starts fresh.
+A new workload-specific runtime, measurement, initializer, dataset, and image
+identity prevent accidental comparison with Social or historical compact runs.
+
+The [live OCI AMD UI smoke record](qualification/deathstarbench-media-ui-oci-amd-20261021.json)
+captures run `7e188bb09995` on 2026-10-21 using an E5 Flex application VM with
+4 OCPUs and 32 GB RAM. A 10-second warmup and 30-second measurement at a target
+20 requests/second produced 650 successful responses (21.66/second), with
+6.311 ms p99 latency and no HTTP/body-check failures. The driver sent 651
+requests and recorded one uncompleted request; stored reviews and both index
+reference counts each grew by 651. These differences remain visible in the
+report. All 32 pods retained their identities without restarts. The browser
+rendered the completed report, and all 21 recorded cloud resources were deleted
+and independently checked absent. Repository checks ran 1,992 tests with two
+skipped. This live evidence covers OCI AMD; other Media cloud/architecture
+combinations remain to be exercised.
+
+## Experimental Hotel UI workflow
+
+The form accepts Hotel on `distributed_tiered_v1/k3s_v1`. Each run snapshots
+[the published image lock](qualification/deathstarbench-hotel-ui-images-v1.json),
+uses digest-pinned native applications, prepares SELinux-labeled database
+volumes, starts the supporting services, and seeds/verifies the fresh synthetic
+dataset. Normal Deployments start the eight backend services, then search and
+frontend. Cloud network isolation is retained; per-service NetworkPolicies and
+the private controller's dispatch approval machinery are omitted for these
+short-lived synthetic loads.
+
+Before load, the runner checks valid/invalid login, a successful reservation on
+unmeasured dates, and search/recommendation response structure. The pinned
+load driver reports HTTP and response-body failures separately. Throughput is
+body-check successes per second; error rate is failed completed responses over
+all completed responses. Socket errors and incomplete requests are additional
+metrics. Warmup and measurement mutate the same reservation state without a
+reset. Reservation writes retain upstream non-atomic behavior, so this measures
+synthetic workload performance rather than booking correctness.
+
+All 24 service pods must remain ready with unchanged identities and no restarts
+through warmup and measurement. Results record the dataset, images, driver,
+measurement method, and runtime revisions. Comparison identity normalizes the
+per-run environment ID; an additional exact manifest digest records each run.
+Hotel metadata does not borrow Social Network graph hashes. The normal
+supervisor handles stop, failure, reports, and cloud cleanup.
+
+A [live OCI AMD UI smoke run](qualification/deathstarbench-hotel-ui-oci-amd-20261020.json)
+completed on October 20, 2026: run `bbaf8d2d0f4e`, E5 Flex application node,
+2 threads, 8 connections, 20 requested requests/second, 10 seconds warmup,
+and 30 seconds measurement. All five semantic checks passed; 651 responses
+passed body checks with no HTTP, semantic, or socket errors. Median latency
+was 2.083 ms and p99 was 6.079 ms. All 24 service pod identities remained
+unchanged. Chromium submitted the run and displayed the resulting report
+without page errors. All 21 recorded cloud resources were cleaned up, followed
+by a fresh independent cloud absence check. This is one short functional
+smoke test, not a saturation result or a multi-cloud/Arm qualification.
+
+The sections below preserve the stricter private candidate development history.
+Statements about closed gates describe that path, not experimental UI access.
 
 ## Completed foundation
 
@@ -59,9 +149,9 @@ executing it against actual cloud guests is still a runtime qualification gate.
 Hotel's pod policy uses port **5000**, not the external NodePort 8080. No
 cloud ingress or K3s NodePort-range expansion is needed.
 
-Both new profiles and assets remain unreleased. The existing public model,
-catalog, lifecycle, and released bundle validator continue to reject them;
-an asset flag or candidate preview cannot open their gates. Historical
+The original candidate profiles and assets retain their unreleased markers.
+The experimental Hotel and Media UIs use their own checked-in runtime locks and validators;
+an asset flag or arbitrary candidate preview cannot enable that path. Historical
 compact API clients, reports, comparisons, and cleanup remain supported.
 
 ## Artifact preparation checkpoint
@@ -825,9 +915,9 @@ an apparently successful initializer or verifier. Local command-output records
 must match the exact run/dataset/mode/Pod UID and still retain false start gates.
 They are unverified observations, not fresh database or Pod execution proof.
 
-**No cloud/Kubernetes initialization or application executor is implemented by
-this slice.** Nothing applies these new policies/Pods, removes a gate, starts
-MongoDB or application services, or sends benchmark traffic. The next controller
+**The October 15 foundation did not implement a cloud/Kubernetes initialization
+or application executor.** That slice did not apply these policies/Pods, remove a
+gate, start MongoDB or application services, or send benchmark traffic. A live controller
 must freshly verify cloud/cluster ownership, CA, complete admitted Pod specs,
 container images/exit/restart state, and unchanged namespace/Node/PV/PVC/Pod
 identities under its held lease. MongoDB Service/EndpointSlice targets must
@@ -849,13 +939,158 @@ matches the reviewed guarded publication. The record retains the exact receipt
 hash and per-platform images/counts, without treating that historical JSON as
 a capability or as live workload qualification.
 
-## Next review slices and release prerequisites
+## Private live Hotel initialization controller
+
+The October 20 controller adds a private execution path for the guarded Hotel
+initializer and its separate global read-only verifier. It runs inside the
+existing cleanup-owning support operator, after the original support stage is
+ready. Hotel application Deployments remain at zero replicas. It produces
+private execution observations, not public benchmark results, application-start
+permission, or a workload release.
+
+`app/deathstarbench_hotel_live.py` collects and validates the complete support
+inventory, the Kubernetes server CA, kube-system Namespace UID, exact
+initialization Pods/policies, and MongoDB Service/EndpointSlice targets. It
+checks admitted Pod specs against the approved templates with a narrow set of
+known Kubernetes defaults. The remote helper source is frozen at import and
+remains compatible with guest Python 3.9. Commands have bounded Kubernetes
+requests; logs are capped at 4,096 bytes.
+
+`app/deathstarbench_hotel_controller.py` retains the original run lease and
+rechecks provider ownership, the database volume/filesystem, runtime/SSH
+bindings, and support resource identities. It freshly verifies anonymous image
+bytes, creates the two gated standalone Pods once, and persists each exclusive
+dispatch latch before releasing its gate. Immediately before each release, the
+guest rechecks identities and sequencing; a JSON Patch tests the exact admitted
+Pod spec, UID, resourceVersion and metadata before removing the gate. The same
+Pod and container execution identities must survive polling and log collection.
+Controller SSH commands disable automatic transport retries so a lost response
+cannot trigger another dispatch.
+Only successful initialization followed by successful global verification can
+produce the narrow `initialized-and-globally-verified-applications-paused`
+observation.
+
+The private CLI provisions five billable VMs and the database disk using the
+existing provider lifecycle. A new run needs complete source preparations,
+freshly adopted original/guarded publications, a sanitized five-role plan, and
+the existing SSH/provider setup:
+
+```sh
+.venv/bin/python scripts/qualify_deathstarbench_hotel_initialization.py \
+  --plan /secure/hotel-five-role-plan.json \
+  --image-lock /secure/hotel/candidate-image-lock.json \
+  --publication /secure/hotel/publication.json \
+  --workload-preparation /secure/prepared/hotel \
+  --driver-preparation /secure/prepared/hotel-driver \
+  --guarded-image-lock /secure/hotel/guarded-image-lock.json \
+  --guarded-publication /secure/hotel/guarded-publication.json \
+  --guarded-preparation /secure/prepared/hotel-guarded \
+  --upstream /secure/DeathStarBench
+```
+
+AWS/OCI require the same explicit provider image pins as the support CLI.
+Original and guarded input bytes plus an immutable attempt UUID are persisted
+under `app/runs/.candidate-support/<run-id>/` before provisioning.
+The operator records a distinct guarded-initialization scope and reports the
+controller's persisted initialization status, including uncertainty after intent.
+
+Every normal or exceptional exit attempts exact infrastructure destruction and
+independent absence checks. Hard termination requires explicit recovery:
+
+```sh
+.venv/bin/python scripts/qualify_deathstarbench_hotel_initialization.py \
+  --cleanup-only RUN_ID
+```
+
+Cleanup does not require source preparations, registry access, or SSH keys.
+There is no initialization resume, retry, latch reset or journal repair. Lost
+creation/release responses, replaced resources, changed container identities,
+timeouts and uncertain persistence require cleanup. Qualification checkpoints
+include `cluster-ready`, `support-ready`, `initializer-intent`,
+`initializer-exit`, and `verifier-intent`, with `--interrupt-mode graceful|hard`.
+The support CLI also refuses to resume a guarded initialization run.
+
+Tests exercise synthetic Kubernetes responses, actual generated guest commands,
+real private journals/leases, response loss, callback mutation, and CLI-to-cloud
+cleanup propagation. They do not establish live cloud qualification of this
+implementation. Restored observations from earlier local work remain historical
+evidence; the CLI refuses legacy initialization state rather than migrating it
+into an executable attempt. Broader live qualification, service startup/restart,
+semantic login/reservation behavior, measurement and public release remain
+separate milestones.
+
+### OCI AMD live initialization observation
+
+The [October 20 live receipt](qualification/deathstarbench-hotel-initialization-oci-amd-v1.json)
+records fresh run `3ab32b58d2a5` against controller commit
+`55e356a2dfffefe9412995d243bbc7f67f0a4a0f`. It ran in OCI Ashburn on the pinned
+Oracle Linux 9 images with five AMD E5 Flex VMs and a 256 GiB database volume.
+The audited source was freshly checked out, original and guarded preparations
+were reconstructed, both publications were freshly adopted, and the controller
+obtained its own anonymous image-byte capability.
+
+The exact initializer and separate global read-only verifier both exited zero
+without container restarts. The controller retained their Pod/container
+identities and six journal events, including two distinct durable dispatch
+latches. All application Deployments remained at zero replicas. The CLI exited
+zero after exact teardown and independent absence proof; all 21 explicit
+infrastructure entries reached their deleted state. Private full state and
+journals remain under `app/runs/.candidate-support/3ab32b58d2a5/`; the shared
+receipt retains their state hash, artifact identities, Pod completion evidence,
+and cleanup assertions without account credentials or infrastructure OCIDs.
+
+This is one successful OCI AMD initialization observation. It does not cover
+ARM, other providers, injected live interruptions/response loss, application
+startup/restart, login/reservation semantics, or benchmark measurement. Public
+dispatch, application-start permission, broad runtime qualification and public
+release remain closed. Historical evidence cannot authorize another attempt.
+
+## Guarded Hotel application staging
+
+`app/deathstarbench_hotel_application_stage.py` adds an offline startup contract
+for the ten Hotel applications. `build_guarded_hotel_application_stage(plan)`
+accepts only the freshly constructed `GuardedHotelRuntimePlan` used by guarded
+initialization. It derives immutable, scheduling-gated standalone Pods from the
+audited support templates, substituting the exact guarded platform image and
+explicit run/dataset environment. Serialized plans or altered/rehashed manifests
+cannot be adopted. The original support bundle and its zero-replica application
+Deployments are unchanged.
+
+The intended release order is eight database-backed services, then search,
+then frontend. Each Pod has `restartPolicy: Never`, a 900-second active deadline,
+rootless execution, a read-only filesystem, no service-account token or mounts,
+and bounded resources. Existing component labels preserve Service selection and
+the audited network policies; the stage adds no Service, Deployment, storage,
+network policy, or external access. Pods deliberately omit `pod-template-hash`
+and controller ownership so existing Deployment-generated ReplicaSets do not
+select them. A live controller must also reject any unexpected/adopting
+controller in the observed inventory.
+
+The bundle records the expected nine Consul service names and ports. Its TCP
+readiness probes establish listeners only; Consul registrations must later be
+matched to the exact observed application Pod addresses, and login/reservation
+responses need separate semantic checks. Application crashes, changed container
+identities, or uncertain dispatch require cleanup rather than restart/replay.
+In particular, reservations mutate the baseline, so the existing database
+verifier is not a healthy-restart protocol after transactions.
+
+This slice is a renderer with offline tests for both application architectures.
+It does not create Pods or remove scheduling gates, and the existing live CLI
+still stops after initialization/global verification and cleans up. Wiring a
+leased startup controller with same-attempt initialization proof, current
+cloud/cluster/storage ownership, per-Pod durable dispatch latches, exact live
+inventory validation, and cleanup remains the next implementation slice. No
+live startup or semantic transaction qualification is claimed by this bundle.
+
+## Private qualification roadmap (retained separately from experimental UI)
 
 1. **Immutable artifacts and public access.** Hotel now has native guarded
    publication and complete anonymous byte-access observations for all seven
    bound image platforms. A later runtime attempt must freshly obtain its own
    artifact/access capabilities and qualify actual guest/CRI behavior; this
    historical observation cannot replace those checks. Media remains separate.
+   One OCI AMD Hotel initialization run now records actual guest/container
+   execution and cleanup; other provider/architecture combinations remain open.
    Read-only candidate adoption alone is not the access gate.
    Version tags/configuration metadata alone are not executed
    backing-image version or CPU-compatibility proof. Preparation receipts alone
@@ -866,7 +1101,9 @@ a capability or as live workload qualification.
    Candidate artifact/storage preflight and support-only K3s apply/readiness now
    supply the first boundaries. The private cleanup-owning operator now joins
    those boundaries; live support-stage evidence must be evaluated separately.
-   Guarded application startup and semantic initialization/measurement remain
+   The private Hotel controller supplies one-shot initialization and global
+   verification execution, observed on one fresh OCI AMD run. Broader live
+   qualification, guarded application startup and semantic measurement remain
    required before release.
    Add exact dataset and semantic response verification, durable one-shot
    initialization, unchanged pre/post pod identities, and workload-specific
@@ -884,7 +1121,7 @@ patch receipts identify the corrections adopted after that audit; the audit
 itself is not rewritten to imply qualification. HTTP 200 alone is not a
 successful login or reservation. Media still needs deployed dataset readiness
 and proof that a composed review reaches persistent storage and its user/movie
-references. Neither candidate is qualified for public execution yet.
+references. Neither candidate has completed the full private multi-cloud qualification matrix.
 
 Maintainers review each slice before merge. No automatic merge or release-flag
 promotion is part of this workflow.

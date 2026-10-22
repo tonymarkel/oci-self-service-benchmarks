@@ -247,13 +247,15 @@ small,
 }
 
 .deathstar-settings .grid,
-.apachebench-settings .grid {
+.apachebench-settings .grid,
+.hey-settings .grid {
     margin: 16px 0
 }
 
 .deathstar-settings input,
 .deathstar-settings select,
-.apachebench-settings input {
+.apachebench-settings input,
+.hey-settings input {
     width: 100%
 }
 

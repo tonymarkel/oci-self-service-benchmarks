@@ -15,6 +15,7 @@ import hmac
 import math
 import re
 import shlex
+from types import SimpleNamespace
 from ipaddress import ip_address
 from pathlib import Path
 from datetime import datetime, timezone
@@ -41,6 +42,20 @@ from .apachebench import (
     validate_metrics as validate_apachebench_metrics,
     warmup_command as apachebench_warmup_command,
     workload as apachebench_workload,
+)
+from .hey import (
+    WORKLOADS as HEY_WORKLOADS,
+    aggregate_trial_metrics as aggregate_hey_trials,
+    benchmark_command as hey_command,
+    loadgen_prepare_command as hey_loadgen_prepare_command,
+    metadata as hey_metadata,
+    parse_output as parse_hey_output,
+    readiness_command as hey_readiness_command,
+    record_network_capacity as record_hey_network_capacity,
+    target_prepare_command as hey_target_prepare_command,
+    validate_metrics as validate_hey_metrics,
+    warmup_command as hey_warmup_command,
+    workload as hey_workload,
 )
 from .catalog import (
     BENCHMARKS,
@@ -100,6 +115,7 @@ from .deathstarbench_distributed_measurement import (
 )
 from .deathstarbench_public import (
     PublicDistributedLifecycleError,
+    distributed_workload,
     is_distributed_deathstarbench_plan,
     load_run_distributed_image_lock,
     preflight_distributed_deathstarbench_release,
@@ -385,7 +401,7 @@ def plan_uses_iperf3(plan):
 
 
 def plan_uses_load_generator(plan):
-    return bool({'deathstarbench', 'apachebench'} & set(plan.benchmarks))
+    return bool({'deathstarbench', 'apachebench', 'hey'} & set(plan.benchmarks))
 
 
 def expected_benchmark_result_ids(plan):
@@ -427,14 +443,14 @@ def expected_benchmark_result_ids(plan):
                     f'phoronix_unknown_{profile_id}'
                     for profile_id in profile_ids
                 )
-        elif benchmark_id == 'apachebench':
-            options = canonical.get('apachebench') or {}
+        elif benchmark_id in {'apachebench', 'hey'}:
+            options = canonical.get(benchmark_id) or {}
             workloads = options.get('workloads') or [
                 'new_connections',
                 'keep_alive',
             ]
             expected.update(
-                f'apachebench_{workload}' for workload in workloads
+                f'{benchmark_id}_{workload}' for workload in workloads
             )
         else:
             expected.add(benchmark_id)
@@ -463,6 +479,12 @@ def benchmark_result_name(result_id, plan):
     }
     if result_id in fixed_names:
         return fixed_names[result_id]
+    if result_id.startswith('hey_'):
+        mode = result_id.removeprefix('hey_')
+        try:
+            return f'hey — {hey_workload(mode)["name"]}'
+        except ValueError:
+            return result_id
     if result_id.startswith('apachebench_'):
         workload_id = result_id.removeprefix('apachebench_')
         try:
@@ -553,6 +575,7 @@ def benchmark_security_rules(
     include_deathstarbench=False,
     iperf3_protocols=(),
     include_apachebench=False,
+    include_hey=False,
 ):
     iperf3_protocols = set(iperf3_protocols)
     rules = [
@@ -618,7 +641,7 @@ def benchmark_security_rules(
                     ),
                 )
             )
-    if include_apachebench:
+    if include_apachebench or include_hey:
         rules.append(
             oci.core.models.IngressSecurityRule(
                 protocol='6',
@@ -890,7 +913,7 @@ def _exact_distributed_candidate_plan(job, provider):
         and not tuple(value(plan, 'llm_benchmarks', ()) or ())
         and value(options, 'topology_id') == DISTRIBUTED_TIERED_TOPOLOGY_ID
         and value(options, 'runtime_id') == K3S_RUNTIME_ID
-        and value(options, 'workload') == 'social_network'
+        and value(options, 'workload') in ('social_network', 'hotel_reservation', 'media_microservices')
     )
 
 
@@ -1907,20 +1930,21 @@ def ssh_defaults(request: Request):
 
 @app.get('/api/catalog')
 def catalog():
-    distributed_released = False
-    try:
-        preflight_distributed_deathstarbench_release()
-        distributed_released = True
-    except PublicDistributedLifecycleError:
-        # Catalog discovery is read-only and remains usable while a release
-        # bundle is incomplete.  The exact profile stays hidden until every
-        # coordinated release artifact validates together.
-        pass
+    available_workloads = set()
+    for workload in ('social_network', 'hotel_reservation', 'media_microservices'):
+        try:
+            preflight_distributed_deathstarbench_release(workload=workload)
+            available_workloads.add(workload)
+        except PublicDistributedLifecycleError:
+            # A malformed workload bundle must not hide other valid workloads.
+            pass
     deathstarbench_topologies = []
     for topology in DEATHSTARBENCH_TOPOLOGIES:
         item = dict(topology)
         if item.get('topology_id') == DISTRIBUTED_TIERED_TOPOLOGY_ID:
-            item['released'] = distributed_released
+            item['workloads'] = [workload for workload in item['workloads']
+                                 if workload in available_workloads]
+            item['released'] = bool(item['workloads'])
         deathstarbench_topologies.append(item)
     selectable_deathstarbench_workloads = {
         workload
@@ -1934,6 +1958,7 @@ def catalog():
         'iperf3_protocols': IPERF3_PROTOCOLS,
         'phoronix_profiles': PHORONIX_PROFILES,
         'apachebench_workloads': APACHEBENCH_WORKLOADS,
+        'hey_workloads': HEY_WORKLOADS,
         'deathstarbench_workloads': [
             workload for workload in DEATHSTARBENCH_WORKLOADS
             if workload['id'] in selectable_deathstarbench_workloads
@@ -2338,7 +2363,7 @@ async def create_job(plan: BenchmarkPlan):
             raise HTTPException(422, str(exc)) from exc
     if distributed_deathstarbench:
         try:
-            preflight_distributed_deathstarbench_release()
+            preflight_distributed_deathstarbench_release(workload=distributed_workload(plan))
         except PublicDistributedLifecycleError as exc:
             raise HTTPException(422, str(exc)) from exc
     try:
@@ -2398,7 +2423,7 @@ async def create_job(plan: BenchmarkPlan):
         ) from exc
     try:
         if distributed_deathstarbench:
-            snapshot_distributed_image_lock(run_directory)
+            snapshot_distributed_image_lock(run_directory, workload=distributed_workload(plan))
         (run_directory / 'plan.json').write_text(
             json.dumps(sanitized_plan, indent=2)
         )
@@ -3239,7 +3264,7 @@ def provision(job, plan):
         )
     if is_distributed_deathstarbench_plan(plan):
         validate_distributed_deathstarbench_plan(plan)
-        image_lock = load_run_distributed_image_lock(RUNS, job['id'])
+        image_lock = load_run_distributed_image_lock(RUNS, job['id'], workload=distributed_workload(plan))
         return provision_public_distributed_deathstarbench(
             job,
             plan,
@@ -3327,7 +3352,7 @@ def provision_oci(job, plan):
     igw = network.create_internet_gateway(oci.core.models.CreateInternetGatewayDetails(compartment_id=compartment, vcn_id=vcn.id, is_enabled=True, display_name=f'benchmark-igw-{suffix}', freeform_tags=tags)).data; record_resource(job, 'igw_id', igw.id)
     nat = network.create_nat_gateway(oci.core.models.CreateNatGatewayDetails(compartment_id=compartment, vcn_id=vcn.id, display_name=f'benchmark-nat-{suffix}', freeform_tags=tags)).data; record_resource(job, 'nat_id', nat.id)
     rt = network.create_route_table(oci.core.models.CreateRouteTableDetails(compartment_id=compartment, vcn_id=vcn.id, display_name=f'benchmark-routes-{suffix}', route_rules=[oci.core.models.RouteRule(destination='0.0.0.0/0', destination_type='CIDR_BLOCK', network_entity_id=igw.id)], freeform_tags=tags)).data; record_resource(job, 'route_table_id', rt.id)
-    sl = network.create_security_list(oci.core.models.CreateSecurityListDetails(compartment_id=compartment, vcn_id=vcn.id, display_name=f'benchmark-security-{suffix}', ingress_security_rules=benchmark_security_rules(include_deathstarbench='deathstarbench' in plan.benchmarks, iperf3_protocols=iperf3_protocols, include_apachebench='apachebench' in plan.benchmarks), egress_security_rules=[oci.core.models.EgressSecurityRule(protocol='all', destination='0.0.0.0/0')], freeform_tags=tags)).data; record_resource(job, 'security_list_id', sl.id)
+    sl = network.create_security_list(oci.core.models.CreateSecurityListDetails(compartment_id=compartment, vcn_id=vcn.id, display_name=f'benchmark-security-{suffix}', ingress_security_rules=benchmark_security_rules(include_deathstarbench='deathstarbench' in plan.benchmarks, iperf3_protocols=iperf3_protocols, include_apachebench='apachebench' in plan.benchmarks, include_hey='hey' in plan.benchmarks), egress_security_rules=[oci.core.models.EgressSecurityRule(protocol='all', destination='0.0.0.0/0')], freeform_tags=tags)).data; record_resource(job, 'security_list_id', sl.id)
     subnet = network.create_subnet(oci.core.models.CreateSubnetDetails(compartment_id=compartment, vcn_id=vcn.id, cidr_block='10.42.1.0/24', dns_label='public', display_name=f'benchmark-public-{suffix}', route_table_id=rt.id, dhcp_options_id=vcn.default_dhcp_options_id, security_list_ids=[sl.id], prohibit_public_ip_on_vnic=False, freeform_tags=tags)).data; record_resource(job, 'subnet_id', subnet.id)
     event(job, 'Provision', 'Public subnet uses the VCN default Internet and VCN Resolver DHCP options.')
     image = latest_oracle_linux_image(
@@ -3337,6 +3362,7 @@ def provision_oci(job, plan):
         require_ol9=(
             'deathstarbench' in plan.benchmarks
             or 'apachebench' in plan.benchmarks
+            or 'hey' in plan.benchmarks
             or plan_uses_sysbench(plan)
             or plan_uses_iperf3(plan)
         ),
@@ -4172,6 +4198,24 @@ def install_apachebench_guest(job, plan, *, role, host_key='public_ip'):
             'ApacheBench install',
             f'{step.name} is ready: {output.strip()[-1000:]}',
         )
+
+
+def install_hey_guest(job, plan, *, role, host_key='public_ip'):
+    """Install the shared HTTP target or a version-pinned native hey client."""
+    if role == 'service':
+        return install_apachebench_guest(job, plan, role=role, host_key=host_key)
+    provider = web_guest.provider_id(plan)
+    packages = {'golang', 'time'}
+    if provider == 'oci':
+        dnf_install(job, packages, host_key=host_key)
+    else:
+        guest = amazon_linux if provider == 'aws' else rocky_linux
+        ssh(job, guest.dnf_install_command(packages), host_key=host_key,
+            timeout=1800, include_stderr=True)
+    from .hey import install_command
+    output = ssh(job, install_command(), host_key=host_key,
+                 timeout=1800, include_stderr=True)
+    event(job, 'hey install', f'Installed pinned hey client: {output.strip()[-1000:]}')
 
 
 def install_deathstarbench_guest(job, plan, *, role, host_key='public_ip'):
@@ -5106,8 +5150,42 @@ def apachebench_request_timeout(request_count):
 
 
 def run_apachebench(job, plan):
+    return _run_http_benchmark(job, plan, 'apachebench', 'ApacheBench', SimpleNamespace(
+        workload=apachebench_workload,
+        metadata=apachebench_metadata,
+        target_prepare_command=apachebench_target_prepare_command,
+        loadgen_prepare_command=apachebench_loadgen_prepare_command,
+        readiness_command=apachebench_readiness_command,
+        warmup_command=apachebench_warmup_command,
+        benchmark_command=apachebench_command,
+        parse_output=parse_apachebench_output,
+        validate_metrics=validate_apachebench_metrics,
+        record_network_capacity=record_apachebench_network_capacity,
+        aggregate_trial_metrics=aggregate_apachebench_trials,
+        install_guest=install_apachebench_guest,
+    ))
+
+
+def run_hey(job, plan):
+    return _run_http_benchmark(job, plan, 'hey', 'hey', SimpleNamespace(
+        workload=hey_workload,
+        metadata=hey_metadata,
+        target_prepare_command=hey_target_prepare_command,
+        loadgen_prepare_command=hey_loadgen_prepare_command,
+        readiness_command=hey_readiness_command,
+        warmup_command=hey_warmup_command,
+        benchmark_command=hey_command,
+        parse_output=parse_hey_output,
+        validate_metrics=validate_hey_metrics,
+        record_network_capacity=record_hey_network_capacity,
+        aggregate_trial_metrics=aggregate_hey_trials,
+        install_guest=install_hey_guest,
+    ))
+
+
+def _run_http_benchmark(job, plan, benchmark_id, label, driver):
     """Run each selected HTTP mode from the shared private load generator."""
-    options = plan.apachebench
+    options = getattr(plan, benchmark_id)
     resources = job.get('resources', {})
     selected_workloads = tuple(options.workloads)
     diagnostics = []
@@ -5125,53 +5203,53 @@ def run_apachebench(job, plan):
             raise ValueError('invalid load-generator network capacity')
     except (TypeError, ValueError) as exc:
         error = RuntimeError(
-            'ApacheBench provisioning did not produce valid private target '
+            f'{label} provisioning did not produce valid private target '
             'and load-generator addresses plus a network-capacity value.'
         )
         for workload_id in selected_workloads:
-            settings = apachebench_workload(workload_id)
-            name = f'ApacheBench — {settings["name"]}'
+            settings = driver.workload(workload_id)
+            name = f'{label} — {settings["name"]}'
             job['results'].append({
-                'id': f'apachebench_{workload_id}',
+                'id': f'{benchmark_id}_{workload_id}',
                 'name': name,
-                'command': 'ApacheBench HTTP server lifecycle',
+                'command': f'{label} HTTP server lifecycle',
                 'started_at': now(),
                 'duration_seconds': 0,
                 'status': 'failed',
                 'error': str(error),
                 'metadata': {
-                    **apachebench_metadata(workload_id, options),
+                    **driver.metadata(workload_id, options),
                     **common_metadata,
                 },
                 'output': '',
             })
             failures.append(f'{name}: {error}')
-        event(job, 'ApacheBench warning', str(error))
+        event(job, f'{label} warning', str(error))
         return tuple(failures)
     if not resources.get('loadgen_public_ip'):
         error = RuntimeError(
-            'ApacheBench provisioning did not produce a reachable load '
+            f'{label} provisioning did not produce a reachable load '
             'generator.'
         )
         for workload_id in selected_workloads:
-            settings = apachebench_workload(workload_id)
-            name = f'ApacheBench — {settings["name"]}'
+            settings = driver.workload(workload_id)
+            name = f'{label} — {settings["name"]}'
             job['results'].append({
-                'id': f'apachebench_{workload_id}',
+                'id': f'{benchmark_id}_{workload_id}',
                 'name': name,
-                'command': 'ApacheBench HTTP server lifecycle',
+                'command': f'{label} HTTP server lifecycle',
                 'started_at': now(),
                 'duration_seconds': 0,
                 'status': 'failed',
                 'error': str(error),
                 'metadata': {
-                    **apachebench_metadata(workload_id, options),
+                    **driver.metadata(workload_id, options),
                     **common_metadata,
                 },
                 'output': '',
             })
             failures.append(f'{name}: {error}')
-        event(job, 'ApacheBench warning', str(error))
+        event(job, f'{label} warning', str(error))
         return tuple(failures)
     httpd_installed = False
     httpd_ready = False
@@ -5208,66 +5286,66 @@ def run_apachebench(job, plan):
         wait_for_web_guest_readiness(
             job,
             plan,
-            'apachebench',
+            benchmark_id,
             role='service',
-            label='ApacheBench web-server instance',
+            label=f'{label} web-server instance',
         )
         wait_for_web_guest_readiness(
             job,
             plan,
-            'apachebench',
+            benchmark_id,
             role='loadgen',
             host_key='loadgen_public_ip',
-            label='ApacheBench load generator',
+            label=f'{label} load generator',
         )
         event(
             job,
-            'ApacheBench install',
-            'Installing Apache HTTP Server on the target and ApacheBench on '
+            f'{label} install',
+            f'Installing Apache HTTP Server on the target and {label} on '
             'the separate load-generator VM.',
         )
-        install_apachebench_guest(job, plan, role='service')
+        driver.install_guest(job, plan, role='service')
         httpd_installed = True
-        install_apachebench_guest(
+        driver.install_guest(
             job,
             plan,
             role='loadgen',
             host_key='loadgen_public_ip',
         )
         stage(
-            'ApacheBench target',
+            f'{label} target',
             'Configuring the deterministic static response and restricting '
             'guest TCP/80 ingress to the load generator.',
-            apachebench_target_prepare_command(
+            driver.target_prepare_command(
                 options.response_size_kib,
                 loadgen_private_ip,
             ),
         )
         httpd_ready = True
         stage(
-            'ApacheBench load generator',
-            'Verifying ApacheBench and preparing client resource limits.',
-            apachebench_loadgen_prepare_command(),
+            f'{label} load generator',
+            f'Verifying {label} and preparing client resource limits.',
+            driver.loadgen_prepare_command(),
             host_key='loadgen_public_ip',
         )
         service_architecture = llama_cpp.parse_architecture(stage(
-            'ApacheBench architecture',
+            f'{label} architecture',
             'Recording the web-server VM architecture.',
             'uname -m',
             include_stderr=False,
         ))
         loadgen_architecture = llama_cpp.parse_architecture(stage(
-            'ApacheBench architecture',
+            f'{label} architecture',
             'Recording the load-generator VM architecture.',
             'uname -m',
             host_key='loadgen_public_ip',
             include_stderr=False,
         ))
         stage(
-            'ApacheBench readiness',
+            f'{label} readiness',
             'Verifying HTTP 200 and the configured response size over the '
             f'{web_guest.traffic_path(provider)}.',
-            apachebench_readiness_command(
+            driver.readiness_command(
                 target_private_ip,
                 options.response_size_kib,
             ),
@@ -5285,9 +5363,9 @@ def run_apachebench(job, plan):
         }
         timeout = apachebench_request_timeout(options.request_count)
         for workload_id in selected_workloads:
-            settings = apachebench_workload(workload_id)
-            result_id = f'apachebench_{workload_id}'
-            result_name = f'ApacheBench — {settings["name"]}'
+            settings = driver.workload(workload_id)
+            result_id = f'{benchmark_id}_{workload_id}'
+            result_name = f'{label} — {settings["name"]}'
             started_at = now()
             started = time.monotonic()
             trial_outputs = []
@@ -5296,10 +5374,10 @@ def run_apachebench(job, plan):
             try:
                 if options.warmup_requests:
                     warmup_output = stage(
-                        'ApacheBench warm-up',
+                        f'{label} warm-up',
                         f'Running {options.warmup_requests:,} untimed '
                         f'{settings["name"]} warm-up requests.',
-                        apachebench_warmup_command(
+                        driver.warmup_command(
                             workload_id,
                             target_private_ip,
                             options,
@@ -5309,12 +5387,12 @@ def run_apachebench(job, plan):
                             options.warmup_requests
                         ),
                     )
-                    warmup_metrics = parse_apachebench_output(warmup_output)
-                    record_apachebench_network_capacity(
+                    warmup_metrics = driver.parse_output(warmup_output)
+                    driver.record_network_capacity(
                         warmup_metrics,
                         loadgen_network_bandwidth_gbps,
                     )
-                    validate_apachebench_metrics(
+                    driver.validate_metrics(
                         warmup_metrics,
                         workload_id,
                         options.warmup_requests,
@@ -5323,14 +5401,14 @@ def run_apachebench(job, plan):
                     )
                     event(
                         job,
-                        'ApacheBench warm-up',
+                        f'{label} warm-up',
                         f'{settings["name"]} warm-up achieved '
                         f'{warmup_metrics["requests_per_second"]:.2f} '
                         'requests/second; these results are excluded from '
                         'the report.',
                     )
                 for trial in range(1, options.trials + 1):
-                    command = apachebench_command(
+                    command = driver.benchmark_command(
                         workload_id,
                         target_private_ip,
                         options,
@@ -5339,7 +5417,7 @@ def run_apachebench(job, plan):
                     commands.append(command)
                     event(
                         job,
-                        'ApacheBench run',
+                        f'{label} run',
                         f'Started {settings["name"]} trial {trial} of '
                         f'{options.trials}.',
                     )
@@ -5353,12 +5431,12 @@ def run_apachebench(job, plan):
                     trial_outputs.append(
                         f'--- Trial {trial} of {options.trials} ---\n{output}'
                     )
-                    metrics = parse_apachebench_output(output)
-                    record_apachebench_network_capacity(
+                    metrics = driver.parse_output(output)
+                    driver.record_network_capacity(
                         metrics,
                         loadgen_network_bandwidth_gbps,
                     )
-                    validate_apachebench_metrics(
+                    driver.validate_metrics(
                         metrics,
                         workload_id,
                         options.request_count,
@@ -5368,12 +5446,12 @@ def run_apachebench(job, plan):
                     trial_metrics.append(metrics)
                     event(
                         job,
-                        'ApacheBench run',
+                        f'{label} run',
                         f'Completed {settings["name"]} trial {trial} at '
                         f'{metrics["requests_per_second"]:.2f} requests/second.',
                     )
                 metadata = {
-                    **apachebench_metadata(workload_id, options),
+                    **driver.metadata(workload_id, options),
                     **common_metadata,
                     'measured_trials': options.trials,
                 }
@@ -5385,14 +5463,14 @@ def run_apachebench(job, plan):
                     'duration_seconds': round(time.monotonic() - started, 2),
                     'status': 'completed',
                     'metadata': metadata,
-                    'metrics': aggregate_apachebench_trials(trial_metrics),
+                    'metrics': driver.aggregate_trial_metrics(trial_metrics),
                     'trial_metrics': trial_metrics,
                     'output': '\n\n'.join(trial_outputs),
                     'setup_output': '\n\n'.join(diagnostics),
                 })
                 event(
                     job,
-                    'ApacheBench complete',
+                    f'{label} complete',
                     f'Completed {result_name} across {options.trials} measured '
                     'trials.',
                 )
@@ -5404,14 +5482,14 @@ def run_apachebench(job, plan):
                     )
                 failure_metadata = {
                     **common_metadata,
-                    **apachebench_metadata(workload_id, options),
+                    **driver.metadata(workload_id, options),
                     'measured_trials': options.trials,
                     'completed_trials': len(trial_metrics),
                 }
                 job['results'].append({
                     'id': result_id,
                     'name': result_name,
-                    'command': '\n'.join(commands) or 'ApacheBench lifecycle',
+                    'command': '\n'.join(commands) or f'{label} lifecycle',
                     'started_at': started_at,
                     'duration_seconds': round(time.monotonic() - started, 2),
                     'status': 'failed',
@@ -5424,7 +5502,7 @@ def run_apachebench(job, plan):
                 failures.append(f'{result_name}: {exc}')
                 event(
                     job,
-                    'ApacheBench warning',
+                    f'{label} warning',
                     f'{result_name} failed; continuing with the remaining '
                     f'selected connection modes. {exc}',
                 )
@@ -5434,27 +5512,27 @@ def run_apachebench(job, plan):
             failure_output += f'\n\n--- failure ---\n{exc.output[-20000:]}'
         existing_ids = {result.get('id') for result in job.get('results', [])}
         for workload_id in selected_workloads:
-            result_id = f'apachebench_{workload_id}'
+            result_id = f'{benchmark_id}_{workload_id}'
             if result_id in existing_ids:
                 continue
-            settings = apachebench_workload(workload_id)
-            name = f'ApacheBench — {settings["name"]}'
+            settings = driver.workload(workload_id)
+            name = f'{label} — {settings["name"]}'
             job['results'].append({
                 'id': result_id,
                 'name': name,
-                'command': 'ApacheBench HTTP server lifecycle',
+                'command': f'{label} HTTP server lifecycle',
                 'started_at': now(),
                 'duration_seconds': 0,
                 'status': 'failed',
                 'error': str(exc),
                 'metadata': {
-                    **apachebench_metadata(workload_id, options),
+                    **driver.metadata(workload_id, options),
                     **common_metadata,
                 },
                 'output': failure_output,
             })
             failures.append(f'{name}: {exc}')
-        event(job, 'ApacheBench warning', f'ApacheBench setup failed. {exc}')
+        event(job, f'{label} warning', f'{label} setup failed. {exc}')
     finally:
         retain_httpd = (
             httpd_ready
@@ -5464,7 +5542,7 @@ def run_apachebench(job, plan):
         if retain_httpd:
             event(
                 job,
-                'ApacheBench retained',
+                f'{label} retained',
                 'Apache HTTP Server remains active for follow-up testing on '
                 'the retained benchmark VM.',
             )
@@ -5477,13 +5555,13 @@ def run_apachebench(job, plan):
                 )
                 event(
                     job,
-                    'ApacheBench teardown',
+                    f'{label} teardown',
                     'Stopped Apache HTTP Server after the benchmark.',
                 )
             except Exception as exc:
                 event(
                     job,
-                    'ApacheBench teardown warning',
+                    f'{label} teardown warning',
                     f'Unable to stop Apache HTTP Server: {exc}',
                 )
     return tuple(failures)
@@ -5988,6 +6066,7 @@ def run_aws_benchmarks(job, plan):
     """Run the selected supported benchmarks on Amazon Linux 2023."""
     selected = expanded_benchmark_ids(plan)
     apachebench_failures = ()
+    hey_failures = ()
     iperf3_protocols = selected_iperf3_protocols(plan)
     amazon_linux.validate_benchmark_selection(
         plan.benchmarks,
@@ -6174,9 +6253,11 @@ def run_aws_benchmarks(job, plan):
         )
     if 'apachebench' in plan.benchmarks:
         apachebench_failures = run_apachebench(job, plan)
+    if 'hey' in plan.benchmarks:
+        hey_failures = run_hey(job, plan)
     if 'deathstarbench' in plan.benchmarks:
         run_deathstarbench(job, plan)
-    deferred_failures = (*phoronix_failures, *apachebench_failures)
+    deferred_failures = (*phoronix_failures, *apachebench_failures, *hey_failures)
     if deferred_failures:
         raise RuntimeError(
             'One or more independently selected benchmark workloads failed '
@@ -6195,6 +6276,7 @@ def run_rocky_linux_benchmarks(
     """Run the shared strict Rocky Linux 9 benchmark contract."""
     selected = expanded_benchmark_ids(plan)
     apachebench_failures = ()
+    hey_failures = ()
     iperf3_protocols = selected_iperf3_protocols(plan)
     phoronix_profiles = (
         plan.phoronix.profiles if 'phoronix' in plan.benchmarks else ()
@@ -6376,9 +6458,11 @@ def run_rocky_linux_benchmarks(
         )
     if 'apachebench' in plan.benchmarks:
         apachebench_failures = run_apachebench(job, plan)
+    if 'hey' in plan.benchmarks:
+        hey_failures = run_hey(job, plan)
     if 'deathstarbench' in plan.benchmarks:
         run_deathstarbench(job, plan)
-    deferred_failures = (*phoronix_failures, *apachebench_failures)
+    deferred_failures = (*phoronix_failures, *apachebench_failures, *hey_failures)
     if deferred_failures:
         raise RuntimeError(
             'One or more independently selected benchmark workloads failed '
@@ -6431,7 +6515,7 @@ def run_benchmarks(job, plan):
             if isinstance(options, dict)
             else getattr(options, 'runtime_id', None),
         )
-        image_lock = load_run_distributed_image_lock(RUNS, job['id'])
+        image_lock = load_run_distributed_image_lock(RUNS, job['id'], workload=distributed_workload(plan))
         return run_public_distributed_deathstarbench(
             job,
             plan,
@@ -6455,6 +6539,7 @@ def run_benchmarks(job, plan):
 def run_oci_benchmarks(job, plan):
     selected = expanded_benchmark_ids(plan)
     apachebench_failures = ()
+    hey_failures = ()
     readiness_hosts = [f'yum.{plan.region}.oci.oraclecloud.com']
     core_result_ids = {
         'sysbench_cpu',
@@ -6613,9 +6698,11 @@ def run_oci_benchmarks(job, plan):
         )
     if 'apachebench' in plan.benchmarks:
         apachebench_failures = run_apachebench(job, plan)
+    if 'hey' in plan.benchmarks:
+        hey_failures = run_hey(job, plan)
     if 'deathstarbench' in plan.benchmarks:
         run_deathstarbench(job, plan)
-    deferred_failures = (*phoronix_failures, *apachebench_failures)
+    deferred_failures = (*phoronix_failures, *apachebench_failures, *hey_failures)
     if deferred_failures:
         raise RuntimeError(
             'One or more independently selected benchmark workloads failed '

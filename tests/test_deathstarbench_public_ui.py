@@ -52,7 +52,7 @@ class DeathStarBenchPublicUiTests(unittest.TestCase):
             DISTRIBUTED_TIERED_PROFILE.released,
         )
         self.assertEqual(distributed['node_count'], 5)
-        self.assertEqual(distributed['workloads'], ['social_network'])
+        self.assertEqual(distributed['workloads'], ['social_network', 'hotel_reservation', 'media_microservices'])
         self.assertEqual(
             distributed['roles'],
             ['control', 'database', 'cache', 'application', 'load_generator'],
@@ -94,14 +94,12 @@ class DeathStarBenchPublicUiTests(unittest.TestCase):
         self.assertIn('DISTRIBUTED_DEATHSTAR_TOPOLOGY_ID', JAVASCRIPT)
         self.assertIn('deathstarAvailabilityWarning', INDEX)
 
-    def test_distributed_selection_enforces_exclusive_social_network_plan(self):
+    def test_distributed_selection_enforces_exclusive_benchmark_plan(self):
         self.assertIn("input.value === 'deathstarbench'", JAVASCRIPT)
         self.assertIn('supportedLlmBenchmarks.has(input.value) && !distributed', JAVASCRIPT)
-        self.assertIn("$('#deathstarWorkload').value = 'social_network'", JAVASCRIPT)
         self.assertIn("if (newlySelected) $('#deathstarConnections').value = '4'", JAVASCRIPT)
         self.assertIn("$('#additional').checked = false", JAVASCRIPT)
         self.assertIn("$('#additional').disabled = distributed", JAVASCRIPT)
-        self.assertIn("field.id === 'deathstarWorkload'", JAVASCRIPT)
         self.assertIn('Application ${baseShapeLabel}', JAVASCRIPT)
         self.assertIn("distributed && currentProvider() === 'oci'", JAVASCRIPT)
 
@@ -200,7 +198,7 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(values['searchable'])
 
     def test_changed_scripts_are_cache_busted(self):
-        self.assertIn('/static/app.js?v=37', INDEX)
+        self.assertIn('/static/app.js?v=38', INDEX)
         self.assertIn('/static/history.js?v=18', HISTORY_HTML)
 
 

@@ -49,6 +49,16 @@ def released_image_lock():
 
 
 class PublicContractTests(unittest.TestCase):
+    def test_media_exact_profile_is_valid_and_recoverable_on_all_providers(self):
+        for provider in ('oci', 'aws', 'azure', 'gcp'):
+            with self.subTest(provider=provider):
+                plan = distributed_plan(provider)
+                plan['deathstarbench']['workload'] = 'media_microservices'
+                self.assertEqual(public.validate_distributed_deathstarbench_plan(plan), provider)
+                self.assertTrue(main._exact_distributed_candidate_plan({'plan': plan}, provider))
+                plan['deathstarbench']['workload'] = 'unknown_workload'
+                self.assertFalse(main._exact_distributed_candidate_plan({'plan': plan}, provider))
+
     def test_exact_predicate_and_validator(self):
         for provider in ('aws', 'azure', 'gcp', 'oci'):
             with self.subTest(provider=provider):
@@ -65,9 +75,9 @@ class PublicContractTests(unittest.TestCase):
             public.validate_distributed_deathstarbench_plan(mixed)
 
         wrong_workload = distributed_plan()
-        wrong_workload['deathstarbench']['workload'] = 'hotel_reservation'
+        wrong_workload['deathstarbench']['workload'] = 'unknown_workload'
         self.assertTrue(public.is_distributed_deathstarbench_plan(wrong_workload))
-        with self.assertRaisesRegex(ValueError, 'exact Social Network'):
+        with self.assertRaisesRegex(ValueError, 'requires Social Network or Hotel'):
             public.validate_distributed_deathstarbench_plan(wrong_workload)
 
         compact = distributed_plan()
@@ -514,9 +524,9 @@ class MainIntegrationTests(unittest.TestCase):
                 ],
                 [('distributed_tiered_v1', 'k3s_v1')],
             )
-            self.assertEqual(
+            self.assertCountEqual(
                 [item['id'] for item in document['deathstarbench_workloads']],
-                ['social_network'],
+                list(document['deathstarbench_topologies'][0]['workloads']),
             )
             return document['deathstarbench_topologies'][0]
 
@@ -569,7 +579,7 @@ class MainIntegrationTests(unittest.TestCase):
         ):
             result = main.provision(job, distributed_plan('azure'))
         self.assertEqual(result, {'distributed': True})
-        load_lock.assert_called_once_with(main.RUNS, job['id'])
+        load_lock.assert_called_once_with(main.RUNS, job['id'], workload='social_network')
         distributed.assert_called_once()
         compact.assert_not_called()
 
@@ -592,7 +602,7 @@ class MainIntegrationTests(unittest.TestCase):
         ):
             result = main.run_benchmarks(job, distributed_plan('gcp'))
         self.assertEqual(result, {'status': 'completed'})
-        load_lock.assert_called_once_with(main.RUNS, job['id'])
+        load_lock.assert_called_once_with(main.RUNS, job['id'], workload='social_network')
         self.assertIs(distributed.call_args.args[2], run_lock)
         compact.assert_not_called()
 
@@ -685,6 +695,12 @@ class MainIntegrationTests(unittest.TestCase):
 
 class CreateJobSnapshotTests(unittest.IsolatedAsyncioTestCase):
     async def test_snapshot_precedes_task_creation_under_the_run_lease(self):
+        await self._assert_snapshot_precedes_task('social_network', public.IMAGE_LOCK_FILENAME)
+
+    async def test_media_snapshot_precedes_task_creation_under_the_run_lease(self):
+        await self._assert_snapshot_precedes_task('media_microservices', 'deathstarbench-media-image-lock.json')
+
+    async def _assert_snapshot_precedes_task(self, workload, image_lock_filename):
         class Lease:
             def __init__(self):
                 self.release = Mock()
@@ -709,23 +725,23 @@ class CreateJobSnapshotTests(unittest.IsolatedAsyncioTestCase):
             deathstarbench={
                 'topology_id': 'distributed_tiered_v1',
                 'runtime_id': 'k3s_v1',
-                'workload': 'social_network',
+                'workload': workload,
             },
         )
         order = []
         task = Task()
         lease = Lease()
 
-        def snapshot(run_directory):
+        def snapshot(run_directory, **kwargs):
             order.append('snapshot')
-            return public.snapshot_distributed_image_lock(run_directory)
+            return public.snapshot_distributed_image_lock(run_directory, **kwargs)
 
         def create_task(coroutine):
             order.append('task')
             coroutine.close()
             return task
 
-        def preflight():
+        def preflight(**kwargs):
             order.append('preflight')
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -771,7 +787,7 @@ class CreateJobSnapshotTests(unittest.IsolatedAsyncioTestCase):
                         (
                             Path(temporary)
                             / ('a' * 12)
-                            / public.IMAGE_LOCK_FILENAME
+                            / image_lock_filename
                         ).is_file()
                     )
                 finally:

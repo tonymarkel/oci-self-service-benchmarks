@@ -146,7 +146,7 @@ class DeathStarBenchOptionsTests(unittest.TestCase):
         self.assertEqual(plan.memory_gb, 8)
         self.assertEqual(plan.deathstarbench.connections, 1)
 
-    def test_distributed_plan_is_social_network_only_and_exclusive(self):
+    def test_distributed_plan_accepts_known_workloads_and_is_exclusive(self):
         options = DeathStarBenchOptions(
             topology_id='distributed_tiered_v1',
             runtime_id='k3s_v1',
@@ -165,6 +165,10 @@ class DeathStarBenchOptionsTests(unittest.TestCase):
             plan.oci_defined_tags,
             {'CostCenter': {'Department': 'Engineering'}},
         )
+        for workload in ('hotel_reservation', 'media_microservices'):
+            selected = valid_plan(deathstarbench=options.model_copy(update={'workload': workload}),
+                                  storage={'additional_volume': False})
+            self.assertEqual(selected.deathstarbench.workload, workload)
 
         invalid = (
             {'benchmarks': ['deathstarbench', 'stream']},
@@ -172,7 +176,7 @@ class DeathStarBenchOptionsTests(unittest.TestCase):
             {'storage': {'additional_volume': True}},
             {
                 'deathstarbench': options.model_copy(
-                    update={'workload': 'media_microservices'}
+                    update={'workload': 'unpublished_workload'}
                 ),
             },
         )

@@ -173,6 +173,7 @@ class MetricRegistryTests(unittest.TestCase):
             'sysbench_cpu', 'sysbench_memory', 'sysbench_fileio', 'stream',
             'fio', 'iperf_tcp', 'iperf_udp', 'iperf_sctp',
             'apachebench_new_connections', 'apachebench_keep_alive',
+            'hey_new_connections', 'hey_keep_alive',
             'deathstarbench', 'llama_bench',
             'phoronix_compress_7zip', 'phoronix_openssl',
             'phoronix_build_linux_kernel', 'phoronix_tinymembench',

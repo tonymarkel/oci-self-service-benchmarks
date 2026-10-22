@@ -75,6 +75,7 @@ _PROVIDERS = (
             benchmark_ids=(
                 'deathstarbench',
                 'apachebench',
+                'hey',
                 'sysbench',
                 'phoronix',
                 'stream',
@@ -101,6 +102,7 @@ _PROVIDERS = (
             benchmark_ids=(
                 'deathstarbench',
                 'apachebench',
+                'hey',
                 'sysbench',
                 'stream',
                 'phoronix',
@@ -127,6 +129,7 @@ _PROVIDERS = (
             benchmark_ids=(
                 'deathstarbench',
                 'apachebench',
+                'hey',
                 'sysbench',
                 'stream',
                 'phoronix',
@@ -153,6 +156,7 @@ _PROVIDERS = (
             benchmark_ids=(
                 'deathstarbench',
                 'apachebench',
+                'hey',
                 'sysbench',
                 'stream',
                 'phoronix',

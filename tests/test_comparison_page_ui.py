@@ -102,7 +102,7 @@ class ComparisonPageUiTests(unittest.TestCase):
                 '/static/comparison-page.js?v=1',
             ],
         )
-        self.assertIn('/static/styles.css?v=19', COMPARISON_HTML)
+        self.assertIn('/static/styles.css?v=20', COMPARISON_HTML)
         self.assertIn('All benchmark metrics.', COMPARISON_HTML)
         self.assertIn('Exact values and run details', (
             ROOT / 'app/static/comparison-page.js'

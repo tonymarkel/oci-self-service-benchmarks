@@ -527,6 +527,47 @@ class GcpDistributedDeathStarBenchLifecycleTests(unittest.TestCase):
                     self.assertEqual(len(clients['instances'].items), 5)
                     self.assertIn('gcp_distributed_candidate', restarted['resources'])
 
+    def test_hotel_uses_five_node_graph_and_exact_cleanup(self):
+        clients, _ = candidate_clients()
+        selected = candidate_plan()
+        selected['deathstarbench']['workload'] = 'hotel_reservation'
+        job = {'id': 'gcphotelflow', 'resources': {}, 'plan': selected}
+        gcp.provision_distributed_deathstarbench_candidate(
+            job, selected, public_key=PUBLIC_KEY, clients=clients,
+        )
+        self.assertEqual(len(load_role_node_inventory(job['resources']).nodes), 5)
+        with patch.object(gcp, 'RECONCILIATION_DELAY_SECONDS', 0):
+            gcp.destroy_resources(job, clients=clients)
+        self.assertEqual(job['status'], 'destroyed')
+        self.assertFalse(clients['instances'].items)
+        self.assertFalse(clients['networks'].items)
+
+    def test_media_uses_five_node_graph_and_exact_cleanup(self):
+        clients, _ = candidate_clients()
+        selected = candidate_plan()
+        selected['deathstarbench']['workload'] = 'media_microservices'
+        job = {'id': 'gcpmediaflow', 'resources': {}, 'plan': selected}
+        gcp.provision_distributed_deathstarbench_candidate(
+            job, selected, public_key=PUBLIC_KEY, clients=clients,
+        )
+        self.assertEqual(len(load_role_node_inventory(job['resources']).nodes), 5)
+        with patch.object(gcp, 'RECONCILIATION_DELAY_SECONDS', 0):
+            gcp.destroy_resources(job, clients=clients)
+        self.assertEqual(job['status'], 'destroyed')
+        self.assertFalse(clients['instances'].items)
+        self.assertFalse(clients['networks'].items)
+
+    def test_unknown_candidate_is_rejected_before_cloud_mutation(self):
+        clients, timeline = candidate_clients()
+        selected = candidate_plan()
+        selected['deathstarbench']['workload'] = 'unknown_workload'
+        with self.assertRaisesRegex(ValueError, 'Social Network or Hotel Reservation'):
+            gcp.provision_distributed_deathstarbench_candidate(
+                {'id': 'gcpmediareject', 'resources': {}}, selected,
+                public_key=PUBLIC_KEY, clients=clients,
+            )
+        self.assertEqual(timeline, [])
+
     def test_provisions_exact_five_role_graph_and_inventory(self):
         clients, timeline = candidate_clients()
         job = {'id': 'gcpdsb01', 'resources': {}}

@@ -802,7 +802,7 @@ class AzureProvisionTests(unittest.TestCase):
         self.assertEqual(resources['local_nvme_total_size_gb'], 110)
 
     def test_each_web_benchmark_uses_standard_d2as_v7_loadgen(self):
-        for benchmark in ('apachebench', 'deathstarbench'):
+        for benchmark in ('apachebench', 'hey', 'deathstarbench'):
             with self.subTest(benchmark=benchmark):
                 clients = fake_clients()
                 plan = full_plan()

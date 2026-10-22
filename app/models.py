@@ -27,6 +27,7 @@ LEGACY_BASELINE_COMPONENTS = ('sysbench', 'stream', 'fio')
 SUPPORTED_BENCHMARKS = frozenset({
     'deathstarbench',
     'apachebench',
+    'hey',
     'sysbench',
     'stream',
     'fio',
@@ -263,6 +264,35 @@ class ApacheBenchOptions(BaseModel):
         return self
 
 
+class HeyOptions(BaseModel):
+    workloads: list[Literal['new_connections', 'keep_alive']] = Field(
+        default_factory=lambda: ['new_connections', 'keep_alive']
+    )
+    request_count: int = Field(500000, ge=100, le=1000000)
+    concurrency: int = Field(100, ge=1, le=10000)
+    response_size_kib: int = Field(64, ge=1, le=1024)
+    warmup_requests: int = Field(10000, ge=0, le=1000000)
+    trials: int = Field(3, ge=1, le=10)
+
+    @model_validator(mode='after')
+    def validate_options(self):
+        if len(self.workloads) != len(set(self.workloads)):
+            raise ValueError('hey connection modes must be unique.')
+        if self.concurrency > self.request_count:
+            raise ValueError(
+                'hey concurrency cannot exceed the measured request '
+                'count.'
+            )
+        if self.request_count % self.concurrency:
+            raise ValueError('hey request count must be evenly divisible by concurrency.')
+        if self.warmup_requests:
+            if self.warmup_requests < 100:
+                raise ValueError('hey warm-up requires at least 100 requests, or zero to skip.')
+            if self.warmup_requests % min(self.concurrency, self.warmup_requests):
+                raise ValueError('hey warm-up count must be evenly divisible by concurrency.')
+        return self
+
+
 class SysbenchOptions(BaseModel):
     workloads: list[Literal['cpu', 'memory', 'fileio']] = Field(
         default_factory=lambda: ['cpu']
@@ -329,6 +359,7 @@ class BenchmarkPlan(BaseModel):
     apachebench: ApacheBenchOptions = Field(
         default_factory=ApacheBenchOptions
     )
+    hey: HeyOptions = Field(default_factory=HeyOptions)
     sysbench: SysbenchOptions = Field(default_factory=SysbenchOptions)
     iperf3: Iperf3Options = Field(default_factory=Iperf3Options)
     phoronix: PhoronixOptions = Field(default_factory=PhoronixOptions)
@@ -444,6 +475,8 @@ class BenchmarkPlan(BaseModel):
             raise ValueError(
                 'Select at least one ApacheBench connection mode.'
             )
+        if 'hey' in self.benchmarks and not self.hey.workloads:
+            raise ValueError('Select at least one hey connection mode.')
         sysbench_fileio_selected = (
             'sysbench_fileio' in self.benchmarks
             or (

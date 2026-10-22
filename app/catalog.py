@@ -6,6 +6,7 @@ from .deathstarbench_contract import (
 BENCHMARKS = [
     {"id": "deathstarbench", "category": "Comprehensive", "name": "DeathStarBench", "description": "Runs Social Network, experimental Hotel Reservation, or experimental Media Microservices across a five-VM K3s topology with separate application, database, cache, control, and load-generator roles.", "requires_data": False},
     {"id": "apachebench", "category": "Comprehensive", "name": "ApacheBench", "description": "Measures Apache HTTP Server throughput and latency over the private VCN from a separate load-generator VM.", "requires_data": False},
+    {"id": "hey", "category": "Comprehensive", "name": "hey", "description": "Measures HTTP/1.1 Apache HTTP Server throughput and latency over the private VCN from a separate load-generator VM.", "requires_data": False},
     {"id": "sysbench", "category": "Comprehensive", "name": "Sysbench", "description": "Runs one or more selectable CPU, memory, and file I/O workloads."},
     {"id": "phoronix", "category": "Comprehensive", "name": "Phoronix Test Suite", "description": "Runs one or more selectable, pinned OpenBenchmarking CPU and memory profiles.", "requires_data": False},
     {"id": "stream", "category": "Memory", "name": "STREAM", "description": "Sustainable memory bandwidth (Copy, Scale, Add, Triad)."},

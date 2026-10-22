@@ -948,7 +948,7 @@ def _selected_web_benchmarks(plan: Any) -> tuple[str, ...]:
     selected = set(_value(plan, 'benchmarks', ()) or ())
     return tuple(
         benchmark
-        for benchmark in ('apachebench', 'deathstarbench')
+        for benchmark in ('apachebench', 'hey', 'deathstarbench')
         if benchmark in selected
     )
 
@@ -2235,7 +2235,7 @@ def _firewall_resource(
     elif role == 'web-firewall':
         selected = set(str(item) for item in web_benchmarks)
         ports = []
-        if 'apachebench' in selected:
+        if {'apachebench', 'hey'} & selected:
             ports.append('80')
         if 'deathstarbench' in selected:
             ports.extend(('5000', '8080'))
@@ -4389,7 +4389,7 @@ def _verify_cleanup_resources(
     protocols = tuple(resources.get('gcp_iperf3_protocols') or ())
     web_benchmarks = set(resources.get('gcp_web_benchmarks') or ())
     web_ports = set()
-    if 'apachebench' in web_benchmarks:
+    if {'apachebench', 'hey'} & set(web_benchmarks):
         web_ports.add('80')
     if 'deathstarbench' in web_benchmarks:
         web_ports.update(('5000', '8080'))

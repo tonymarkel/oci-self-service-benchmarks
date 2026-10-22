@@ -1,4 +1,6 @@
+import os
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -67,11 +69,54 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn('node-version: "22"', WORKFLOW)
 
     def test_workflow_has_bounded_concurrency_and_one_stable_required_check(self):
-        self.assertIn('cancel-in-progress: true', WORKFLOW)
-        self.assertIn('timeout-minutes: 15', WORKFLOW)
-        self.assertIn('name: Required CI', WORKFLOW)
-        self.assertIn('TEST_RESULT: ${{ needs.test.result }}', WORKFLOW)
-        self.assertIn('run: test "$TEST_RESULT" = "success"', WORKFLOW)
+        concurrency = WORKFLOW_DATA['concurrency']
+        self.assertIs(concurrency['cancel-in-progress'], True)
+        self.assertIn('github.workflow', concurrency['group'])
+        self.assertIn('github.event.pull_request.number', concurrency['group'])
+        self.assertIn('github.ref', concurrency['group'])
+
+        jobs = WORKFLOW_DATA['jobs']
+        for job_name, job in jobs.items():
+            with self.subTest(job=job_name):
+                timeout = job['timeout-minutes']
+                self.assertIsInstance(timeout, int)
+                self.assertGreater(timeout, 0)
+                self.assertLessEqual(timeout, 20)
+
+        required_jobs = [
+            job for job in jobs.values() if job.get('name') == 'Required CI'
+        ]
+        self.assertEqual(len(required_jobs), 1)
+        required = required_jobs[0]
+        self.assertEqual(required['if'], 'always()')
+        self.assertEqual(set(required['needs']), {'test', 'candidate-artifacts'})
+        self.assertNotIn('matrix', required.get('strategy', {}))
+
+    def test_required_check_succeeds_only_when_all_dependencies_succeed(self):
+        step, = WORKFLOW_DATA['jobs']['required']['steps']
+        self.assertEqual(step['env'], {
+            'TEST_RESULT': '${{ needs.test.result }}',
+            'ARTIFACT_RESULT': '${{ needs.candidate-artifacts.result }}',
+        })
+        results = ('success', 'failure', 'cancelled', 'skipped')
+        for test_result in results:
+            for artifact_result in results:
+                with self.subTest(test=test_result, artifacts=artifact_result):
+                    completed = subprocess.run(
+                        ['bash', '-e', '-c', step['run']],
+                        env={
+                            **os.environ,
+                            'TEST_RESULT': test_result,
+                            'ARTIFACT_RESULT': artifact_result,
+                        },
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    self.assertEqual(
+                        completed.returncode == 0,
+                        test_result == 'success' and artifact_result == 'success',
+                    )
 
     def test_shared_check_script_runs_every_credential_free_check(self):
         expected_commands = (

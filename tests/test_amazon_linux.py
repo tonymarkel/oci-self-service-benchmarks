@@ -456,6 +456,7 @@ class AmazonLinuxValidationTests(unittest.TestCase):
         amazon_linux.validate_benchmark_selection(
             {
                 'apachebench',
+                'hey',
                 'deathstarbench',
                 'sysbench',
                 'stream',

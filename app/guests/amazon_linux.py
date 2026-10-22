@@ -21,6 +21,7 @@ SSH_USER = 'ec2-user'
 SUPPORTED_ARCHITECTURES = frozenset({'x86_64', 'aarch64'})
 SUPPORTED_BENCHMARKS = frozenset({
     'apachebench',
+    'hey',
     'deathstarbench',
     'sysbench',
     'stream',

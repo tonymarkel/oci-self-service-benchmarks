@@ -8,6 +8,7 @@ let phoronixProfiles = [];
 let deathstarWorkloads = [];
 let deathstarTopologies = [];
 let apachebenchWorkloads = [];
+let heyWorkloads = [];
 let currentJobPrivateKey = '';
 let providerBootstrap = {};
 let providerDefinitions = new Map();
@@ -34,6 +35,14 @@ const sysbenchDefaults = { workloads: ['cpu'] };
 const iperf3Defaults = { protocols: ['tcp'] };
 const phoronixDefaults = { profiles: ['compress_7zip'] };
 const apachebenchDefaults = {
+    workloads: ['new_connections', 'keep_alive'],
+    request_count: 500000,
+    concurrency: 100,
+    response_size_kib: 64,
+    warmup_requests: 10000,
+    trials: 3,
+};
+const heyDefaults = {
     workloads: ['new_connections', 'keep_alive'],
     request_count: 500000,
     concurrency: 100,
@@ -222,6 +231,7 @@ function applyProviderBenchmarkSupport() {
     toggleIperf3Settings();
     togglePhoronixSettings();
     toggleApachebenchSettings();
+    toggleHeySettings();
     toggleDeathstarSettings();
     $('#additional').disabled = distributed;
     updateDeathstarTopologyPresentation();
@@ -403,6 +413,10 @@ function applyProviderUi() {
     $('#apachebenchDeploymentHint').textContent =
         'The benchmark VM serves fixed-size responses while a separate fixed-size x86 ' +
         `load-generator VM runs Apache HTTP Server Benchmarking Tool traffic over a ${privateNetwork}. ` +
+        'Concurrency cannot exceed the measured request count.';
+    $('#heyDeploymentHint').textContent =
+        'The benchmark VM serves fixed-size responses while a separate fixed-size x86 ' +
+        `load-generator VM runs hey HTTP/1.1 traffic over a ${privateNetwork}. ` +
         'Concurrency cannot exceed the measured request count.';
     $('#phoronixCompatibilityHint').textContent = aws
         ? 'Profiles are pinned and limited to tests validated for both x86_64 and Arm64 Amazon Linux 2023 instances.'
@@ -758,6 +772,29 @@ function toggleApachebenchSettings() {
     });
 }
 
+function setHeyValues(options = heyDefaults) {
+    const workloads = Array.isArray(options?.workloads)
+        ? options.workloads
+        : heyDefaults.workloads;
+    $$('#heyWorkloads input[data-kind="hey-workload"]').forEach(input => {
+        input.checked = workloads.includes(input.value);
+    });
+    $('#heyRequestCount').value = options.request_count ?? heyDefaults.request_count;
+    $('#heyConcurrency').value = options.concurrency ?? heyDefaults.concurrency;
+    $('#heyResponseSize').value = options.response_size_kib ?? heyDefaults.response_size_kib;
+    $('#heyWarmupRequests').value = options.warmup_requests ?? heyDefaults.warmup_requests;
+    $('#heyTrials').value = options.trials ?? heyDefaults.trials;
+}
+
+function toggleHeySettings() {
+    const checkbox = $('input[data-kind="bench"][value="hey"]');
+    const selected = Boolean(checkbox?.checked);
+    $('#heySettings').hidden = !selected;
+    $$('#heySettings input').forEach(field => {
+        field.disabled = !selected;
+    });
+}
+
 function renderCatalog(catalog) {
     $('#benchmarks').innerHTML = catalog.benchmarks.map(benchmark =>
         `<label><input type="checkbox" value="${benchmark.id}" data-kind="bench"> ` +
@@ -801,6 +838,14 @@ function renderCatalog(catalog) {
     ).join('');
     setApachebenchValues();
 
+    heyWorkloads = catalog.hey_workloads || [];
+    $('#heyWorkloads').innerHTML = heyWorkloads.map(workload =>
+        `<label><input type="checkbox" value="${escape(workload.id)}" ` +
+        `data-kind="hey-workload"> ` +
+        `<span>${escape(workload.name)}<small>${escape(workload.description)}</small></span></label>`,
+    ).join('');
+    setHeyValues();
+
     deathstarTopologies = selectableDeathstarTopologies(catalog);
     $('#deathstarTopology').innerHTML = deathstarTopologies.map(topology =>
         `<option value="${escape(topology.topology_id)}">${escape(topology.name)} — ` +
@@ -821,7 +866,9 @@ function renderCatalog(catalog) {
     const phoronixCheckbox = $('input[data-kind="bench"][value="phoronix"]');
     if (phoronixCheckbox) phoronixCheckbox.addEventListener('change', togglePhoronixSettings);
     const apachebenchCheckbox = $('input[data-kind="bench"][value="apachebench"]');
+    const heyCheckbox = $('input[data-kind="bench"][value="hey"]');
     if (apachebenchCheckbox) apachebenchCheckbox.addEventListener('change', toggleApachebenchSettings);
+    if (heyCheckbox) heyCheckbox.addEventListener('change', toggleHeySettings);
     const deathstarCheckbox = $('input[data-kind="bench"][value="deathstarbench"]');
     if (deathstarCheckbox) {
         deathstarCheckbox.addEventListener('change', handleDeathstarSelectionChange);
@@ -833,6 +880,7 @@ function renderCatalog(catalog) {
     toggleIperf3Settings();
     togglePhoronixSettings();
     toggleApachebenchSettings();
+    toggleHeySettings();
     toggleDeathstarSettings();
     updateDeathstarTopologyPresentation();
 }
@@ -1238,6 +1286,42 @@ function apachebenchOptionsFromPlan(plan) {
     };
 }
 
+function heyOptions(selected) {
+    if (!selected) {
+        return {
+            ...heyDefaults,
+            workloads: [...heyDefaults.workloads],
+        };
+    }
+    return {
+        workloads: $$('input[data-kind="hey-workload"]:checked')
+            .map(input => input.value),
+        request_count: Number($('#heyRequestCount').value),
+        concurrency: Number($('#heyConcurrency').value),
+        response_size_kib: Number($('#heyResponseSize').value),
+        warmup_requests: Number($('#heyWarmupRequests').value),
+        trials: Number($('#heyTrials').value),
+    };
+}
+
+function heyOptionsFromPlan(plan) {
+    if (!(plan.benchmarks || []).includes('hey')) {
+        return {
+            ...heyDefaults,
+            workloads: [...heyDefaults.workloads],
+        };
+    }
+    const saved = plan.hey || {};
+    const workloads = Array.isArray(saved.workloads) ? saved.workloads : [];
+    return {
+        ...heyDefaults,
+        ...saved,
+        workloads: workloads.length
+            ? workloads
+            : [...heyDefaults.workloads],
+    };
+}
+
 $('#planForm').addEventListener('submit', async event => {
     event.preventDefault();
     if (discoveryLoading) {
@@ -1274,6 +1358,7 @@ $('#planForm').addEventListener('submit', async event => {
     const iperf3 = iperf3Options(selectedBenchmarks.includes('iperf3'));
     const phoronix = phoronixOptions(selectedBenchmarks.includes('phoronix'));
     const apachebench = apachebenchOptions(selectedBenchmarks.includes('apachebench'));
+    const hey = heyOptions(selectedBenchmarks.includes('hey'));
     const deathstarbench = deathstarOptions(selectedBenchmarks.includes('deathstarbench'));
     const distributedDeathstar = (
         selectedBenchmarks.includes('deathstarbench')
@@ -1310,6 +1395,29 @@ $('#planForm').addEventListener('submit', async event => {
         alert('ApacheBench concurrency cannot exceed the measured request count.');
         return;
     }
+    if (selectedBenchmarks.includes('hey') && !hey.workloads.length) {
+        alert('Select at least one hey connection mode.');
+        return;
+    }
+    if (
+        selectedBenchmarks.includes('hey')
+        && hey.concurrency > hey.request_count
+    ) {
+        alert('hey concurrency cannot exceed the measured request count.');
+        return;
+    }
+    if (selectedBenchmarks.includes('hey')) {
+        if (hey.request_count % hey.concurrency) {
+            alert('hey request count must be evenly divisible by concurrency.');
+            return;
+        }
+        if (hey.warmup_requests && (hey.warmup_requests < 100
+            || hey.warmup_requests % Math.min(hey.concurrency, hey.warmup_requests))) {
+            alert('hey warm-up must be zero, or at least 100 requests evenly divisible by its concurrency.');
+            return;
+        }
+    }
+
     if (
         selectedBenchmarks.includes('sysbench')
         && sysbench.workloads.includes('fileio')
@@ -1380,6 +1488,7 @@ $('#planForm').addEventListener('submit', async event => {
         iperf3,
         phoronix,
         apachebench,
+        hey,
         deathstarbench,
         oci_defined_tags: ociDefinedTags,
         destroy_after_completion: $('#destroy').checked,
@@ -1700,6 +1809,7 @@ async function resetToPlan() {
     setIperf3Values();
     setPhoronixValues();
     setApachebenchValues();
+    setHeyValues();
     setDeathstarValues();
     $('#deathstarLegacyPlanWarning').hidden = true;
     $('#ociDefinedTags').value = '{}';
@@ -1707,6 +1817,7 @@ async function resetToPlan() {
     toggleIperf3Settings();
     togglePhoronixSettings();
     toggleApachebenchSettings();
+    toggleHeySettings();
     toggleDeathstarSettings();
     applySshDefaults();
     $('#shapeMeta').textContent = '';
@@ -1785,12 +1896,14 @@ async function restorePlan(plan) {
     setIperf3Values(iperf3OptionsFromPlan(plan));
     setPhoronixValues(phoronixOptionsFromPlan(plan));
     setApachebenchValues(apachebenchOptionsFromPlan(plan));
+    setHeyValues(heyOptionsFromPlan(plan));
     restoreDeathstarSelection(plan);
     applyProviderBenchmarkSupport();
     toggleSysbenchSettings();
     toggleIperf3Settings();
     togglePhoronixSettings();
     toggleApachebenchSettings();
+    toggleHeySettings();
     toggleDeathstarSettings();
     $('#key').value = '';
     $('#publicKey').value = '';

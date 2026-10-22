@@ -107,7 +107,7 @@ DATA_VOLUME_CONTRACT_KEYS = (
     'aws_data_volume_throughput_mibps',
 )
 PEER_BOOT_SIZE_GB = 20
-WEB_BENCHMARKS = frozenset({'apachebench', 'deathstarbench'})
+WEB_BENCHMARKS = frozenset({'apachebench', 'hey', 'deathstarbench'})
 LOAD_GENERATOR_INSTANCE_TYPES = (
     'm7i.large',
     'm6i.large',
@@ -247,7 +247,7 @@ def _web_benchmarks(plan):
     selected = set(_value(plan, 'benchmarks', ()) or ())
     return tuple(
         benchmark
-        for benchmark in ('apachebench', 'deathstarbench')
+        for benchmark in ('apachebench', 'hey', 'deathstarbench')
         if benchmark in selected
     )
 
@@ -1215,7 +1215,7 @@ def provision(
             }],
         )
         web_permissions = []
-        if 'apachebench' in web_benchmarks:
+        if {'apachebench', 'hey'} & set(web_benchmarks):
             web_permissions.append({
                 'IpProtocol': 'tcp',
                 'FromPort': 80,

@@ -635,6 +635,8 @@ class GcpProvisionTests(unittest.TestCase):
         clients, _ = clients_and_timeline()
         cases = (
             (('apachebench',), ['80']),
+            (('hey',), ['80']),
+            (('hey', 'apachebench'), ['80']),
             (('deathstarbench',), ['5000', '8080']),
             (
                 ('apachebench', 'deathstarbench'),

@@ -84,6 +84,7 @@ class RockyLinuxGuestContractTests(unittest.TestCase):
         rocky_linux.validate_benchmark_selection(
             [
                 'apachebench',
+                'hey',
                 'deathstarbench',
                 'sysbench',
                 'stream',

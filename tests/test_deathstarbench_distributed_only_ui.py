@@ -49,12 +49,15 @@ UI_FUNCTIONS = (
     'restoreDeathstarSelection',
     'toggleDeathstarSettings',
     'setApachebenchValues',
+    'setHeyValues',
     'toggleApachebenchSettings',
+    'toggleHeySettings',
     'deathstarOptions',
     'sysbenchOptionsFromPlan',
     'iperf3OptionsFromPlan',
     'phoronixOptionsFromPlan',
     'apachebenchOptionsFromPlan',
+    'heyOptionsFromPlan',
     'restorePlan',
 )
 
@@ -124,7 +127,7 @@ for (const id of [
     'deathstarWorkloadDescription', 'deathstarAvailabilityWarning',
     'deathstarDistributedWarning', 'deathstarLegacyPlanWarning',
     'ociDefinedTagsField', 'sysbenchSettings', 'iperf3Settings',
-    'phoronixSettings', 'apachebenchSettings', 'awsProfile', 'gcpProject',
+    'phoronixSettings', 'apachebenchSettings', 'heySettings', 'awsProfile', 'gcpProject',
     'azureSubscription', 'region', 'compartment', 'ad', 'fd', 'gcpZone',
     'azureZone', 'shape', 'ocpus', 'memory', 'secureBoot', 'measuredBoot',
     'tpm', 'shielded', 'bootSize', 'bootPerf', 'dataSize', 'dataPerf', 'mount',
@@ -138,7 +141,7 @@ for (const id of [
     'deathstarWarmup', 'deathstarDuration', 'deathstarThreads',
     'deathstarConnections', 'deathstarRequestRate',
 ]) add(id, {containers: ['deathstarSettings']});
-for (const value of ['deathstarbench', 'fio', 'sysbench', 'iperf3', 'phoronix', 'apachebench', 'stream']) {
+for (const value of ['deathstarbench', 'fio', 'sysbench', 'iperf3', 'phoronix', 'apachebench', 'hey', 'stream']) {
     add(`bench-${value}`, {kind: 'bench', value});
 }
 add('llm-llama_bench', {kind: 'llm', value: 'llama_bench'});
@@ -160,6 +163,14 @@ for (const id of [
     'apachebenchRequestCount', 'apachebenchConcurrency', 'apachebenchResponseSize',
     'apachebenchWarmupRequests', 'apachebenchTrials',
 ]) add(id, {containers: ['apachebenchSettings']});
+for (const value of ['new_connections', 'keep_alive']) {
+    add(`hey-${value}`, {kind: 'hey-workload', value,
+        containers: ['heyWorkloads', 'heySettings']});
+}
+for (const id of [
+    'heyRequestCount', 'heyConcurrency', 'heyResponseSize',
+    'heyWarmupRequests', 'heyTrials',
+]) add(id, {containers: ['heySettings']});
 for (const value of ['none', 'shielded', 'confidential']) add(`security-${value}`, {name: 'security', value});
 for (const value of ['paravirtualized', 'sriov']) add(`networking-${value}`, {name: 'networking', value});
 // Discovery and unrelated explanatory copy are outside this local form test.

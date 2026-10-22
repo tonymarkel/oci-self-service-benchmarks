@@ -39,6 +39,7 @@ from .llama_cpp import (
 )
 from .models import (
     ApacheBenchOptions,
+    HeyOptions,
     DEATHSTARBENCH_DEFAULT_RUNTIME_ID,
     DEATHSTARBENCH_DEFAULT_TOPOLOGY_ID,
     DeathStarBenchOptions,
@@ -342,6 +343,8 @@ METRIC_REGISTRY: dict[str, tuple[MetricSpec, ...]] = {
     ),
     'apachebench_new_connections': _APACHEBENCH_METRICS,
     'apachebench_keep_alive': _APACHEBENCH_METRICS,
+    'hey_new_connections': _APACHEBENCH_METRICS,
+    'hey_keep_alive': _APACHEBENCH_METRICS,
     'deathstarbench': (
         _spec(
             'p50_ms',
@@ -466,6 +469,7 @@ _PLAN_FIELDS = (
     'storage',
     'deathstarbench',
     'apachebench',
+    'hey',
     'sysbench',
     'iperf3',
     'phoronix',
@@ -617,6 +621,7 @@ def canonical_plan(plan: Mapping[str, Any] | object) -> dict[str, Any]:
         'storage': StorageOptions,
         'deathstarbench': DeathStarBenchOptions,
         'apachebench': ApacheBenchOptions,
+        'hey': HeyOptions,
         'sysbench': SysbenchOptions,
         'iperf3': Iperf3Options,
         'phoronix': PhoronixOptions,
@@ -1149,6 +1154,31 @@ def workload_fingerprint(
             issues.append('ApacheBench workload options are missing or invalid.')
         settings = {
             'tool': 'ApacheBench',
+            'connection_mode': mode,
+            'request_count': options.get('request_count'),
+            'concurrency': options.get('concurrency'),
+            'response_size_kib': options.get('response_size_kib'),
+            'warmup_requests': options.get('warmup_requests'),
+            'measured_trials': options.get('trials'),
+            'server_mpm': safe_metadata.get('httpd_mpm', 'event'),
+            'server_keep_alive': safe_metadata.get('httpd_keep_alive', 'On'),
+        }
+    elif result_id.startswith('hey_'):
+        mode = result_id.removeprefix('hey_')
+        options, valid = _validated_options(
+            HeyOptions,
+            safe_plan.get('hey'),
+        )
+        if mode not in {'new_connections', 'keep_alive'} or not valid:
+            issues.append('hey workload options are missing or invalid.')
+        if not safe_metadata.get('tool_version'):
+            issues.append('hey tool version is missing.')
+        settings = {
+            'tool': 'hey',
+            'tool_version': safe_metadata.get('tool_version'),
+            'http_version': 'HTTP/1.1',
+            'compression': False,
+            'follow_redirects': False,
             'connection_mode': mode,
             'request_count': options.get('request_count'),
             'concurrency': options.get('concurrency'),
@@ -2299,6 +2329,8 @@ _NAME_TO_RESULT_ID = {
     'phoronix tinymembench': 'phoronix_tinymembench',
     'apachebench new connections': 'apachebench_new_connections',
     'apachebench keep alive': 'apachebench_keep_alive',
+    'hey new connections': 'hey_new_connections',
+    'hey keep alive': 'hey_keep_alive',
 }
 
 

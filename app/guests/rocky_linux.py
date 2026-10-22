@@ -30,6 +30,7 @@ IMAGE_FAMILIES = {
 SUPPORTED_ARCHITECTURES = frozenset(IMAGE_FAMILIES)
 SUPPORTED_BENCHMARKS = frozenset({
     'apachebench',
+    'hey',
     'deathstarbench',
     'sysbench',
     'stream',

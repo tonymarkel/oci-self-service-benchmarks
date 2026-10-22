@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>Cloud Benchmark Lab</title>
-    <link rel="stylesheet" href="/static/styles.css?v=19">
+    <link rel="stylesheet" href="/static/styles.css?v=20">
 </head>
 
 <body>
@@ -279,6 +279,30 @@
                         a separate fixed-size x86 load-generator VM runs Apache HTTP Server Benchmarking Tool traffic
                         over the private cloud network. Concurrency cannot exceed the measured request count.</p>
                 </fieldset>
+                <fieldset id="heySettings" class="benchmark-settings hey-settings" hidden>
+                    <legend>hey settings</legend>
+                    <p class="hint">Choose one or both HTTP connection modes. Each mode is measured independently
+                        and appears as a separate result in the final report.</p>
+                    <p class="hint">Use 100–1,000,000 requests per trial, evenly divisible by concurrency.
+                        Warm-up must be zero or 100–1,000,000 requests, divisible by its concurrency
+                        (the smaller of concurrency and warm-up count). These limits keep hey counts and percentiles complete.</p>
+                    <div id="heyWorkloads" class="checks"></div>
+                    <div class="grid">
+                        <label>Requests per trial<input id="heyRequestCount" type="number" min="100"
+                                max="1000000" step="1" value="500000" required></label>
+                        <label>Concurrency<input id="heyConcurrency" type="number" min="1" max="10000" step="1"
+                                value="100" required></label>
+                        <label>Response size (KiB)<input id="heyResponseSize" type="number" min="1" max="1024"
+                                step="1" value="64" required></label>
+                        <label>Warm-up requests<input id="heyWarmupRequests" type="number" min="0"
+                                max="1000000" step="1" value="10000" required></label>
+                        <label>Measured trials<input id="heyTrials" type="number" min="1" max="10" step="1"
+                                value="3" required></label>
+                    </div>
+                    <p class="hint" id="heyDeploymentHint">The benchmark VM serves fixed-size responses while
+                        a separate fixed-size x86 load-generator VM runs hey HTTP/1.1 traffic
+                        over the private cloud network. Concurrency cannot exceed the measured request count.</p>
+                </fieldset>
                 <fieldset id="llmBenchmarks">
                     <legend>LLM benchmarks — CPU only</legend>
                     <div id="llm" class="checks"></div>
@@ -309,7 +333,7 @@
             <iframe id="reportFrame" class="report-frame" title="Benchmark results"></iframe>
         </section>
     </main>
-    <script src="/static/app.js?v=37"></script>
+    <script src="/static/app.js?v=38"></script>
 </body>
 
 </html>

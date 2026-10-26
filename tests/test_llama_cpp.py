@@ -1,7 +1,11 @@
 import copy
+import hashlib
 import json
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from app import llama_cpp
 
@@ -36,6 +40,51 @@ def llama_results():
 
 
 class LlamaCppCommandTests(unittest.TestCase):
+    def test_model_download_retries_with_legacy_curl_and_checks_checksum(self):
+        # Exercise the generated download shell without cloning/building llama
+        # or downloading the real model. The fake curl rejects the newer flag.
+        for first_failure in ('transfer', 'checksum'):
+            with (
+                self.subTest(first_failure=first_failure),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                model = Path(directory) / 'model.gguf'
+                with (
+                    patch.object(llama_cpp, '_MODEL_PATH', str(model)),
+                    patch.object(
+                        llama_cpp, 'MODEL_SHA256',
+                        hashlib.sha256(b'model').hexdigest(),
+                    ),
+                ):
+                    command = llama_cpp.benchmark_command(architecture='x86_64')
+                download = command.split('MODEL=', 1)[1].split(
+                    'echo "llama.cpp revision=', 1,
+                )[0]
+                setup = '''
+set -euo pipefail
+attempts=0
+sleep() { :; }
+curl() {
+    attempts=$((attempts + 1))
+    for arg in "$@"; do
+        if [ "$arg" = --retry-all-errors ]; then return 2; fi
+    done
+    if [ "$attempts" -eq 1 ]; then
+        printf corrupt > "${@: -1}"
+        return FIRST_STATUS
+    fi
+    printf model > "${@: -1}"
+}
+'''.replace('FIRST_STATUS', '7' if first_failure == 'transfer' else '0')
+                script = setup + 'MODEL=' + download + 'test "$attempts" -eq 2'
+                result = subprocess.run(
+                    ['bash', '-c', script],
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(model.read_bytes(), b'model')
+                self.assertFalse(Path(str(model) + '.part').exists())
+
     def test_architecture_probe_normalizes_only_supported_cpu_architectures(self):
         self.assertEqual(llama_cpp.architecture_command(), 'uname -m')
         self.assertEqual(llama_cpp.parse_architecture('x86_64\n'), 'x86_64')
@@ -84,6 +133,7 @@ class LlamaCppCommandTests(unittest.TestCase):
             command,
         )
         self.assertIn('-DGGML_CUDA=OFF', command)
+        self.assertIn('-DLLAMA_SUBPROCESS=OFF', command)
         self.assertIn('--n-prompt 512,2048', command)
         self.assertIn('--n-gen 128,512', command)
         self.assertIn('--repetitions 5', command)
@@ -124,6 +174,7 @@ class LlamaCppCommandTests(unittest.TestCase):
         command = llama_cpp.benchmark_command(architecture='aarch64')
 
         self.assertIn('-DGGML_NATIVE=ON', command)
+        self.assertIn('-DLLAMA_SUBPROCESS=OFF', command)
         self.assertNotIn('-DGGML_NATIVE=OFF', command)
         self.assertNotIn('-DGGML_AVX2=ON', command)
         self.assertIn(

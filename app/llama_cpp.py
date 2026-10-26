@@ -354,6 +354,9 @@ def benchmark_command(
         '-DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF '
         '-DCMAKE_C_COMPILER="$CC_PATH" '
         '-DCMAKE_CXX_COMPILER="$CXX_PATH" '
+        # Server subprocess helpers require libc APIs absent on older guests;
+        # llama-bench does not use them. Keep the pinned source unmodified.
+        '-DLLAMA_SUBPROCESS=OFF '
         '$GGML_CPU_OPTIONS -DGGML_BLAS=OFF '
         '-DGGML_CUDA=OFF -DGGML_HIP=OFF -DGGML_VULKAN=OFF '
         '-DGGML_SYCL=OFF -DGGML_METAL=OFF -DGGML_OPENCL=OFF; '
@@ -369,7 +372,9 @@ def benchmark_command(
         'if [ "$MODEL_OK" != true ]; then '
         'for attempt in $(seq 1 3); do '
         'rm -f "$MODEL.part"; '
-        f'if curl -L --fail --retry 3 --retry-all-errors '
+        # Keep compatibility with older guest curl; the outer loop retries
+        # every download/checksum failure and removes partial files first.
+        f'if curl -L --fail --retry 3 '
         f'--connect-timeout 15 --max-time 1200 '
         f'{shlex.quote(MODEL_URL)} -o "$MODEL.part" '
         '&& printf "%s  %s\\n" "$EXPECTED_MODEL_SHA256" "$MODEL.part" '
